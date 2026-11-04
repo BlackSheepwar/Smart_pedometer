@@ -38,6 +38,7 @@ add_library(task_objects OBJECT
 target_link_libraries(task_objects
     PRIVATE stm32cubemx
             app_key_cmd
+            app_level
             svc_key_logic
             dev_oled
 )

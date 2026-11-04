@@ -25,6 +25,7 @@
 #include "cmsis_os2.h"
 // 功能包含
 #include "app_key_cmd.h"
+#include "app_level.h"
 
 /*==============================================================================
  * 外部声明
@@ -46,6 +47,7 @@ extern osMessageQueueId_t KEY_EVT_QHandle;
  */
 void Task_Key_Cmd(void *argument)
 {
+    APP_Level_Init();
     key_event_msg_t msg;
 
     (void)argument;

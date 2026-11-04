@@ -26,7 +26,6 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "svc_key_logic.h"
-#include "app_level.h"
 #include "bsp_iic.h"
 #include "bsp_spi.h"
 /* USER CODE END Includes */
@@ -148,14 +147,15 @@ void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
   */
 void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
-  /* 不需要 OS 对象的初始化放这一段：此时队列/互斥量都还没创建，
-     只有状态清零与 GPIO 写，不会碰内核，也就不会在 osKernelStart()
-     之前解引用 pxCurrentTCB。 */
-  Svc_Key_Logic_Init();
-  APP_Level_Init();
+
   /* USER CODE END Init */
-  /* Create the mutex(es) */
-  /* creation of IIC_LOCK */
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* Create the semaphores(s) */
+  /* creation of UART_RX_BS */
   IIC_LOCKHandle = osMutexNew(&IIC_LOCK_attributes);
 
   /* creation of SPI_LOCK */

@@ -39,6 +39,7 @@
  */
 void Task_Key_Scan(void *argument)
 {
+    Svc_Key_Logic_Init();
     uint32_t freq         = osKernelGetTickFreq();
     uint32_t period_ticks = (freq * TASK_KEY_SCAN_PERIOD_MS) / 1000u;
     uint32_t next_tick;

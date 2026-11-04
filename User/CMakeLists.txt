@@ -42,12 +42,8 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     # BSP 层
     bsp_iic
     bsp_spi
-    # Device 层
-    dev_oled
     # Service 层
     svc_key_logic
-    # APP 层：freertos.c 的启动链里直接 include app_level.h 调 APP_Level_Init()
-    app_level
     # CubeMX
     stm32cubemx
 )
