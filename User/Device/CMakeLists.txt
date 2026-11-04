@@ -1,0 +1,88 @@
+# =============================================================================
+# Dev 层：设备抽象层
+#
+#   把"一段灯""一个按键"封装成设备，对外只暴露能力，不暴露引脚。
+#   每个模块在自己的 .c 里实例化引脚句柄与设备句柄，头文件只做 extern 声明；
+#   本层没有集中式板级文件。
+#   头文件里出现了 bsp_gpio_t 指针，所以 bsp_gpio 必须 PUBLIC 传递，
+#   否则上层拿到句柄也看不见结构体定义。
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# dev_led_bar：连在同一端口上的一段灯
+# -----------------------------------------------------------------------------
+add_library(dev_led_bar STATIC
+    Dev_LED_Bar/dev_led_bar.c
+)
+target_include_directories(dev_led_bar
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/Dev_LED_Bar
+)
+target_link_libraries(dev_led_bar
+    PRIVATE bsp_gpio
+)
+target_compile_options(dev_led_bar PRIVATE ${USER_WARN_FLAGS})
+
+# -----------------------------------------------------------------------------
+# dev_key：单个 GPIO 输入按键
+# -----------------------------------------------------------------------------
+add_library(dev_key STATIC
+    Dev_Key/dev_key.c
+)
+target_include_directories(dev_key
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/Dev_Key
+)
+target_link_libraries(dev_key
+    PRIVATE bsp_gpio
+)
+target_compile_options(dev_key PRIVATE ${USER_WARN_FLAGS})
+
+# -----------------------------------------------------------------------------
+# dev_led：单个 LED
+# -----------------------------------------------------------------------------
+add_library(dev_led STATIC
+    Dev_LED/dev_led.c
+)
+target_include_directories(dev_led
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/Dev_LED
+)
+target_link_libraries(dev_led
+    PRIVATE bsp_gpio
+)
+target_compile_options(dev_led PRIVATE ${USER_WARN_FLAGS})
+
+# -----------------------------------------------------------------------------
+# oled
+# -----------------------------------------------------------------------------
+add_library(dev_oled STATIC
+    Dev_OLED/oled.c
+    Dev_OLED/oled_extend.c
+    Dev_OLED/font.c
+)
+target_include_directories(dev_oled
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/Dev_OLED
+)
+target_link_libraries(dev_oled
+    PRIVATE bsp_iic
+)
+target_compile_options(dev_oled PRIVATE ${USER_WARN_FLAGS})
+
+# -----------------------------------------------------------------------------
+# dev_st7789：ST7789 SPI 彩屏（开窗 + 突发写像素）
+#   头文件不暴露 bsp_spi_t / bsp_gpio_t（句柄不透明），所以 bsp_spi 与
+#   bsp_gpio 都写 PRIVATE：需要它们的只有本模块的 .c。
+#   用它的层（TASK 或 LVGL 适配层）只链 dev_st7789 即可。
+# -----------------------------------------------------------------------------
+add_library(dev_st7789 STATIC
+    Dev_ST7789/dev_st7789.c
+)
+target_include_directories(dev_st7789
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/Dev_ST7789
+)
+target_link_libraries(dev_st7789
+    PRIVATE bsp_spi
+    PRIVATE bsp_gpio
+    # 只为 HAL_Delay：ST7789 的上电时序需要十余处毫秒级阻塞延时，
+    # 且分散在命令之间，只能写在 Init 内部。头文件不出现任何 HAL 类型。
+    PRIVATE stm32cubemx
+)
+target_compile_options(dev_st7789 PRIVATE ${USER_WARN_FLAGS})

@@ -1,0 +1,9 @@
+device STM32F405RG
+si SWD
+speed 4000
+connect
+erase
+loadfile build/Debug/Smart_pedometer.elf
+r
+g
+exit
