@@ -66,6 +66,7 @@ extern const bsp_gpio_t bsp_gpio_pb2;
 extern const bsp_gpio_t bsp_gpio_pb1;
 extern const bsp_gpio_t bsp_gpio_pb10;
 extern const bsp_gpio_t bsp_gpio_pb11;
+extern const bsp_gpio_t bsp_gpio_pc13;
 // SPI2 片选（LCD）
 extern const bsp_gpio_t bsp_gpio_pa8;
 // LCD 控制脚：数据/命令选择、硬复位

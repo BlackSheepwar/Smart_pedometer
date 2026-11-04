@@ -30,9 +30,10 @@
 /*==============================================================================
  * 设备句柄
  *============================================================================*/
-const dev_key_t dev_key_dec = { .gpio= &bsp_gpio_pb1,  .polarity = 0u};
-const dev_key_t dev_key_inc = { .gpio= &bsp_gpio_pb11, .polarity = 0u};
-const dev_key_t dev_key_led = { .gpio= &bsp_gpio_pb10, .polarity = 0u};
+const dev_key_t dev_key_dec   = { .gpio= &bsp_gpio_pb1,  .polarity = 0u};
+const dev_key_t dev_key_inc   = { .gpio= &bsp_gpio_pb11, .polarity = 0u};
+const dev_key_t dev_key_led   = { .gpio= &bsp_gpio_pc13, .polarity = 1u};
+const dev_key_t dev_key_color = { .gpio= &bsp_gpio_pb10, .polarity = 0u};
 
 /*==============================================================================
  * 接口实现

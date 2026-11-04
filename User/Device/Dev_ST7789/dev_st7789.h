@@ -1,6 +1,6 @@
 /**
  * @file dev_st7789.h
- * @brief 设备层：ST7789 SPI 彩屏（240×320 / RGB565，支持四向旋转）
+ * @brief 设备层：ST7789 SPI 彩屏（172×320 / RGB565，支持四向旋转）
  * @author Ricardo
  * @date 2026-11-04
  *
@@ -36,9 +36,9 @@ typedef struct dev_st7789 dev_st7789_t;
  * 外部声明
  *============================================================================*/
 /**
- * @brief 默认面板实例：240×320 竖屏，旋转为 0，无显示偏移
- * @note 240×240 的方屏要把 height 改成 240、y_offset 改成 80；
- *       改法是在 dev_st7789.c 里复制一份初始化器，再 extern 一个新实例。
+ * @brief 默认面板实例：172×320 竖屏，旋转为 0，列偏移 34
+ * @note 144×320 等其他窄屏要改 width 与 x_offset；改法是在 dev_st7789.c
+ *       里复制一份初始化器，再 extern 一个新实例。
  */
 extern const dev_st7789_t dev_st7789_0;
 
@@ -120,7 +120,7 @@ int Dev_ST7789_SetWindow(const dev_st7789_t *lcd, uint16_t x0, uint16_t y0,
  * @retval -1: 参数非法（空指针、长度为 0 或奇数、未初始化）
  * @retval -2: SPI 传输失败
  * @note 调用前必须先用 Dev_ST7789_SetWindow() 指定区域。
- *       内部按 4 KB 分块发送，整屏 240×320 共 153 600 字节，分 38 块。
+ *       内部按 4 KB 分块发送，整屏 172×320 共 110 080 字节，分 27 块。
  *       片选在整帧期间保持有效，中途不会被其他传输打断。
  */
 int Dev_ST7789_WritePixels(const dev_st7789_t *lcd, const uint8_t *data,
@@ -147,9 +147,40 @@ int Dev_ST7789_FillColor(const dev_st7789_t *lcd, uint16_t color,
  * @retval 0: 填充成功
  * @retval -1: 参数非法（句柄为空或尚未初始化）
  * @retval -2: SPI 传输失败
- * @note 240×320 全屏在 10.5 Mbit/s 下约 120 ms，只适合上电清屏或切页。
+ * @note 172×320 全屏在 10.5 Mbit/s 下约 85 ms，只适合上电清屏或切页。
  */
 int Dev_ST7789_FillScreen(const dev_st7789_t *lcd, uint16_t color);
+
+/**
+ * @brief 测试用：整屏填红（RGB565 0xF800）
+ * @param lcd 面板句柄，不能为 NULL
+ * @retval 0: 成功
+ * @retval -1: 句柄为空或尚未初始化
+ * @retval -2: SPI 传输失败
+ * @note 专门给"这块屏到底通不通"做点灯验证用：
+ *       上电后依次调红、绿、蓝三个函数，能看出三原色即接线与时序正常；
+ *       若偏色成青/品红/黄，是 MV/MX/MY 或 RGB/BGR 顺序问题；
+ *       若整体反相（黑底变白底），是 INVON 该换成 INVOFF。
+ */
+int Dev_ST7789_TestRed(const dev_st7789_t *lcd);
+
+/**
+ * @brief 测试用：整屏填绿（RGB565 0x07E0）
+ * @param lcd 面板句柄，不能为 NULL
+ * @retval 0: 成功
+ * @retval -1: 句柄为空或尚未初始化
+ * @retval -2: SPI 传输失败
+ */
+int Dev_ST7789_TestGreen(const dev_st7789_t *lcd);
+
+/**
+ * @brief 测试用：整屏填蓝（RGB565 0x001F）
+ * @param lcd 面板句柄，不能为 NULL
+ * @retval 0: 成功
+ * @retval -1: 句柄为空或尚未初始化
+ * @retval -2: SPI 传输失败
+ */
+int Dev_ST7789_TestBlue(const dev_st7789_t *lcd);
 
 /**
  * @brief 控制背光

@@ -28,7 +28,7 @@
 /** @brief 上电后等 OLED 内部复位完成再初始化（驱动文档要求 ≥ 20 ms） */
 #define TASK_OLED_POWERUP_DELAY_MS  20u
 /** @brief 整屏刷新周期（ms）：1.1 KB I2C 传输 + 绘制，不能按 1 ms 追 */
-#define TASK_OLED_REFRESH_PERIOD_MS 1u
+#define TASK_OLED_REFRESH_PERIOD_MS 100u
 
 /*==============================================================================
  * 接口实现
@@ -56,6 +56,6 @@ void Task_OLED(void *argument)
         OLED_ShowFrame();
 
         a++;            // 每刷新一次，数字加 1
-        //osDelay(TASK_OLED_REFRESH_PERIOD_MS);
+        osDelay(TASK_OLED_REFRESH_PERIOD_MS);
     }
 }

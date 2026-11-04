@@ -84,8 +84,10 @@ struct dev_st7789 {
  *============================================================================*/
 /**
  * @brief 默认面板实例
- * @note 240×320 竖屏；DC 用 PB0，RST 用 PB12，背光不控制。
- *       若换成 240×240 方屏，把 height 改 240、y_offset 改 80 即可。
+ * @note 172×320 竖屏（1.47 寸常见规格）；DC 用 PB0，RST 用 PB12，背光不控制。
+ *       x_offset = 34 来自"ST7789 的显存是 240 列、面板只取中间 172 列"这一
+ *       常见接法；若实测画面左边（竖屏时）出现 34 像素黑边、右侧被切掉，
+ *       说明模组从第 0 列开始映射，把 x_offset 改 0 即可。
  */
 const dev_st7789_t dev_st7789_0 = {
     .bus      = &bsp_spi2,
@@ -93,9 +95,9 @@ const dev_st7789_t dev_st7789_0 = {
     .dc       = &bsp_gpio_pb0,
     .rst      = &bsp_gpio_pb12,
     .bl       = NULL,
-    .x_offset = 0u,
+    .x_offset = 34u,
     .y_offset = 0u,
-    .width    = 240u,
+    .width    = 172u,
     .height   = 320u,
 };
 
@@ -544,6 +546,52 @@ int Dev_ST7789_Backlight(const dev_st7789_t *lcd, uint8_t on)
     }
 
     return 0;
+}
+
+/*==============================================================================
+ * 点灯自检
+ *
+ * 三个函数只做一件事：整屏填一个原色。存在的意义是"接线与初始化对不对"
+ * 能靠肉眼判断，而不必先写一整套绘图代码：
+ *   三色都正      → 接线、时序、像素格式都对
+ *   青/品红/黄    → RGB 与 BGR 反了，或 MADCTL 的 MV/MX/MY 组合不对
+ *   整体反相      → INVON 应换成 INVOFF(0x20)
+ *   左侧/上方黑边 → x_offset / y_offset 要调
+ *============================================================================*/
+/**
+ * @brief 测试用：整屏填红
+ * @param lcd 面板句柄，不能为 NULL
+ * @retval 0: 成功
+ * @retval -1: 句柄为空或尚未初始化
+ * @retval -2: SPI 传输失败
+ */
+int Dev_ST7789_TestRed(const dev_st7789_t *lcd)
+{
+    return Dev_ST7789_FillScreen(lcd, 0xF800u);
+}
+
+/**
+ * @brief 测试用：整屏填绿
+ * @param lcd 面板句柄，不能为 NULL
+ * @retval 0: 成功
+ * @retval -1: 句柄为空或尚未初始化
+ * @retval -2: SPI 传输失败
+ */
+int Dev_ST7789_TestGreen(const dev_st7789_t *lcd)
+{
+    return Dev_ST7789_FillScreen(lcd, 0x07E0u);
+}
+
+/**
+ * @brief 测试用：整屏填蓝
+ * @param lcd 面板句柄，不能为 NULL
+ * @retval 0: 成功
+ * @retval -1: 句柄为空或尚未初始化
+ * @retval -2: SPI 传输失败
+ */
+int Dev_ST7789_TestBlue(const dev_st7789_t *lcd)
+{
+    return Dev_ST7789_FillScreen(lcd, 0x001Fu);
 }
 
 /*==============================================================================

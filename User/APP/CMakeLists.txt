@@ -44,5 +44,6 @@ target_link_libraries(app_key_cmd
     PRIVATE svc_key_logic
             app_level
             dev_led
+            dev_st7789
 )
 target_compile_options(app_key_cmd PRIVATE ${USER_WARN_FLAGS})

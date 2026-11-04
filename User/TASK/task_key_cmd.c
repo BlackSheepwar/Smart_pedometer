@@ -25,7 +25,14 @@
 #include "cmsis_os2.h"
 // 功能包含
 #include "app_key_cmd.h"
+#include "dev_st7789.h"
 #include "app_level.h"
+
+/*==============================================================================
+ * 宏定义与常量
+ *============================================================================*/
+/** @brief 上电后等面板供电与内部复位完成的延时（ms） */
+#define TASK_KEY_CMD_POWERUP_DELAY_MS   50u
 
 /*==============================================================================
  * 外部声明
@@ -52,6 +59,12 @@ void Task_Key_Cmd(void *argument)
 
     (void)argument;
 
+    /* ---------- 1. 显示先起，再进事件循环 ---------- */
+    osDelay(TASK_KEY_CMD_POWERUP_DELAY_MS);
+    if (Dev_ST7789_Init(&dev_st7789_0) == 0) {
+        Dev_ST7789_TestGreen(&dev_st7789_0);
+    }
+    
     for (;;) {
         if (osMessageQueueGet(KEY_EVT_QHandle, &msg, NULL, osWaitForever) == osOK) {
             APP_Key_Cmd_Packet(msg.key, msg.event);
