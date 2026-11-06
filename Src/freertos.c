@@ -149,13 +149,8 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
 
   /* USER CODE END Init */
-
-  /* USER CODE BEGIN RTOS_MUTEX */
-  /* add mutexes, ... */
-  /* USER CODE END RTOS_MUTEX */
-
-  /* Create the semaphores(s) */
-  /* creation of UART_RX_BS */
+  /* Create the mutex(es) */
+  /* creation of IIC_LOCK */
   IIC_LOCKHandle = osMutexNew(&IIC_LOCK_attributes);
 
   /* creation of SPI_LOCK */
@@ -163,7 +158,7 @@ void MX_FREERTOS_Init(void) {
 
   /* USER CODE BEGIN RTOS_MUTEX */
   /* 要互斥量的 BSP 初始化必须在这里：CubeMX 刚把两把锁建出来，
-     早一段（Init）句柄还是 NULL，会被 BSP_xxx_Init() 判成 ERR_STATE。 */
+   早一段（Init）句柄还是 NULL，会被 BSP_xxx_Init() 判成 ERR_STATE。 */
   BSP_IIC_Init();
   BSP_SPI_Init();
   /* USER CODE END RTOS_MUTEX */

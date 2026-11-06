@@ -31,8 +31,13 @@
 /*==============================================================================
  * 宏定义与常量
  *============================================================================*/
-/** @brief 上电后等面板供电与内部复位完成的延时（ms） */
-#define TASK_KEY_CMD_POWERUP_DELAY_MS   50u
+/**
+ * @brief 上电后等面板供电与内部复位完成的延时（ms）
+ * @note 取 300 ms 而不是几十毫秒：本任务优先级高于 OLED 任务，而
+ *       Dev_ST7789_Init() 内部用 HAL_Delay 忙等约 400 ms，这期间 OLED
+ *       任务一行都跑不了。先把时间让给它，保证 OLED 先刷出画面。
+ */
+#define TASK_KEY_CMD_POWERUP_DELAY_MS   200u
 
 /*==============================================================================
  * 外部声明
@@ -54,17 +59,19 @@ extern osMessageQueueId_t KEY_EVT_QHandle;
  */
 void Task_Key_Cmd(void *argument)
 {
-    APP_Level_Init();
     key_event_msg_t msg;
 
     (void)argument;
+    APP_Level_Init();
 
     /* ---------- 1. 显示先起，再进事件循环 ---------- */
     osDelay(TASK_KEY_CMD_POWERUP_DELAY_MS);
+
     if (Dev_ST7789_Init(&dev_st7789_0) == 0) {
-        Dev_ST7789_TestGreen(&dev_st7789_0);
+        (void)Dev_ST7789_FillScreen(&dev_st7789_0, 0x0210u);;
     }
-    
+
+    /* ---------- 2. 阻塞收事件，来一条处理一条 ---------- */
     for (;;) {
         if (osMessageQueueGet(KEY_EVT_QHandle, &msg, NULL, osWaitForever) == osOK) {
             APP_Key_Cmd_Packet(msg.key, msg.event);

@@ -152,37 +152,6 @@ int Dev_ST7789_FillColor(const dev_st7789_t *lcd, uint16_t color,
 int Dev_ST7789_FillScreen(const dev_st7789_t *lcd, uint16_t color);
 
 /**
- * @brief 测试用：整屏填红（RGB565 0xF800）
- * @param lcd 面板句柄，不能为 NULL
- * @retval 0: 成功
- * @retval -1: 句柄为空或尚未初始化
- * @retval -2: SPI 传输失败
- * @note 专门给"这块屏到底通不通"做点灯验证用：
- *       上电后依次调红、绿、蓝三个函数，能看出三原色即接线与时序正常；
- *       若偏色成青/品红/黄，是 MV/MX/MY 或 RGB/BGR 顺序问题；
- *       若整体反相（黑底变白底），是 INVON 该换成 INVOFF。
- */
-int Dev_ST7789_TestRed(const dev_st7789_t *lcd);
-
-/**
- * @brief 测试用：整屏填绿（RGB565 0x07E0）
- * @param lcd 面板句柄，不能为 NULL
- * @retval 0: 成功
- * @retval -1: 句柄为空或尚未初始化
- * @retval -2: SPI 传输失败
- */
-int Dev_ST7789_TestGreen(const dev_st7789_t *lcd);
-
-/**
- * @brief 测试用：整屏填蓝（RGB565 0x001F）
- * @param lcd 面板句柄，不能为 NULL
- * @retval 0: 成功
- * @retval -1: 句柄为空或尚未初始化
- * @retval -2: SPI 传输失败
- */
-int Dev_ST7789_TestBlue(const dev_st7789_t *lcd);
-
-/**
  * @brief 控制背光
  * @param lcd 面板句柄，不能为 NULL
  * @param on  1 点亮，0 熄灭

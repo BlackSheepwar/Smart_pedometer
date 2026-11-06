@@ -148,16 +148,26 @@ static HAL_StatusTypeDef BSP_IIC_StartHal(bsp_iic_t *bus,
 }
 
 /**
- * @brief 超时后中止传输并复位外设
+ * @brief 中止当前传输并复位外设
  * @param bus 总线对象
  * @retval 无
- * @note 仅任务上下文调用，且调用者已持锁。DeInit 会停掉 DMA 并关闭
- *       传输相关中断，Init 重新按 CubeMX 配置装回外设。从机把 SDA
- *       拉死时本函数救不回来，需要在 MspDeInit 里补 9 个时钟脉冲。
+ * @note 仅任务上下文调用，且调用者已持锁。
+ *
+ *       HAL_I2C_DeInit() 在 State 为 BUSY 时会**直接返回 HAL_BUSY 且不做
+ *       任何复位**（见 stm32f4xx_hal_i2c.c 开头的状态判断）。而本函数恰恰
+ *       是在"上一笔传输超时、外设停在 BUSY"之后才被调用的——照原样写就是
+ *       "越复位越坏"：DeInit 空转，MspDeInit 不执行（DMA 不停、中断不关），
+ *       紧随其后的 Init 也因状态没归零而复位不彻底。
+ *       所以先把状态机与锁强制拉回可用态，再走正常的 DeInit/Init。
+ *       DeInit 会停掉 DMA 并关闭传输相关中断，Init 重新按 CubeMX 配置
+ *       装回外设。从机把 SDA 拉死时本函数救不回来，那属于总线恢复的范畴。
  */
 static void BSP_IIC_Abort(bsp_iic_t *bus)
 {
     I2C_HandleTypeDef *hi2c = (I2C_HandleTypeDef *)bus->hal;
+
+    hi2c->State = HAL_I2C_STATE_READY;
+    hi2c->Lock  = HAL_UNLOCKED;
 
     (void)HAL_I2C_DeInit(hi2c);
     (void)HAL_I2C_Init(hi2c);

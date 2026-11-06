@@ -63,41 +63,6 @@ static void Key_OFF(void)
 }
 
 /**
- * @brief 当前屏幕颜色下标：0 红、1 绿、2 蓝；0xFF 表示还没显示过
- * @note 只被 Task_Key_Cmd 这一个线程访问，不需要保护。
- */
-static uint8_t s_color_index = 0xFFu;
-
-/**
- * @brief 按颜色下标整屏刷色并记录状态
- * @param index 0 红、1 绿、2 蓝，越界按蓝处理
- * @retval 无
- * @note 只在本文件内使用；刷屏失败（面板没接、SPI 异常）不改状态，
- *       这样下次按键仍会重新尝试同一个颜色，便于排查。
- */
-static void Key_Color_Apply(uint8_t index)
-{
-    int status;
-
-    switch (index) {
-    case 0u:
-        status = Dev_ST7789_TestRed(&dev_st7789_0);
-        break;
-    case 1u:
-        status = Dev_ST7789_TestGreen(&dev_st7789_0);
-        break;
-    default:
-        index  = 2u;
-        status = Dev_ST7789_TestBlue(&dev_st7789_0);
-        break;
-    }
-
-    if (status == 0) {
-        s_color_index = index;
-    }
-}
-
-/**
  * @brief 颜色键：红 → 绿 → 蓝 → 红 循环
  * @retval 无
  * @note 这是测试用的动作，整屏重绘会阻塞约 85 ms，超出"handler 必须短"
@@ -105,9 +70,28 @@ static void Key_Color_Apply(uint8_t index)
  */
 static void Key_Color(void)
 {
-    uint8_t next = (uint8_t)(((uint32_t)s_color_index + 1u) % 3u);
+    static uint8_t s_color_index = 0xFFu;
+    
+    uint8_t index = (uint8_t)(((uint32_t)s_color_index + 1u) % 3u);
 
-    Key_Color_Apply(next);
+    int status;
+
+    switch (index) {
+    case 0u:
+        status = Dev_ST7789_FillScreen(&dev_st7789_0, 0xF800u);
+        break;
+    case 1u:
+        status = Dev_ST7789_FillScreen(&dev_st7789_0, 0x07E0u);
+        break;
+    default:
+        index  = 2u;
+        status = Dev_ST7789_FillScreen(&dev_st7789_0, 0x001Fu);
+        break;
+    }
+
+    if (status == 0) {
+        s_color_index = index;
+    }
 }
 
 /*==============================================================================

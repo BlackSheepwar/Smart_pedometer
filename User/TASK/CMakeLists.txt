@@ -42,7 +42,6 @@ target_link_libraries(task_objects
             svc_key_logic
             dev_oled
             dev_st7789
-            dev_led
 )
 
 target_compile_options(task_objects PRIVATE ${USER_WARN_FLAGS})
