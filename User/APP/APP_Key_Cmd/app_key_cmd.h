@@ -32,4 +32,19 @@
  */
 void APP_Key_Cmd_Packet(const dev_key_t *key, key_event_t event);
 
+/**
+ * @brief 用纯色重绘整屏（**测试用**，不属于设备层能力）
+ * @param color 颜色，RGB565
+ * @retval 0: 成功
+ * @retval -1: 面板尚未就绪，或尺寸为 0
+ * @retval -2: 开窗或传输失败
+ * @note 只为验证"面板能亮、颜色对不对"而存在，用于上电清屏与颜色键。
+ *       设备层已经按"不含颜色语义"重构：它只提供开窗 + 重复写图案，
+ *       这里的做法是自己把 color 填满一块静态图案缓冲，再交给
+ *       Dev_ST7789_WritePattern() 重复到整屏。
+ *       量产界面应改成由显示任务持有真正的帧缓冲，而不是每次按键都
+ *       重算一遍图案、阻塞 85 ms。
+ */
+int APP_Key_Cmd_TestFillScreen(uint16_t color);
+
 #endif /* __APP_KEY_CMD_H__ */

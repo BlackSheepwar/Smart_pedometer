@@ -28,6 +28,19 @@
 #include "dev_st7789.h"
 
 /*==============================================================================
+ * 宏定义与常量
+ *============================================================================*/
+/**
+ * @brief 测试用图案缓冲大小（字节）
+ * @note 必须是偶数。512 B = 256 像素，放 .bss 不占任务栈；图案越大、
+ *       帧内 DMA 启动次数越少（512 B 刷整屏 215 次，4096 B 只要 27 次），
+ *       这里取 512 是拿时间换 RAM。
+ */
+#define APP_TEST_PAT_BYTES      512u
+/** @brief 颜色键循环的档位数 */
+#define APP_TEST_COLOR_COUNT    3u
+
+/*==============================================================================
  * 内部类型
  *============================================================================*/
 /**
@@ -38,6 +51,12 @@ typedef struct {
     key_event_t      event;
     void            (*handler)(void);
 } app_key_cmd_entry_t;
+
+/*==============================================================================
+ * 内部变量
+ *============================================================================*/
+/** @brief 测试用纯色图案，由 APP_Key_Cmd_TestFillScreen() 按当前颜色重填 */
+static uint8_t s_test_pat[APP_TEST_PAT_BYTES];
 
 /*==============================================================================
  * 按键事件处理函数
@@ -65,31 +84,23 @@ static void Key_OFF(void)
 /**
  * @brief 颜色键：红 → 绿 → 蓝 → 红 循环
  * @retval 无
- * @note 这是测试用的动作，整屏重绘会阻塞约 85 ms，超出"handler 必须短"
+ * @note 这是**测试**动作，整屏重绘会阻塞约 85 ms，超出"handler 必须短"
  *       的约定；量产界面应改成只发一次重绘请求，由显示任务去画。
+ *       设备层不提供 FillScreen，这里用"构造图案 + 重复写"两步实现，
+ *       走的都是 SetWindow / WritePattern 这些基础显示函数。
  */
 static void Key_Color(void)
 {
+    static const uint16_t colors[APP_TEST_COLOR_COUNT] = {
+        0xF800u,   /* 红 */
+        0x07E0u,   /* 绿 */
+        0x001Fu,   /* 蓝 */
+    };
     static uint8_t s_color_index = 0xFFu;
-    
-    uint8_t index = (uint8_t)(((uint32_t)s_color_index + 1u) % 3u);
 
-    int status;
+    uint8_t index = (uint8_t)(((uint32_t)s_color_index + 1u) % APP_TEST_COLOR_COUNT);
 
-    switch (index) {
-    case 0u:
-        status = Dev_ST7789_FillScreen(&dev_st7789_0, 0xF800u);
-        break;
-    case 1u:
-        status = Dev_ST7789_FillScreen(&dev_st7789_0, 0x07E0u);
-        break;
-    default:
-        index  = 2u;
-        status = Dev_ST7789_FillScreen(&dev_st7789_0, 0x001Fu);
-        break;
-    }
-
-    if (status == 0) {
+    if (APP_Key_Cmd_TestFillScreen(colors[index]) == 0) {
         s_color_index = index;
     }
 }
@@ -145,4 +156,38 @@ void APP_Key_Cmd_Packet(const dev_key_t *key, key_event_t event)
             return;
         }
     }
+}
+
+/**
+ * @brief 用纯色重绘整屏（测试用）
+ * @param color 颜色，RGB565
+ * @retval 0: 成功
+ * @retval -1: 面板尚未就绪，或尺寸为 0
+ * @retval -2: 开窗或传输失败
+ * @note 三步都是基础显示操作，没有一处依赖"填色"这种业务接口：
+ *       读尺寸 → 开全屏窗口 → 把颜色铺满图案缓冲 → 重复写图案。
+ *       颜色铺进缓冲时高字节在前，这是 ST7789 的字节序要求。
+ */
+int APP_Key_Cmd_TestFillScreen(uint16_t color)
+{
+    uint32_t index;
+    uint32_t w = (uint32_t)Dev_ST7789_Width(&dev_st7789_0);
+    uint32_t h = (uint32_t)Dev_ST7789_Height(&dev_st7789_0);
+
+    if ((w == 0u) || (h == 0u)) {
+        return -1;
+    }
+
+    if (Dev_ST7789_SetWindow(&dev_st7789_0, 0u, 0u,
+                             (uint16_t)(w - 1u), (uint16_t)(h - 1u)) != 0) {
+        return -2;
+    }
+
+    for (index = 0u; index < APP_TEST_PAT_BYTES; index += 2u) {
+        s_test_pat[index]      = (uint8_t)(color >> 8);
+        s_test_pat[index + 1u] = (uint8_t)(color & 0xFFu);
+    }
+
+    return Dev_ST7789_WritePattern(&dev_st7789_0, s_test_pat,
+                                   APP_TEST_PAT_BYTES, w * h * 2u);
 }

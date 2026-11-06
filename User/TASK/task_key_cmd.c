@@ -33,9 +33,9 @@
  *============================================================================*/
 /**
  * @brief 上电后等面板供电与内部复位完成的延时（ms）
- * @note 取 300 ms 而不是几十毫秒：本任务优先级高于 OLED 任务，而
- *       Dev_ST7789_Init() 内部用 HAL_Delay 忙等约 400 ms，这期间 OLED
- *       任务一行都跑不了。先把时间让给它，保证 OLED 先刷出画面。
+ * @note 只是等电源稳定，不承担"让出 CPU"的职责：Dev_ST7789_Init() 内部
+ *       的复位/上电等待已经改用 osDelay，会主动让出 CPU，期间 OLED 任务
+ *       照常能跑。
  */
 #define TASK_KEY_CMD_POWERUP_DELAY_MS   200u
 
@@ -68,7 +68,9 @@ void Task_Key_Cmd(void *argument)
     osDelay(TASK_KEY_CMD_POWERUP_DELAY_MS);
 
     if (Dev_ST7789_Init(&dev_st7789_0) == 0) {
-        (void)Dev_ST7789_FillScreen(&dev_st7789_0, 0x0210u);;
+        /* 设备层不再替上层清屏，上电这一帧由应用层刷；这里借用按键模块
+           的测试填充，避免显存随机噪声停在屏上 */
+        (void)APP_Key_Cmd_TestFillScreen(0x0210u);
     }
 
     /* ---------- 2. 阻塞收事件，来一条处理一条 ---------- */
