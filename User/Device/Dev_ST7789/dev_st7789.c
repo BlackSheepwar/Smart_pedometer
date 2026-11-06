@@ -10,10 +10,11 @@
  *
  *       一次写屏的时序：
  *         CS 低 → DC 低 → 发命令 → DC 高 → 发参数/像素 → CS 高
- *       片选在整帧期间保持有效，中途不做释放：ST7789 的串行接口在 CS
- *       上升沿会复位移位计数器，RAMWR 期间松片选可能导致写入提前结束。
- *       代价是同一根总线上的其它设备在整帧期间拿不到总线，本工程 SPI2
- *       只挂这一块屏，可以接受。
+ *       片选与总线在整帧期间一起被本任务独占：BSP_SPI_Dev_Select() 抢锁
+ *       成功才拉 CS，帧内只走 BSP_SPI_TransferLocked()，不再重入互斥量，
+ *       BSP_SPI_Dev_Deselect() 抬 CS 之后才放锁。所以"CS 全程保持低"与
+ *       "总线不被打断"是同一件事，不需要额外的临界区；分块大小只影响
+ *       单次 DMA 的长度，不影响帧的完整性。
  *
  *       时间基准：Init 的复位/上电延时用 HAL_Delay（一次性、允许阻塞）；
  *       传输超时交给 BSP 的 timeout_ms，本层不自己计数。
@@ -37,6 +38,9 @@
 #define DEV_ST7789_CHUNK            4096u
 /** @brief 纯色填充的图案缓冲大小（字节），必须是偶数 */
 #define DEV_ST7789_FILL_BUF_SIZE    512u
+/** @brief 一帧等总线的预算（ms）：整屏 110 080 B 在 10.5 Mbit/s 下约 85 ms，
+ *         再给排队与分块留余量，取 300 ms */
+#define DEV_ST7789_FRAME_TIMEOUT_MS 300u
 
 /** @brief 软件复位 */
 #define DEV_ST7789_CMD_SWRESET      0x01u
@@ -116,14 +120,15 @@ static uint8_t  s_fill_buf[DEV_ST7789_FILL_BUF_SIZE];
  * 内部函数
  *============================================================================*/
 /**
- * @brief 在当前片选帧内发送一段字节（不碰片选与 DC）
+ * @brief 在当前帧内发送一段字节（不碰片选、不碰锁）
  * @param lcd  面板句柄，调用者保证非 NULL
  * @param data 待发送缓冲区，不能为 NULL
  * @param len  字节数，不能为 0
  * @retval 0: 全部发完
- * @retval -2: 其中一次传输失败
+ * @retval -2: 其中一次传输失败（总线错误或传输超时）
  * @note 按 DEV_ST7789_CHUNK 分块，因为 BSP 的 len 是 uint16_t。
- *       片选由调用者在帧首尾负责，本函数只管搬字节。
+ *       片选与总线由调用者在帧首用 BSP_SPI_Dev_Select() 取得，本函数只走
+ *       已持锁入口，不会重新抢锁，所以整帧期间总线不会被别的设备拿走。
  */
 static int Dev_ST7789_Raw(const dev_st7789_t *lcd, const uint8_t *data,
                           uint32_t len)
@@ -132,7 +137,8 @@ static int Dev_ST7789_Raw(const dev_st7789_t *lcd, const uint8_t *data,
         uint16_t chunk = (len > DEV_ST7789_CHUNK) ?
                          (uint16_t)DEV_ST7789_CHUNK : (uint16_t)len;
 
-        if (BSP_SPI_Transfer(lcd->bus, data, NULL, chunk, 0u) != BSP_SPI_OK) {
+        if (BSP_SPI_TransferLocked(lcd->bus, data, NULL, chunk, 0u)
+            != BSP_SPI_OK) {
             return -2;
         }
 
@@ -144,21 +150,27 @@ static int Dev_ST7789_Raw(const dev_st7789_t *lcd, const uint8_t *data,
 }
 
 /**
- * @brief 发送一条命令，可选带参数（整帧独占片选）
+ * @brief 发送一条命令，可选带参数（整帧独占总线）
  * @param lcd       面板句柄，调用者保证非 NULL
  * @param cmd       命令字
  * @param param     参数缓冲区，NULL 表示无参数
  * @param param_len 参数字节数，0 表示无参数
  * @retval 0: 成功
- * @retval -2: 传输失败
+ * @retval -2: 抢总线失败，或传输失败
  * @note 命令与参数在同一个片选帧内完成，避免 CS 上升沿打断参数序列。
+ *       抢总线失败时片选没有被拉低，直接返回即可，不需要也不能调
+ *       BSP_SPI_Dev_Deselect()。
  */
 static int Dev_ST7789_Cmd(const dev_st7789_t *lcd, uint8_t cmd,
                           const uint8_t *param, uint16_t param_len)
 {
     int status;
 
-    BSP_SPI_Dev_Select(lcd->dev);
+    if (BSP_SPI_Dev_Select(lcd->dev, DEV_ST7789_FRAME_TIMEOUT_MS)
+        != BSP_SPI_OK) {
+        return -2;
+    }
+
     BSP_GPIO_Write(lcd->dc, 0u);
     status = Dev_ST7789_Raw(lcd, &cmd, 1u);
 
@@ -177,7 +189,7 @@ static int Dev_ST7789_Cmd(const dev_st7789_t *lcd, uint8_t cmd,
  * @param pix 像素缓冲区，不能为 NULL
  * @param len 字节数，不能为 0
  * @retval 0: 成功
- * @retval -2: 传输失败
+ * @retval -2: 抢总线失败，或传输失败
  * @note 把 "0x2C + 数据" 合成一帧，是写屏的主路径。
  */
 static int Dev_ST7789_Burst(const dev_st7789_t *lcd, const uint8_t *pix,
@@ -186,7 +198,11 @@ static int Dev_ST7789_Burst(const dev_st7789_t *lcd, const uint8_t *pix,
     uint8_t cmd = (uint8_t)DEV_ST7789_CMD_RAMWR;
     int status;
 
-    BSP_SPI_Dev_Select(lcd->dev);
+    if (BSP_SPI_Dev_Select(lcd->dev, DEV_ST7789_FRAME_TIMEOUT_MS)
+        != BSP_SPI_OK) {
+        return -2;
+    }
+
     BSP_GPIO_Write(lcd->dc, 0u);
     status = Dev_ST7789_Raw(lcd, &cmd, 1u);
 
@@ -459,8 +475,9 @@ int Dev_ST7789_WritePixels(const dev_st7789_t *lcd, const uint8_t *data,
  * @param count 填充像素个数
  * @retval 0: 填充成功
  * @retval -1: 参数非法（空指针或 count 为 0）
- * @retval -2: SPI 传输失败
+ * @retval -2: 抢总线失败，或 SPI 传输失败
  * @note 图案缓冲是模块级 static，重复调用不需要重新构造，也不占任务栈。
+ *       整屏 215 次分块全部在同一帧内完成，只在帧首抢一次总线。
  */
 int Dev_ST7789_FillColor(const dev_st7789_t *lcd, uint16_t color,
                          uint32_t count)
@@ -481,7 +498,11 @@ int Dev_ST7789_FillColor(const dev_st7789_t *lcd, uint16_t color,
     }
 
     /* ---------- 2. 整个填充过程只用一个片选帧 ---------- */
-    BSP_SPI_Dev_Select(lcd->dev);
+    if (BSP_SPI_Dev_Select(lcd->dev, DEV_ST7789_FRAME_TIMEOUT_MS)
+        != BSP_SPI_OK) {
+        return -2;
+    }
+
     BSP_GPIO_Write(lcd->dc, 0u);
     status = Dev_ST7789_Raw(lcd, &cmd, 1u);
 

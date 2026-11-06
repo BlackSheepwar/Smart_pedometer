@@ -121,7 +121,8 @@ int Dev_ST7789_SetWindow(const dev_st7789_t *lcd, uint16_t x0, uint16_t y0,
  * @retval -2: SPI 传输失败
  * @note 调用前必须先用 Dev_ST7789_SetWindow() 指定区域。
  *       内部按 4 KB 分块发送，整屏 172×320 共 110 080 字节，分 27 块。
- *       片选在整帧期间保持有效，中途不会被其他传输打断。
+ *       整帧独占 SPI2：帧首抢总线并拉 CS，帧尾放 CS 之后才放锁，所以
+ *       分块之间不会被其它 SPI 设备插进来，CS 也不会中途抬起。
  */
 int Dev_ST7789_WritePixels(const dev_st7789_t *lcd, const uint8_t *data,
                            uint32_t len);
@@ -135,7 +136,7 @@ int Dev_ST7789_WritePixels(const dev_st7789_t *lcd, const uint8_t *data,
  * @retval -1: 参数非法（空指针或 count 为 0）
  * @retval -2: SPI 传输失败
  * @note 内部用 512 字节的静态图案缓冲反复发送，不额外申请内存；
- *       全部数据在同一个片选帧内发完。
+ *       全部数据在同一个片选帧内发完，整帧独占总线。
  */
 int Dev_ST7789_FillColor(const dev_st7789_t *lcd, uint16_t color,
                          uint32_t count);
