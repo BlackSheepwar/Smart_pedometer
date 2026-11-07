@@ -11,9 +11,16 @@
  *       当前的分工：
  *         单击   → 档位 ±1
  *         长按   → 满 300 ms 后开始连发 REPEAT，每次 ±1（灯带跟着一格一格动）
+ *         B10    → 调 Svc_LVGL_Request_Switch()，请显示线程切到下一屏
  *
  *       处理函数一律无参、只做短动作：它们跑在 Task_Key_Cmd 线程里，
  *       一旦阻塞，8 格事件队列就会撑满、新事件被丢弃。
+ *       所以 B10 不再像早期测试那样直接刷整屏（约 85 ms 阻塞），而是只由
+ *       显示服务发一次通知，真正的绘制由 LVGL 线程完成。
+ *
+ *       本层不碰 OS：通知机制封在 Service 的 Svc_LVGL 里，这里只调它的
+ *       接口；TASK 层因此只负责"取事件、调命令表"两件事，不承担任何
+ *       UI 通知策略。
  */
 
 /*==============================================================================
@@ -25,20 +32,7 @@
 #include "app_key_cmd.h"
 #include "app_level.h"
 #include "dev_led.h"
-#include "dev_st7789.h"
-
-/*==============================================================================
- * 宏定义与常量
- *============================================================================*/
-/**
- * @brief 测试用图案缓冲大小（字节）
- * @note 必须是偶数。512 B = 256 像素，放 .bss 不占任务栈；图案越大、
- *       帧内 DMA 启动次数越少（512 B 刷整屏 215 次，4096 B 只要 27 次），
- *       这里取 512 是拿时间换 RAM。
- */
-#define APP_TEST_PAT_BYTES      512u
-/** @brief 颜色键循环的档位数 */
-#define APP_TEST_COLOR_COUNT    3u
+#include "svc_lvgl.h"
 
 /*==============================================================================
  * 内部类型
@@ -49,60 +43,60 @@
 typedef struct {
     const dev_key_t *key;
     key_event_t      event;
-    void            (*handler)(void);
+    void           (*handler)(void);
 } app_key_cmd_entry_t;
-
-/*==============================================================================
- * 内部变量
- *============================================================================*/
-/** @brief 测试用纯色图案，由 APP_Key_Cmd_TestFillScreen() 按当前颜色重填 */
-static uint8_t s_test_pat[APP_TEST_PAT_BYTES];
 
 /*==============================================================================
  * 按键事件处理函数
  *============================================================================*/
+/**
+ * @brief 档位 +1
+ * @retval 无
+ */
 static void Key_Inc(void)
 {
     APP_Level_Step(1);
 }
 
+/**
+ * @brief 档位 -1
+ * @retval 无
+ */
 static void Key_Dec(void)
 {
     APP_Level_Step(-1);
 }
 
+/**
+ * @brief 翻转板载 LED
+ * @retval 无
+ */
 static void Key_ON(void)
 {
     Dev_LED_Toggle(&dev_led_1);
 }
 
+/**
+ * @brief 关闭板载 LED
+ * @retval 无
+ */
 static void Key_OFF(void)
 {
     Dev_LED_Write(&dev_led_1, LED_OFF);
 }
 
 /**
- * @brief 颜色键：红 → 绿 → 蓝 → 红 循环
+ * @brief B10 界面键：请求显示线程切到下一屏
  * @retval 无
- * @note 这是**测试**动作，整屏重绘会阻塞约 85 ms，超出"handler 必须短"
- *       的约定；量产界面应改成只发一次重绘请求，由显示任务去画。
- *       设备层不提供 FillScreen，这里用"构造图案 + 重复写"两步实现，
- *       走的都是 SetWindow / WritePattern 这些基础显示函数。
+ * @note 只发一次请求，不碰 LVGL、不碰 SPI、不碰信号量：
+ *       LVGL 不是线程安全的，切屏必须发生在 Task_LVGL 里；
+ *       二值信号量的释放封在 Svc_LVGL_Request_Switch() 内部。
+ *       上一次请求还没被消费时该函数返回 -1，这里静默丢弃，符合
+ *       "请求不排队"的二值语义，不需要重试或计数。
  */
-static void Key_Color(void)
+static void Key_Ui_Switch(void)
 {
-    static const uint16_t colors[APP_TEST_COLOR_COUNT] = {
-        0xF800u,   /* 红 */
-        0x07E0u,   /* 绿 */
-        0x001Fu,   /* 蓝 */
-    };
-    static uint8_t s_color_index = 0xFFu;
-
-    uint8_t index = (uint8_t)(((uint32_t)s_color_index + 1u) % APP_TEST_COLOR_COUNT);
-
-    if (APP_Key_Cmd_TestFillScreen(colors[index]) == 0) {
-        s_color_index = index;
-    }
+    (void)Svc_LVGL_Request_Switch();
 }
 
 /*==============================================================================
@@ -126,7 +120,7 @@ static const app_key_cmd_entry_t APP_KEY_CMD_TABLE[] = {
     { &dev_key_led, KEY_EVENT_DOWN,    Key_ON     },
     { &dev_key_led, KEY_EVENT_LONG_UP, Key_OFF    },
 
-    { &dev_key_color, KEY_EVENT_DOWN,  Key_Color  },
+    { &dev_key_color, KEY_EVENT_DOWN,  Key_Ui_Switch },
 };
 
 /**
@@ -141,6 +135,7 @@ static const app_key_cmd_entry_t APP_KEY_CMD_TABLE[] = {
  * @brief 按键命令分发入口
  * @param key   按键设备句柄（与表里存的是同一个对象地址，按地址比较）
  * @param event 按键事件（DOWN / CLICK / LONG / REPEAT / LONG_UP）
+ * @retval 无
  * @note 由 Task_Key_Cmd 每取到一条事件调用一次；查不到组合就静默丢弃。
  *       句柄是 const 全局对象，地址唯一，所以"是不是这个键"等价于
  *       "是不是这个地址"；运行期拷贝句柄会让这条判断失效。
@@ -156,38 +151,4 @@ void APP_Key_Cmd_Packet(const dev_key_t *key, key_event_t event)
             return;
         }
     }
-}
-
-/**
- * @brief 用纯色重绘整屏（测试用）
- * @param color 颜色，RGB565
- * @retval 0: 成功
- * @retval -1: 面板尚未就绪，或尺寸为 0
- * @retval -2: 开窗或传输失败
- * @note 三步都是基础显示操作，没有一处依赖"填色"这种业务接口：
- *       读尺寸 → 开全屏窗口 → 把颜色铺满图案缓冲 → 重复写图案。
- *       颜色铺进缓冲时高字节在前，这是 ST7789 的字节序要求。
- */
-int APP_Key_Cmd_TestFillScreen(uint16_t color)
-{
-    uint32_t index;
-    uint32_t w = (uint32_t)Dev_ST7789_Width(&dev_st7789_0);
-    uint32_t h = (uint32_t)Dev_ST7789_Height(&dev_st7789_0);
-
-    if ((w == 0u) || (h == 0u)) {
-        return -1;
-    }
-
-    if (Dev_ST7789_SetWindow(&dev_st7789_0, 0u, 0u,
-                             (uint16_t)(w - 1u), (uint16_t)(h - 1u)) != 0) {
-        return -2;
-    }
-
-    for (index = 0u; index < APP_TEST_PAT_BYTES; index += 2u) {
-        s_test_pat[index]      = (uint8_t)(color >> 8);
-        s_test_pat[index + 1u] = (uint8_t)(color & 0xFFu);
-    }
-
-    return Dev_ST7789_WritePattern(&dev_st7789_0, s_test_pat,
-                                   APP_TEST_PAT_BYTES, w * h * 2u);
 }

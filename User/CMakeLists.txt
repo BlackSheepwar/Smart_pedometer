@@ -1,9 +1,10 @@
 # =============================================================================
 # User 顶层：按层收集子目录
 #
+#   Third_Party 第 0 层  第三方只读区  LVGL 源码（本工程只加构建脚本，不改源码）
 #   BSP     第 1 层  硬件驱动层    GPIO 句柄与读写（引脚配置由 CubeMX 负责）
-#   Device  第 2 层  设备抽象层    灯带、按键、单灯、OLED
-#   Service 第 3 层  服务层        消抖、长按、连发
+#   Device  第 2 层  设备抽象层    灯带、按键、单灯、OLED、ST7789（不含 GUI 概念）
+#   Service 第 3 层  服务层        消抖、长按、连发、LVGL 显示绑定到 ST7789
 #   APP     第 4 层  应用层        档位业务：初始化 + 每步
 #   TASK    任务层   线程体        一个任务一个 .c，覆盖 CubeMX 的 __weak 入口
 #
@@ -24,6 +25,10 @@
 # 统一编译选项：警告即错误（子目录里直接引用这个变量）
 set(USER_WARN_FLAGS -Wall -Wextra -Werror)
 
+# Third_Party 必须排在 BSP 之前：Service 层的 svc_lvgl 要链 lvgl
+# 目标必须先存在；CMake 的目标解析虽然允许后置定义，但把依赖方写在
+# 被依赖方之前会让"谁依赖谁"在文件里读不出来。
+add_subdirectory(Third_Party)
 add_subdirectory(BSP)
 add_subdirectory(Device)
 add_subdirectory(Service)

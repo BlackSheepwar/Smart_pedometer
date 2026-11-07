@@ -34,6 +34,7 @@
 typedef StaticTask_t osStaticThreadDef_t;
 typedef StaticQueue_t osStaticMessageQDef_t;
 typedef StaticSemaphore_t osStaticMutexDef_t;
+typedef StaticSemaphore_t osStaticSemaphoreDef_t;
 /* USER CODE BEGIN PTD */
 
 /* USER CODE END PTD */
@@ -100,6 +101,18 @@ const osThreadAttr_t OLED_T_attributes = {
   .stack_size = sizeof(OLED_TBuffer),
   .priority = (osPriority_t) osPriorityBelowNormal,
 };
+/* Definitions for LVGL_T */
+osThreadId_t LVGL_THandle;
+uint32_t LVGL_TBuffer[ 2048 ];
+osStaticThreadDef_t LVGL_TControlBlock;
+const osThreadAttr_t LVGL_T_attributes = {
+  .name = "LVGL_T",
+  .cb_mem = &LVGL_TControlBlock,
+  .cb_size = sizeof(LVGL_TControlBlock),
+  .stack_mem = &LVGL_TBuffer[0],
+  .stack_size = sizeof(LVGL_TBuffer),
+  .priority = (osPriority_t) osPriorityAboveNormal,
+};
 /* Definitions for KEY_EVT_Q */
 osMessageQueueId_t KEY_EVT_QHandle;
 uint8_t KEY_EVT_QBuffer[ 8 * sizeof( key_event_msg_t ) ];
@@ -127,6 +140,14 @@ const osMutexAttr_t SPI_LOCK_attributes = {
   .cb_mem = &SPI_LOCKControlBlock,
   .cb_size = sizeof(SPI_LOCKControlBlock),
 };
+/* Definitions for LVGL_SW_SEM */
+osSemaphoreId_t LVGL_SW_SEMHandle;
+osStaticSemaphoreDef_t LVGL_SW_SEMControlBlock;
+const osSemaphoreAttr_t LVGL_SW_SEM_attributes = {
+  .name = "LVGL_SW_SEM",
+  .cb_mem = &LVGL_SW_SEMControlBlock,
+  .cb_size = sizeof(LVGL_SW_SEMControlBlock),
+};
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
@@ -137,6 +158,7 @@ void StartDefaultTask(void *argument);
 void Task_Key_Scan(void *argument);
 void Task_Key_Cmd(void *argument);
 void Task_OLED(void *argument);
+void Task_LVGL(void *argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
@@ -163,8 +185,17 @@ void MX_FREERTOS_Init(void) {
   BSP_SPI_Init();
   /* USER CODE END RTOS_MUTEX */
 
+  /* Create the semaphores(s) */
+  /* creation of LVGL_SW_SEM */
+  LVGL_SW_SEMHandle = osSemaphoreNew(1, 0, &LVGL_SW_SEM_attributes);
+
   /* USER CODE BEGIN RTOS_SEMAPHORES */
-  /* add semaphores, ... */
+  /* 当前生成值是 osSemaphoreNew(1, 0, ...)，初始即"不可用"，语义正确。
+     但 CubeMX 对二值信号量习惯生成 (1, 1)，一旦重新生成把初值改回 1，
+     LVGL 线程第一次 Acquire 就会成功，表现为"没按键就先切了一屏"。
+     下面这一步是幂等的保护：初值为 0 时 Acquire 立即失败、什么也不改；
+     初值为 1 时把它取走。生产者在 Task_Key_Cmd，消费者在 Task_LVGL。 */
+  (void)osSemaphoreAcquire(LVGL_SW_SEMHandle, 0u);
   /* USER CODE END RTOS_SEMAPHORES */
 
   /* USER CODE BEGIN RTOS_TIMERS */
@@ -191,6 +222,9 @@ void MX_FREERTOS_Init(void) {
 
   /* creation of OLED_T */
   OLED_THandle = osThreadNew(Task_OLED, NULL, &OLED_T_attributes);
+
+  /* creation of LVGL_T */
+  LVGL_THandle = osThreadNew(Task_LVGL, NULL, &LVGL_T_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -272,6 +306,24 @@ __weak void Task_OLED(void *argument)
     osDelay(1);
   }
   /* USER CODE END Task_OLED */
+}
+
+/* USER CODE BEGIN Header_Task_LVGL */
+/**
+* @brief Function implementing the LVGL_T thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_Task_LVGL */
+__weak void Task_LVGL(void *argument)
+{
+  /* USER CODE BEGIN Task_LVGL */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END Task_LVGL */
 }
 
 /* Private application code --------------------------------------------------*/

@@ -33,6 +33,10 @@ target_compile_options(app_level PRIVATE ${USER_WARN_FLAGS})
 
 # -----------------------------------------------------------------------------
 # app_key_cmd：按键命令表
+#   B10 的处理函数调 Svc_LVGL_Request_Switch()，通知机制封在显示服务里；
+#   本层因此不碰 OS（不 include FreeRTOS.h / cmsis_os2.h）。
+#   不再直接刷屏，所以 dev_st7789 不是本模块的依赖；链 svc_lvgl 只是为了
+#   请它切屏，屏幕与 LVGL 对象的所有者仍是 svc_lvgl。
 # -----------------------------------------------------------------------------
 add_library(app_key_cmd STATIC
     APP_Key_Cmd/app_key_cmd.c
@@ -44,6 +48,22 @@ target_link_libraries(app_key_cmd
     PRIVATE svc_key_logic
             app_level
             dev_led
-            dev_st7789
+            svc_lvgl
 )
 target_compile_options(app_key_cmd PRIVATE ${USER_WARN_FLAGS})
+
+# -----------------------------------------------------------------------------
+# app_screen：两个 LVGL 界面的创建与切换
+#   头文件不出现 lv_obj_t，所以 lvgl 是 PRIVATE：TASK 层只需要
+#   APP_Screen_Init/Next 这两个名字，不需要看见 LVGL 的类型。
+# -----------------------------------------------------------------------------
+add_library(app_screen STATIC
+    APP_Screen/app_screen.c
+)
+target_include_directories(app_screen
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/APP_Screen
+)
+target_link_libraries(app_screen
+    PRIVATE lvgl
+)
+target_compile_options(app_screen PRIVATE ${USER_WARN_FLAGS})

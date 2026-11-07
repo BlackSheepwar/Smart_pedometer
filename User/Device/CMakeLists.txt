@@ -70,7 +70,7 @@ target_compile_options(dev_oled PRIVATE ${USER_WARN_FLAGS})
 # dev_st7789：ST7789 SPI 彩屏（开窗 + 突发写像素）
 #   头文件不暴露 bsp_spi_t / bsp_gpio_t（句柄不透明），所以 bsp_spi 与
 #   bsp_gpio 都写 PRIVATE：需要它们的只有本模块的 .c。
-#   用它的层（TASK 或 LVGL 适配层）只链 dev_st7789 即可。
+#   用它的层（Service 的 svc_lvgl）只链 dev_st7789 即可。
 # -----------------------------------------------------------------------------
 add_library(dev_st7789 STATIC
     Dev_ST7789/dev_st7789.c
@@ -86,3 +86,9 @@ target_link_libraries(dev_st7789
     PRIVATE stm32cubemx
 )
 target_compile_options(dev_st7789 PRIVATE ${USER_WARN_FLAGS})
+
+# -----------------------------------------------------------------------------
+# 本层不放 LVGL 适配器：LVGL 是第三方 GUI 库，把它的显示端口绑到具体面板
+# 属于"跨设备组合"，由 Service/Svc_LVGL 负责。Device 层只提供开窗与写像素
+# 能力，本目录的源码不应出现 lv_ / LV_COLOR_ / lvgl.h 字样。
+# -----------------------------------------------------------------------------

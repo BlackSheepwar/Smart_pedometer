@@ -7,6 +7,11 @@
  * @note 消抖服务只产事件，命令表决定事件做什么。
  *       事件有 DOWN / CLICK / LONG / REPEAT / LONG_UP 五种；
  *       表里没列的组合一律丢弃。本头文件是两者之间唯一的接口。
+ *
+ *       需要"请求显示线程做点什么"时（例如 B10 切屏），handler 直接调
+ *       对应的服务接口（Svc_LVGL_Request_Switch）。本层因此不 include
+ *       FreeRTOS.h / cmsis_os2.h，也不用返回值把意图透传给 TASK——
+ *       TASK 只负责"取事件、调命令表"，不承担任何 UI 通知策略。
  */
 
 #ifndef __APP_KEY_CMD_H__
@@ -27,24 +32,11 @@
  * @brief 按键命令分发入口
  * @param key   按键设备句柄（命令表按这个地址匹配）
  * @param event 按键事件（KEY_EVENT_*）
+ * @retval 无
  * @note 由 Task_Key_Cmd 在命令线程里调用；handler 必须是短动作，
  *       不能阻塞，否则 8 格事件队列撑满后新事件会被丢弃。
+ *       表里没有的组合一律静默丢弃。
  */
 void APP_Key_Cmd_Packet(const dev_key_t *key, key_event_t event);
-
-/**
- * @brief 用纯色重绘整屏（**测试用**，不属于设备层能力）
- * @param color 颜色，RGB565
- * @retval 0: 成功
- * @retval -1: 面板尚未就绪，或尺寸为 0
- * @retval -2: 开窗或传输失败
- * @note 只为验证"面板能亮、颜色对不对"而存在，用于上电清屏与颜色键。
- *       设备层已经按"不含颜色语义"重构：它只提供开窗 + 重复写图案，
- *       这里的做法是自己把 color 填满一块静态图案缓冲，再交给
- *       Dev_ST7789_WritePattern() 重复到整屏。
- *       量产界面应改成由显示任务持有真正的帧缓冲，而不是每次按键都
- *       重算一遍图案、阻塞 85 ms。
- */
-int APP_Key_Cmd_TestFillScreen(uint16_t color);
 
 #endif /* __APP_KEY_CMD_H__ */

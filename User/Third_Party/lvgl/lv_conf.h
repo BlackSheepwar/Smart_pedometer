@@ -12,7 +12,7 @@
  */
 
 /* clang-format off */
-#if 0 /* Set this to "1" to enable content */
+#if 1 /* 已启用：改为 1 后本文件内容生效（原模板为 0） */
 
 #ifndef LV_CONF_H
 #define LV_CONF_H
@@ -56,7 +56,7 @@
 
 #if LV_USE_STDLIB_MALLOC == LV_STDLIB_BUILTIN
 /** Size of the pool `lv_malloc()` allocates from. Needs to be at least 2kB (2048). */
-#define LV_MEM_SIZE 65536
+#define LV_MEM_SIZE 24576
 
 /** Place the pool at a fixed address instead of allocating it as a normal array.
  *  0: unused.
@@ -150,7 +150,7 @@
 #define LV_COLOR_MIX_ROUND_OFS 0
 
 /** Default display refresh, input device read and animation step period. */
-#define LV_DEF_REFR_PERIOD 33
+#define LV_DEF_REFR_PERIOD 16
 
 /** Used to initialize default sizes such as widget sizes and style paddings. */
 #define LV_DPI_DEF 130
@@ -1055,7 +1055,7 @@
 #define LV_FONT_MONTSERRAT_26 0
 
 /** Montserrat 28 */
-#define LV_FONT_MONTSERRAT_28 0
+#define LV_FONT_MONTSERRAT_28 1
 
 /** Montserrat 30 */
 #define LV_FONT_MONTSERRAT_30 0

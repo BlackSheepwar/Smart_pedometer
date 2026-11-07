@@ -12,6 +12,11 @@
  *       取事件的代码写在这里，不在按键服务里：服务只负责消抖和投递，
  *       一旦把"怎么取、等多久"塞进服务，服务就被绑在 RTOS 上了。
  *
+ *       屏幕不归本线程所有：ST7789 的初始化与所有绘制都在 Task_LVGL，
+ *       本线程既不 Dev_ST7789_Init() 也不直接刷屏。B10 的切屏请求由
+ *       APP 的命令表调 Svc_LVGL_Request_Switch() 发出，本线程只做
+ *       "取事件、调命令表"两件事——不碰信号量，也不承担 UI 通知策略。
+ *
  *       线程本身由 CubeMX 按 .ioc 的 Tasks01 创建，这里只提供同名强定义，
  *       覆盖 freertos.c 里生成的 __weak 空入口。
  */
@@ -25,19 +30,7 @@
 #include "cmsis_os2.h"
 // 功能包含
 #include "app_key_cmd.h"
-#include "dev_st7789.h"
 #include "app_level.h"
-
-/*==============================================================================
- * 宏定义与常量
- *============================================================================*/
-/**
- * @brief 上电后等面板供电与内部复位完成的延时（ms）
- * @note 只是等电源稳定，不承担"让出 CPU"的职责：Dev_ST7789_Init() 内部
- *       的复位/上电等待已经改用 osDelay，会主动让出 CPU，期间 OLED 任务
- *       照常能跑。
- */
-#define TASK_KEY_CMD_POWERUP_DELAY_MS   200u
 
 /*==============================================================================
  * 外部声明
@@ -54,6 +47,7 @@ extern osMessageQueueId_t KEY_EVT_QHandle;
 /**
  * @brief 按键命令线程体
  * @param argument 未使用
+ * @retval 无
  * @note 一直阻塞在队列上，被投递唤醒后执行一条命令；
  *       没有事件时线程不占 CPU（由内核挂起，直到队列非空）。
  */
@@ -64,16 +58,7 @@ void Task_Key_Cmd(void *argument)
     (void)argument;
     APP_Level_Init();
 
-    /* ---------- 1. 显示先起，再进事件循环 ---------- */
-    osDelay(TASK_KEY_CMD_POWERUP_DELAY_MS);
-
-    if (Dev_ST7789_Init(&dev_st7789_0) == 0) {
-        /* 设备层不再替上层清屏，上电这一帧由应用层刷；这里借用按键模块
-           的测试填充，避免显存随机噪声停在屏上 */
-        (void)APP_Key_Cmd_TestFillScreen(0x0210u);
-    }
-
-    /* ---------- 2. 阻塞收事件，来一条处理一条 ---------- */
+    /* ---------- 阻塞收事件，来一条处理一条 ---------- */
     for (;;) {
         if (osMessageQueueGet(KEY_EVT_QHandle, &msg, NULL, osWaitForever) == osOK) {
             APP_Key_Cmd_Packet(msg.key, msg.event);

@@ -43,7 +43,10 @@ extern const dev_key_t dev_key_dec;
  */
 extern const dev_key_t dev_key_led;
 /**
- * @brief 颜色键（PB10，上拉输入，低电平按下）：循环切换 LCD 三原色
+ * @brief 界面键（PB10，上拉输入，低电平按下）
+ * @note 名字沿用早期"颜色键"的叫法（那时用它循环刷 LCD 三原色）。
+ *       该键按下后做什么由 APP 层的命令表决定；设备层只提供物理电平，
+ *       不感知屏幕，也不感知上层用的是哪套 GUI 库。
  */
 extern const dev_key_t dev_key_color;
 
