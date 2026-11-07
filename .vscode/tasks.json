@@ -37,7 +37,7 @@
                 "-c",
                 "port=SWD",
                 "-d",
-                "${workspaceFolder}/build/Debug/frame.elf",/*正确填写elf文件路径*/
+                "${workspaceFolder}/build/Debug/Smart_pedometer.elf",/*正确填写elf文件路径*/
                 "-v",
                 "-rst"
             ],
