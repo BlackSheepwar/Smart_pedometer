@@ -81,9 +81,6 @@ target_include_directories(dev_st7789
 target_link_libraries(dev_st7789
     PRIVATE bsp_spi
     PRIVATE bsp_gpio
-    # 只为 HAL_Delay：ST7789 的上电时序需要十余处毫秒级阻塞延时，
-    # 且分散在命令之间，只能写在 Init 内部。头文件不出现任何 HAL 类型。
-    PRIVATE stm32cubemx
 )
 target_compile_options(dev_st7789 PRIVATE ${USER_WARN_FLAGS})
 

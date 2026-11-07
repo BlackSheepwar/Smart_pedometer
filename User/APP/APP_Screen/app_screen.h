@@ -8,11 +8,18 @@
  *       （那是按键业务，在 APP_Key_Cmd），也不管"怎么画到面板上"
  *       （那是 Service 的 Svc_LVGL 显示服务）。
  *
+ *       对外提供两种"切屏"入口，别混用：
+ *         - APP_Screen_Request_Next()  任意线程可调，只发一次请求；
+ *         - APP_Screen_Next()          只能在 LVGL 线程里调，真的换屏。
+ *       前者是**切屏接口**（本层拥有屏幕语义），后者是显示线程的执行动作。
+ *
  *       头文件不出现 lv_obj_t：screen 指针留在本模块的 static 里，
  *       上层只能调 Init / Next / Index。LVGL 因此是 PRIVATE 依赖。
  *
- *       线程约束：三个函数都必须在 LVGL 线程里调用（Task_LVGL），
- *       不能从按键线程直接调——LVGL 不是线程安全的。
+ *       线程约束：除 Request_Next 外，三个函数都必须在 LVGL 线程里调用
+ *       （Task_LVGL），不能从按键线程直接调——LVGL 不是线程安全的。
+ *       Request_Next 之所以安全，是因为它内部只调 Service 的信号量释放，
+ *       一个 lv_ 函数都不碰。
  */
 
 #ifndef __APP_Screen_H__
@@ -38,11 +45,24 @@
 void APP_Screen_Init(void);
 
 /**
+ * @brief 请求切到下一屏（任意线程可调，不阻塞）
+ * @retval 0: 请求已发出
+ * @retval -1: 上一次请求还没被显示线程消费（丢弃本次，不排队）
+ * @note **切屏接口在本层**，不在显示服务：屏幕有几张、当前第几张是本模块
+ *       的知识，Service 只提供"叫醒显示线程"的机制。
+ *       内部只调 Svc_LVGL_Request_Update()，一个 lv_ 函数都不碰，所以可以
+ *       从按键线程安全调用；真正的换屏由 Task_LVGL 收到通知后调
+ *       APP_Screen_Next() 完成。
+ */
+int APP_Screen_Request_Next(void);
+
+/**
  * @brief 切到下一屏（0 → 1 → 0 循环）
  * @retval 无
- * @note 内部只是换 screen 并标记重绘，真正的像素输出发生在下一次
+ * @note **只能在 LVGL 线程里调用**（Task_LVGL），按键线程请用
+ *       APP_Screen_Request_Next() 发请求。
+ *       内部只是换 screen 并标记重绘，真正的像素输出发生在下一次
  *       Svc_LVGL_Step()（lv_timer_handler）里。
- *       第 0 屏的"当前索引"由 APP_Screen_Index() 读出。
  */
 void APP_Screen_Next(void);
 

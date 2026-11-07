@@ -8,10 +8,11 @@
  *       事件有 DOWN / CLICK / LONG / REPEAT / LONG_UP 五种；
  *       表里没列的组合一律丢弃。本头文件是两者之间唯一的接口。
  *
- *       需要"请求显示线程做点什么"时（例如 B10 切屏），handler 直接调
- *       对应的服务接口（Svc_LVGL_Request_Switch）。本层因此不 include
- *       FreeRTOS.h / cmsis_os2.h，也不用返回值把意图透传给 TASK——
- *       TASK 只负责"取事件、调命令表"，不承担任何 UI 通知策略。
+ *       需要"请求切屏"时（例如 B10），handler 调 APP 层的切屏接口
+ *       APP_Screen_Request_Next()；它内部再转给 Service 的唤醒机制。
+ *       本层因此不 include FreeRTOS.h / cmsis_os2.h，也不用返回值把意图
+ *       透传给 TASK——TASK 只负责"取事件、调命令表"，不承担任何 UI
+ *       通知策略。
  */
 
 #ifndef __APP_KEY_CMD_H__

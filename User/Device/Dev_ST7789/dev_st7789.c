@@ -19,8 +19,9 @@
  *       本层不含颜色语义：所有写显存的入口都是"给我一段字节，我负责
  *       把它送进窗口"。纯色填充、渐变、贴图都是上层的图案，不是设备能力。
  *
- *       时间基准：Init 的复位/上电延时用 osDelay（让出 CPU，低优先级
- *       任务照常运行）；传输超时交给 BSP 的 timeout_ms，本层不自己计数。
+ *       时间基准：Init 的复位/上电延时由调用方以 dev_st7789_delay_t 注入，
+ *       本文件因此不含 FreeRTOS.h / cmsis_os2.h；传输超时交给 BSP 的
+ *       timeout_ms，本层不自己计数。
  */
 
 /*==============================================================================
@@ -29,8 +30,6 @@
 // 固定包含
 #include <stddef.h>
 #include "dev_st7789.h"
-#include "FreeRTOS.h"
-#include "cmsis_os2.h"
 // 功能包含
 #include "bsp_spi.h"
 #include "bsp_gpio.h"
@@ -250,18 +249,21 @@ static void Dev_ST7789_FrameClose(const dev_st7789_t *lcd)
  *============================================================================*/
 /**
  * @brief 初始化面板：硬复位 → 软复位 → 上电时序 → 开显示
- * @param lcd 面板句柄，不能为 NULL
+ * @param lcd      面板句柄，不能为 NULL
+ * @param delay_ms 毫秒延时来源，不能为 NULL；整个时序共约 465 ms
  * @retval 0: 初始化成功
- * @retval -1: 句柄或成员为空、调度器尚未运行，或面板几何越出 ST7789
+ * @retval -1: 句柄或成员为空、delay_ms 为 NULL，或面板几何越出 ST7789
  *         显存范围（列方向 240、行方向 320）
  * @retval -2: SPI 传输失败
- * @note 必须在调度器启动后的线程里调用：内部用 osDelay 等复位时序，
- *       调度器没跑时 osDelay 不会真的等，时序会全部落空。
+ * @note 本函数不含任何 OS 调用：延时由 delay_ms 注入，本层只描述"按手册
+ *       要等 N 毫秒"。调用方仍须在调度器启动后的线程里调用——
+ *       注入 osDelay 时调度器没跑不会真的等，时序会全部落空；
+ *       注入忙等则不会让出 CPU，低优先级任务在这 465 ms 内得不到执行。
  *       上电时序取自 ST7789V 常见模组配置（240×320 IPS），若屏幕颜色
  *       发灰或出现残影，优先调 PORCTRL / VCOMS / 伽马三段，其余项一般
  *       不用动。结束后不清屏，第一帧由应用层自己刷。
  */
-int Dev_ST7789_Init(const dev_st7789_t *lcd)
+int Dev_ST7789_Init(const dev_st7789_t *lcd, dev_st7789_delay_t delay_ms)
 {
     static const uint8_t porctrl[]  = { 0x0Cu, 0x0Cu, 0x00u, 0x33u, 0x33u };
     static const uint8_t gctrl[]    = { 0x35u };
@@ -281,11 +283,8 @@ int Dev_ST7789_Init(const dev_st7789_t *lcd)
                                         0x1Fu, 0x1Fu, 0x20u, 0x23u };
 
     if ((lcd == NULL) || (lcd->bus == NULL) ||
-        (lcd->dev == NULL) || (lcd->dc == NULL)) {
-        return -1;
-    }
-    /* 调度器没跑时 osDelay 不会真的等，复位时序全部落空，直接拒绝 */
-    if (osKernelGetState() != osKernelRunning) {
+        (lcd->dev == NULL) || (lcd->dc == NULL) ||
+        (delay_ms == NULL)) {
         return -1;
     }
     /* 面板几何必须落在 ST7789 显存 240×320 之内：配错会发出非法 CASET/
@@ -302,22 +301,22 @@ int Dev_ST7789_Init(const dev_st7789_t *lcd)
     /* ---------- 1. 硬复位：RST 低 20 ms 再拉高，等待内部复位完成 ---------- */
     if (lcd->rst != NULL) {
         BSP_GPIO_Write(lcd->rst, 1u);
-        (void)osDelay(5u);
+        delay_ms(5u);
         BSP_GPIO_Write(lcd->rst, 0u);
-        (void)osDelay(20u);
+        delay_ms(20u);
         BSP_GPIO_Write(lcd->rst, 1u);
-        (void)osDelay(120u);
+        delay_ms(120u);
     }
 
     /* ---------- 2. 软复位与退出睡眠 ---------- */
     if (Dev_ST7789_Cmd(lcd, (uint8_t)DEV_ST7789_CMD_SWRESET, NULL, 0u) != 0) {
         return -2;
     }
-    (void)osDelay(150u);
+    delay_ms(150u);
     if (Dev_ST7789_Cmd(lcd, (uint8_t)DEV_ST7789_CMD_SLPOUT, NULL, 0u) != 0) {
         return -2;
     }
-    (void)osDelay(150u);   /* 手册要求 120 ms，留一档余量避免边界 */
+    delay_ms(150u);        /* 手册要求 120 ms，留一档余量避免边界 */
 
     /* ---------- 3. 像素格式：16 bit RGB565 ---------- */
     if (DEV_ST7789_CMD_FAILED(lcd, (uint8_t)DEV_ST7789_CMD_COLMOD, colmod16)) {
@@ -353,7 +352,7 @@ int Dev_ST7789_Init(const dev_st7789_t *lcd)
     if (Dev_ST7789_Cmd(lcd, (uint8_t)DEV_ST7789_CMD_DISPON, NULL, 0u) != 0) {
         return -2;
     }
-    (void)osDelay(20u);
+    delay_ms(20u);
 
     /* ---------- 7. 默认方向：MADCTL 放在开显示之后，第一帧就是正确朝向 ---------- */
     if (Dev_ST7789_SetRotation(lcd, 0u) != 0) {

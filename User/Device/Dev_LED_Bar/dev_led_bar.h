@@ -5,8 +5,7 @@
  * @date 2026-10-23
  *
  * @note 只回答"这个设备能做什么"，不回答"什么时候做"。
- *       上层统一用 Dev_Led_Bar_Set(n) 控制，不管底层是 8 个 GPIO、
- *       一颗 WS2812、还是一块 I2C 的 LED 驱动芯片。
+ *       Set() 的每一位对应一颗灯，位为 1 点亮、位为 0 熄灭。
  */
 
 #ifndef __Dev_Led_Bar_H__
@@ -38,11 +37,12 @@ extern const dev_led_bar_t dev_led_bar_0;
  * 函数声明
  *============================================================================*/
 /**
- * @brief 点亮前 lit 颗灯，其余熄灭
+ * @brief 按 8 位位图控制灯带各灯
  * @param bar 灯带设备句柄
- * @param lit 点亮颗数，超出范围自动夹紧到 [0, Dev_LED_Bar_Count(bar)]
+ * @param pattern 点亮位图，bit0 对应第 0 颗灯；1 点亮，0 熄灭
+ * @retval 无
  */
-void Dev_LED_Bar_Set(const dev_led_bar_t *bar, uint8_t lit);
+void Dev_LED_Bar_Set(const dev_led_bar_t *bar, uint8_t pattern);
 
 /**
  * @brief 查询灯带灯珠数量

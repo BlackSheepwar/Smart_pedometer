@@ -18,8 +18,10 @@
  *============================================================================*/
 // 固定包含
 #include <stddef.h>
+// 功能包含
 #include "app_screen.h"
 #include "lvgl.h"
+#include "svc_lvgl.h"
 
 /*==============================================================================
  * 宏定义与常量
@@ -137,9 +139,25 @@ void APP_Screen_Init(void)
 }
 
 /**
+ * @brief 请求切到下一屏（任意线程可调，不阻塞）
+ * @retval 0: 请求已发出
+ * @retval -1: 上一次请求还没被消费（丢弃本次，不排队）
+ * @note 切屏这件事的**接口在本层**，Service 只提供"叫醒显示线程"的机制：
+ *       屏幕有几张、当前第几张属于本模块，换成弹窗或改屏数都不该动
+ *       Svc_LVGL。这里只转手调用服务，不碰任何 lv_ 函数，因此可以从
+ *       按键线程安全调用。
+ *       真正的换屏由 Task_LVGL 收到通知后调 APP_Screen_Next() 完成。
+ */
+int APP_Screen_Request_Next(void)
+{
+    return Svc_LVGL_Request_Update();
+}
+
+/**
  * @brief 切到下一屏（0 → 1 → 0 循环）
  * @retval 无
  * @note 只改指针并标记重绘，像素输出在下一次 lv_timer_handler()。
+ *       只能在 LVGL 线程里调用；按键线程走 APP_Screen_Request_Next()。
  */
 void APP_Screen_Next(void)
 {

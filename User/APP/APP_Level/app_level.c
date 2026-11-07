@@ -26,6 +26,20 @@
  *============================================================================*/
 static uint8_t s_level = 0;                 /* 当前档位 */
 
+/**
+ * @brief 将连续点亮档位转换为灯带位图
+ * @param level 连续点亮灯数，范围为 0~8
+ * @retval 对应位图，低位先点亮
+ */
+static uint8_t APP_Level_To_Pattern(uint8_t level)
+{
+    if (level >= 8u) {
+        return 0xFFu;
+    }
+
+    return (uint8_t)((1u << level) - 1u);
+}
+
 /*==============================================================================
  * 接口实现
  *============================================================================*/
@@ -41,7 +55,7 @@ static uint8_t s_level = 0;                 /* 当前档位 */
 void APP_Level_Init(void)
 {
     s_level = 0u;
-    Dev_LED_Bar_Set(&dev_led_bar_0, s_level);
+    Dev_LED_Bar_Set(&dev_led_bar_0, APP_Level_To_Pattern(s_level));
 }
 
 /**
@@ -61,5 +75,5 @@ void APP_Level_Step(int8_t delta)
     }
 
     s_level = (uint8_t)next;
-    Dev_LED_Bar_Set(&dev_led_bar_0, s_level);
+    Dev_LED_Bar_Set(&dev_led_bar_0, APP_Level_To_Pattern(s_level));
 }

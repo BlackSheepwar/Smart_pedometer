@@ -52,11 +52,12 @@ const dev_led_bar_t dev_led_bar_0 = {
  * 接口实现
  *============================================================================*/
 /**
- * @brief 点亮前 lit 颗灯，其余熄灭
+ * @brief 按 8 位位图控制灯带各灯
  * @param bar 灯带设备句柄
- * @param lit 点亮颗数，超出范围自动夹紧到 [0, Dev_LED_Bar_Count(bar)]
+ * @param pattern 点亮位图，bit0 对应第 0 颗灯；1 点亮，0 熄灭
+ * @retval 无
  */
-void Dev_LED_Bar_Set(const dev_led_bar_t *bar, uint8_t lit)
+void Dev_LED_Bar_Set(const dev_led_bar_t *bar, uint8_t pattern)
 {
     uint8_t index;
     uint8_t on_level;
@@ -66,19 +67,16 @@ void Dev_LED_Bar_Set(const dev_led_bar_t *bar, uint8_t lit)
         return;
     }
 
-    /* ---------- 1. 超出灯珠数量就夹紧 ---------- */
-    if (lit > bar->count) {
-        lit = bar->count;
-    }
-
-    /* ---------- 2. 极性只在入口算一次，循环里不再判断 ---------- */
+    /* ---------- 1. 按设备极性转换逻辑电平 ---------- */
     on_level  = bar->polarity ? 1u : 0u;
     off_level = (uint8_t)(on_level ^ 1u);
 
-    /* ---------- 3. 逐颗写引脚句柄 ---------- */
+    /* ---------- 2. 逐位更新灯带 ---------- */
     for (index = 0u; index < bar->count; ++index) {
-        BSP_GPIO_Write(bar->pins[index], 
-                       (index < lit) ? on_level : off_level);
+        BSP_GPIO_Write(bar->pins[index],
+                       ((pattern & (uint8_t)(1u << index)) != 0u)
+                           ? on_level
+                           : off_level);
     }
 }
 

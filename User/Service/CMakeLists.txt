@@ -48,8 +48,6 @@ target_include_directories(svc_lvgl
 target_link_libraries(svc_lvgl
     PRIVATE dev_st7789
     PRIVATE lvgl
-    # 只为 cmsis_os2.h：Svc_LVGL_Request_Switch() 要释放二值信号量。
-    # 头文件里不出现任何 OS 类型，所以是 PRIVATE。
     PRIVATE stm32cubemx
 )
 target_compile_options(svc_lvgl PRIVATE ${USER_WARN_FLAGS})

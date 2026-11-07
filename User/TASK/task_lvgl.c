@@ -8,15 +8,18 @@
  *         - Svc_LVGL      管"怎么把 LVGL 画到 ST7789 上"；
  *         - APP_Screen    管"有哪几屏、当前是哪一屏"；
  *         - 本文件        只回答"多久跑一次、什么时候切屏"。
- *       业务判断（B10 按下算切屏请求）在 APP_Key_Cmd，通知经显示服务的
- *       Svc_LVGL_Request_Switch() 发出，本线程只做接收与执行。
+ *       业务判断（B10 按下算切屏请求）在 APP_Key_Cmd，切屏接口在
+ *       APP_Screen，唤醒机制在 Svc_LVGL；本线程只做接收与执行。
  *
  *       为什么用"带超时的 Acquire"而不是另起一个切屏线程：
  *       LVGL 不是线程安全的，切屏与 lv_timer_handler() 必须在同一线程。
  *       用 10 ms 超时等信号量，既能及时响应按键，又能保证渲染节拍不断。
  *
- *       毫秒时基不在这里：OS 节拍到毫秒的换算已移入 Svc_LVGL（本层
- *       不再持有任何"时间格式"的知识），本文件只回答"多久调一次 Step"。
+ *       毫秒时基与毫秒延时都在本文件实现并注入 Svc_LVGL：Service 层因此
+ *       不读时钟、也不提供延时手段，"换 OS 只改 TASK"这条约定对显示链路
+ *       成立。时基函数里的 _Static_assert 把 configTICK_RATE_HZ == 1000
+ *       锁在编译期，所以下面 osSemaphoreAcquire() 的超时可以直接按
+ *       毫秒数传，不再需要 freq 折算。
  *
  *       线程由 CubeMX 按 .ioc 的 Tasks01 创建（LVGL_T），这里提供同名强定义，
  *       覆盖 Src/freertos.c 里生成的 __weak 空入口。
@@ -47,9 +50,59 @@
  *============================================================================*/
 /**
  * @brief 切换请求二值信号量：由 CubeMX 在 Src/freertos.c 里创建
- * @note 生产者是 Svc_LVGL_Request_Switch()（按键命令线程调用），消费者是本线程。
+ * @note 生产者是 Svc_LVGL_Request_Update()（由 APP_Screen_Request_Next()
+ *       在按键命令线程里调用），消费者是本线程。两边都不拥有这个对象，
+ *       它由 .ioc 创建在 freertos.c 里。
  */
 extern osSemaphoreId_t LVGL_SW_SEMHandle;
+
+/*==============================================================================
+ * 内部函数
+ *============================================================================*/
+/**
+ * @brief LVGL 的毫秒时基来源
+ * @retval 自内核启动起的毫秒数
+ * @note lv_tick_get() 每被调用一次就回调本函数一次（不做任何缓存），
+ *       一次 lv_timer_handler() 大约取 6~12 次时间，所以本函数必须廉价。
+ *
+ *       本工程 configTICK_RATE_HZ == 1000，1 tick 恰好等于 1 ms，因此
+ *       不需要任何换算，直接把 tick 计数当毫秒返回。下面那条静态断言
+ *       把这个前提锁在**编译期**：将来有人在 CubeMX 里把 tick 频率改成
+ *       100 Hz 或 128 Hz，这里会编译失败，而不是悄悄让整条时间轴慢 10 倍
+ *       ——后者在板子上表现为"动画卡顿、按键反应变慢"，几乎不可能反推
+ *       到 tick 频率这个根因。
+ *
+ *       若确实需要支持任意 tick 频率，换算应写成：
+ *           ms = (uint32_t)(((uint64_t)tick * 1000u) / freq)
+ *       中间量必须用 uint64_t：tick × 1000 在 32 位下的溢出点是
+ *       4 294 967 tick（1 kHz 下仅 71.6 分钟，不是 49 天），且必须
+ *       先乘后除，先除会把整数部分丢光。代价是每次取时间都要跑一次
+ *       64 位除法（__aeabi_uldivmod，约 100~200 周期），按每秒约
+ *       1000 次估算约占 0.1% CPU，在 168 MHz 上不值得付。
+ *
+ *       osKernelGetTickCount() 内部带 IS_IRQ() 分支，任务与中断上下文
+ *       都能安全调用。
+ */
+static uint32_t Task_LVGL_Tick_Ms(void)
+{
+    _Static_assert(configTICK_RATE_HZ == 1000,
+                   "Task_LVGL_Tick_Ms 假设 1 tick = 1 ms；tick 频率变了必须改回换算写法");
+
+    return osKernelGetTickCount();
+}
+
+/**
+ * @brief 面板初始化时序的毫秒延时来源
+ * @param ms 需要等待的毫秒数
+ * @retval 无
+ * @note 用 osDelay 而不是忙等：面板复位那约 465 ms 内会主动让出 CPU，
+ *       按键扫描与 OLED 任务照常运行。设备层只描述"按手册要等 N 毫秒"，
+ *       具体怎么等由本函数决定——这是"换 OS 只改 TASK"的落点之一。
+ */
+static void Task_LVGL_Delay_Ms(uint32_t ms)
+{
+    (void)osDelay(ms);
+}
 
 /*==============================================================================
  * 接口实现
@@ -63,18 +116,17 @@ extern osSemaphoreId_t LVGL_SW_SEMHandle;
  */
 void Task_LVGL(void *argument)
 {
-
     (void)argument;
 
     /* ---------- 1. 显示服务先于界面：screen 需要挂到 display 上 ---------- */
-    if (Svc_LVGL_Init() != 0) {
+    if (Svc_LVGL_Init(Task_LVGL_Tick_Ms, Task_LVGL_Delay_Ms) != 0) {
         for (;;) {
             (void)osDelay(TASK_LVGL_FAULT_DELAY_MS);
         }
     }
     APP_Screen_Init();
 
-    /* ---------- 3. 等通知 → 切屏 → 推进渲染，三件事都在本线程 ---------- */
+    /* ---------- 2. 等通知 → 切屏 → 推进渲染，三件事都在本线程 ---------- */
     for (;;) {
         if (osSemaphoreAcquire(LVGL_SW_SEMHandle, TASK_LVGL_PERIOD_MS) == osOK) {
             APP_Screen_Next();

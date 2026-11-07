@@ -5,12 +5,10 @@
  * @date 2026-11-07
  *
  * @note 本文件是 LVGL 这个第三方库在本工程里的唯一适配器，放在 Service：
- *         - 时基：lv_tick_set_cb() 注册本模块的毫秒时钟，直接返回 OS 的
- *           tick 计数（本工程 1 tick = 1 ms，用静态断言锁在编译期）。
- *           换算放在本层而非 TASK：lv_tick_get() 每次取时间都回调一次，
- *           让 TASK 注入意味着多一层跨模块函数指针，而本层已经因
- *           osSemaphoreRelease() 依赖 cmsis_os2.h，不新增依赖类型。
- *           代价是"换 OS 只改 TASK"这条约定对本服务不再成立；
+ *         - 时基与延时：都由调用方注入（svc_lvgl_tick_ms_t /
+ *           svc_lvgl_delay_ms_t），本层不读时钟、不提供延时手段，
+ *           换 OS 只改 TASK 一处。本文件仅剩 osSemaphoreRelease() 一处
+ *           OS 依赖，那是"怎么唤醒显示线程"的机制，属于 Service 本职；
  *         - 刷屏：flush 回调 → Dev_ST7789_SetWindow() + WritePixels()。
  *           BSP 的 SPI 传输是"抢互斥量 + DMA + 任务通知"的阻塞式完成，
  *           像素写完即可直接 lv_display_flush_ready()，不需要额外的
@@ -54,10 +52,11 @@
  * 外部声明
  *============================================================================*/
 /**
- * @brief 切屏请求二值信号量：由 CubeMX 按 .ioc 的 BinarySemaphores01 创建
+ * @brief 界面动作请求二值信号量：由 CubeMX 按 .ioc 的 BinarySemaphores01 创建
  * @note 创建点在 Src/freertos.c 的 MX_FREERTOS_Init()，本服务只使用不创建。
- *       生产者是 Svc_LVGL_Request_Switch()（按键命令线程），消费者是
- *       Task_LVGL；两边都不拥有对象本身。
+ *       生产者是 Svc_LVGL_Request_Update()（任意线程，当前是按键命令线程），
+ *       消费者是 Task_LVGL；两边都不拥有对象本身。
+ *       名字沿用创建时的叫法；本服务的头文件里已不出现"切屏"语义。
  */
 extern osSemaphoreId_t LVGL_SW_SEMHandle;
 
@@ -77,38 +76,6 @@ static lv_display_t *s_disp;
 /*==============================================================================
  * 内部函数
  *============================================================================*/
-/**
- * @brief LVGL 的毫秒时基来源
- * @retval 自内核启动起的毫秒数
- * @note lv_tick_get() 每被调用一次就回调本函数一次（不做任何缓存），
- *       一次 lv_timer_handler() 大约取 6~12 次时间，所以本函数必须廉价。
- *
- *       本工程 configTICK_RATE_HZ == 1000，1 tick 恰好等于 1 ms，因此
- *       不需要任何换算，直接把 tick 计数当毫秒返回。下面那条静态断言
- *       把这个前提锁在**编译期**：将来有人在 CubeMX 里把 tick 频率改成
- *       100 Hz 或 128 Hz，这里会编译失败，而不是悄悄让整条时间轴慢 10 倍
- *       ——后者在板子上表现为"动画卡顿、按键反应变慢"，几乎不可能反推
- *       到 tick 频率这个根因。
- *
- *       若确实需要支持任意 tick 频率，换算应写成：
- *           ms = (uint32_t)(((uint64_t)tick * 1000u) / freq)
- *       中间量必须用 uint64_t：tick × 1000 在 32 位下的溢出点是
- *       4 294 967 tick（1 kHz 下仅 71.6 分钟，不是 49 天），且必须
- *       先乘后除，先除会把整数部分丢光。代价是每次取时间都要跑一次
- *       64 位除法（__aeabi_uldivmod，约 100~200 周期），按每秒约
- *       1000 次估算约占 0.1% CPU，在 168 MHz 上不值得付。
- *
- *       osKernelGetTickCount() 内部带 IS_IRQ() 分支，任务与中断上下文
- *       都能安全调用；若确定只在任务里用，可换成 xTaskGetTickCount()。
- */
-static uint32_t Svc_LVGL_Tick_Ms(void)
-{
-    _Static_assert(configTICK_RATE_HZ == 1000,
-                   "Svc_LVGL_Tick_Ms 假设 1 tick = 1 ms；tick 频率变了必须改回换算写法");
-
-    return osKernelGetTickCount();
-}
-
 /**
  * @brief 把一块渲染好的区域写到面板
  * @param disp   display 对象，由 LVGL 回传
@@ -163,12 +130,16 @@ static void Svc_LVGL_Flush(lv_display_t *disp, const lv_area_t *area,
  *============================================================================*/
 /**
  * @brief 初始化 LVGL 显示服务：面板 → 内核 → 时基 → display → 缓冲 → flush
+ * @param tick_ms  毫秒时基来源，不可为 NULL；转交给 lv_tick_set_cb()
+ * @param delay_ms 毫秒延时来源，不可为 NULL；转交给面板的复位与上电时序
  * @retval 0: 初始化成功
  * @retval -1: ST7789 面板初始化失败（SPI 时序、几何配置或调度器未运行）
  * @retval -2: lv_display_create() 返回 NULL（LVGL 堆不足）
  * @retval -3: 面板当前逻辑宽高与本服务的缓冲/显示常量不一致
- * @note 必须在**调度器启动之后的线程里**调用：Dev_ST7789_Init() 内部用
- *       osDelay 等复位时序，调度器没跑时延时会全部落空。
+ * @retval -4: tick_ms 或 delay_ms 为 NULL
+ * @note 必须在**调度器启动之后的线程里**调用：面板初始化的复位时序靠
+ *       delay_ms 等待（TASK 注入的通常是 osDelay），调度器没跑时延时会
+ *       全部落空；毫秒时基也依赖内核已启动才能取到有效计数。
  *       本函数之后才能创建任何 LVGL 对象（APP_Screen_Init() 依赖它）。
  *
  *       顺序不能颠倒：display 的颜色格式必须在 set_buffers 之前设置，
@@ -180,10 +151,14 @@ static void Svc_LVGL_Flush(lv_display_t *disp, const lv_area_t *area,
  *       不校验就会按 172 宽去开窗、drv 却按 320 宽做越界判断，表现为
  *       "整屏只刷出左半边"，从现象很难反推到这一行。
  */
-int Svc_LVGL_Init(void)
+int Svc_LVGL_Init(svc_lvgl_tick_ms_t tick_ms, svc_lvgl_delay_ms_t delay_ms)
 {
+    if ((tick_ms == NULL) || (delay_ms == NULL)) {
+        return -4;
+    }
+
     /* ---------- 1. 面板先于 LVGL：失败时不留半个 LVGL 实例 ---------- */
-    if (Dev_ST7789_Init(&dev_st7789_0) != 0) {
+    if (Dev_ST7789_Init(&dev_st7789_0, delay_ms) != 0) {
         return -1;
     }
 
@@ -193,9 +168,9 @@ int Svc_LVGL_Init(void)
         return -3;
     }
 
-    /* ---------- 3. LVGL 内核与时基：毫秒由本模块从 OS 节拍换算 ---------- */
+    /* ---------- 3. LVGL 内核与时基：时钟由 TASK 注入，本层不读 ---------- */
     lv_init();
-    lv_tick_set_cb(Svc_LVGL_Tick_Ms);
+    lv_tick_set_cb(tick_ms);
 
     /* ---------- 4. display、颜色格式、部分缓冲与 flush 回调 ---------- */
     s_disp = lv_display_create((int32_t)SVC_LVGL_HOR_RES,
@@ -229,15 +204,15 @@ void Svc_LVGL_Step(void)
 }
 
 /**
- * @brief 请求显示线程尽快执行一次界面动作（当前用途：切到下一屏）
+ * @brief 请求显示线程尽快执行一次界面动作
  * @retval 0: 请求已发出
  * @retval -1: 句柄尚未创建，或上一次请求还没被消费（二值已为"可用"）
- * @note 不等待、不重试：调用方（按键 handler）必须保持短动作，信号量
- *       已为可用时直接丢弃本次请求。
+ * @note 不等待、不重试：调用方必须保持短动作，信号量已为可用时直接丢弃
+ *       本次请求（二值语义，请求不排队）。
  *       本函数不碰 LVGL，只发一次内核通知，所以可以从任意线程调用；
- *       真正的 lv_screen_load() 由 Task_LVGL 在收到通知后执行。
+ *       具体做什么由 APP 决定——本服务只负责把线程叫醒，不参与决策。
  */
-int Svc_LVGL_Request_Switch(void)
+int Svc_LVGL_Request_Update(void)
 {
     if (LVGL_SW_SEMHandle == NULL) {
         return -1;

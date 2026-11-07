@@ -14,8 +14,9 @@
  *
  *       屏幕不归本线程所有：ST7789 的初始化与所有绘制都在 Task_LVGL，
  *       本线程既不 Dev_ST7789_Init() 也不直接刷屏。B10 的切屏请求由
- *       APP 的命令表调 Svc_LVGL_Request_Switch() 发出，本线程只做
- *       "取事件、调命令表"两件事——不碰信号量，也不承担 UI 通知策略。
+ *       APP 的命令表调 APP_Screen_Request_Next() 发出（切屏接口在 APP，
+ *       唤醒机制在 Service），本线程只做"取事件、调命令表"两件事——
+ *       不碰信号量，也不承担 UI 通知策略。
  *
  *       线程本身由 CubeMX 按 .ioc 的 Tasks01 创建，这里只提供同名强定义，
  *       覆盖 freertos.c 里生成的 __weak 空入口。
