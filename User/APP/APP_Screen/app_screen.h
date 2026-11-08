@@ -45,18 +45,6 @@
 void APP_Screen_Init(void);
 
 /**
- * @brief 请求切到下一屏（任意线程可调，不阻塞）
- * @retval 0: 请求已发出
- * @retval -1: 上一次请求还没被显示线程消费（丢弃本次，不排队）
- * @note **切屏接口在本层**，不在显示服务：屏幕有几张、当前第几张是本模块
- *       的知识，Service 只提供"叫醒显示线程"的机制。
- *       内部只调 Svc_LVGL_Request_Update()，一个 lv_ 函数都不碰，所以可以
- *       从按键线程安全调用；真正的换屏由 Task_LVGL 收到通知后调
- *       APP_Screen_Next() 完成。
- */
-int APP_Screen_Request_Next(void);
-
-/**
  * @brief 切到下一屏（0 → 1 → 0 循环）
  * @retval 无
  * @note **只能在 LVGL 线程里调用**（Task_LVGL），按键线程请用

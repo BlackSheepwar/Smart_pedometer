@@ -48,7 +48,7 @@ target_include_directories(app_key_cmd
 target_link_libraries(app_key_cmd
     PRIVATE svc_key_logic
             app_level
-            app_screen
+            svc_lvgl
             dev_led
 )
 target_compile_options(app_key_cmd PRIVATE ${USER_WARN_FLAGS})

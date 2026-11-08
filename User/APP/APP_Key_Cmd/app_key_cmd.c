@@ -32,7 +32,7 @@
 // 功能包含
 #include "app_key_cmd.h"
 #include "app_level.h"
-#include "app_screen.h"
+#include "svc_lvgl.h"
 #include "dev_led.h"
 
 /*==============================================================================
@@ -97,7 +97,7 @@ static void Key_OFF(void)
  */
 static void Key_Ui_Switch(void)
 {
-    (void)APP_Screen_Request_Next();
+    (void)Svc_LVGL_Request_Update();
 }
 
 /*==============================================================================
