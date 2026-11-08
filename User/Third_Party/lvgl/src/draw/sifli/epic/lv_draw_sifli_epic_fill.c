@@ -43,17 +43,19 @@
  *   GLOBAL FUNCTIONS
  **********************/
 
-void lv_draw_sifli_epic_fill(lv_draw_unit_t * draw_unit, lv_layer_t * layer, const lv_area_t * clip_area,
-                             const lv_draw_fill_dsc_t * dsc, const lv_area_t * coords)
+void lv_draw_sifli_epic_fill(lv_draw_task_t * task)
 {
-    LV_UNUSED(draw_unit);
+    const lv_draw_fill_dsc_t * dsc = (const lv_draw_fill_dsc_t *)task->draw_dsc;
+    const lv_area_t * coords = &task->area;
 
     if(dsc->opa <= LV_OPA_MIN) {
         return;
     }
 
+    lv_layer_t * layer = task->target_layer;
+
     lv_area_t blend_area;
-    if(!lv_area_intersect(&blend_area, coords, clip_area)) {
+    if(!lv_area_intersect(&blend_area, coords, &task->clip_area)) {
         return; /* Fully clipped */
     }
 
@@ -67,7 +69,7 @@ void lv_draw_sifli_epic_fill(lv_draw_unit_t * draw_unit, lv_layer_t * layer, con
         EPIC_LayerConfigTypeDef input_layers[1];
         EPIC_LayerConfigTypeDef output_canvas;
 
-        if(lv_epic_setup_layers(&input_layers[0], &output_canvas, layer, clip_area, coords)) {
+        if(lv_epic_setup_layers(&input_layers[0], &output_canvas, task, coords)) {
             return; /* Fully clipped */
         }
 

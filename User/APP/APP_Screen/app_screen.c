@@ -89,6 +89,7 @@ static lv_obj_t *APP_Screen_Make(uint32_t bg, uint32_t accent,
         lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0u);
         lv_obj_set_style_border_width(bar, 0, 0u);
         lv_obj_set_style_radius(bar, APP_SCREEN_BAR_RADIUS, 0u);
+        lv_obj_set_style_pad_all(bar, 0, 0u);
         lv_obj_align(bar, LV_ALIGN_CENTER, 0, -100);
     }
 

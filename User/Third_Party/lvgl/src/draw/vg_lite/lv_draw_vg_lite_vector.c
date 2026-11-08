@@ -36,11 +36,6 @@
 typedef void * path_drop_data_t;
 typedef void (*path_drop_func_t)(struct _lv_draw_vg_lite_unit_t *, path_drop_data_t);
 
-typedef struct {
-    lv_draw_vg_lite_unit_t * u;
-    lv_opa_t opa;
-} vector_draw_ctx_t;
-
 /**********************
  *  STATIC PROTOTYPES
  **********************/
@@ -63,29 +58,19 @@ static vg_lite_fill_t lv_fill_to_vg(lv_vector_fill_t fill_rule);
  *   GLOBAL FUNCTIONS
  **********************/
 
-void lv_draw_vg_lite_vector(lv_draw_unit_t * draw_unit, lv_layer_t * layer, const lv_area_t * clip_area,
-                            const lv_draw_vector_dsc_t * dsc)
+void lv_draw_vg_lite_vector(lv_draw_task_t * t, const lv_draw_vector_dsc_t * dsc)
 {
-    LV_UNUSED(layer);
-    LV_UNUSED(clip_area);
-
     if(dsc->task_list == NULL)
         return;
 
-    lv_layer_t * dsc_layer = dsc->base.layer;
-    if(dsc_layer->draw_buf == NULL) {
-        lv_vector_for_each_destroy_tasks(dsc->task_list, NULL, NULL);
+    lv_layer_t * layer = dsc->base.layer;
+    if(layer->draw_buf == NULL)
         return;
-    }
 
-    lv_draw_vg_lite_unit_t * u = (lv_draw_vg_lite_unit_t *)draw_unit;
-
-    vector_draw_ctx_t draw_ctx;
-    draw_ctx.u = u;
-    draw_ctx.opa = dsc->opa;
+    lv_draw_vg_lite_unit_t * u = (lv_draw_vg_lite_unit_t *)t->draw_unit;
 
     LV_PROFILER_DRAW_BEGIN;
-    lv_vector_for_each_destroy_tasks(dsc->task_list, task_draw_cb, &draw_ctx);
+    lv_vector_for_each_destroy_tasks(dsc->task_list, task_draw_cb, u);
     LV_PROFILER_DRAW_END;
 }
 
@@ -278,9 +263,7 @@ static void draw_stroke(lv_draw_vg_lite_unit_t * u,
 static void task_draw_cb(void * user_data, const lv_vector_path_t * path, const lv_vector_path_ctx_t * ctx)
 {
     LV_PROFILER_DRAW_BEGIN;
-    vector_draw_ctx_t * draw_ctx = user_data;
-    lv_draw_vg_lite_unit_t * u = draw_ctx->u;
-    const lv_opa_t layer_opa = draw_ctx->opa;
+    lv_draw_vg_lite_unit_t * u = user_data;
     LV_VG_LITE_ASSERT_DEST_BUFFER(&u->target_buffer);
 
     vg_lite_matrix_t matrix = u->global_matrix;
@@ -291,7 +274,7 @@ static void task_draw_cb(void * user_data, const lv_vector_path_t * path, const 
 
     /* clear area */
     if(!path) {
-        vg_lite_color_t c = lv_color32_to_vg(ctx->fill_dsc.color, OPA_MIX(ctx->fill_dsc.opa, layer_opa));
+        vg_lite_color_t c = lv_color32_to_vg(ctx->fill_dsc.color, OPA_MIX(ctx->fill_dsc.opa, u->task_act->opa));
         lv_vg_lite_clear(&u->target_buffer, &scissor_area, c);
         LV_PROFILER_DRAW_END;
         return;
@@ -339,6 +322,8 @@ static void task_draw_cb(void * user_data, const lv_vector_path_t * path, const 
         const lv_area_t bounding_box_area = lv_matrix_transform_area((lv_matrix_t *)&result, &scissor_area);
         lv_vg_lite_path_set_bounding_box_area(lv_vg_path, &bounding_box_area);
     }
+
+    const lv_opa_t layer_opa = u->task_act->opa;
 
     if(ctx->fill_dsc.opa) {
         draw_fill(u, lv_vg_path, ctx, &matrix, &offset, layer_opa);

@@ -1,8 +1,20 @@
 # =============================================================================
 # Third_Party 层：别人写的代码，只读
 #
-#   lvgl：LVGL 10.0.0-dev 核心库。上游只保留 src 与 include 两棵树，
-#         没有 CMakeLists，所以由本文件替它建一个静态库。
+#   lvgl：LVGL 9.6.0 核心库（上游 v9.6.0 正式版 tag，非开发分支）。
+#         只保留 src 与 include 两棵树 + 三个转发头 + lv_conf_template.h，
+#         上游自带的 CMakeLists 未拷入，所以由本文件替它建一个静态库。
+#
+#   只收 *.c 是有意的：
+#     上游 src/ 下还有 67 个 .cpp（thorvg、vg_lite_tvg、lovyan_gfx、
+#     tft_espi、arduino fs）。本工程是纯 C，这些文件既不该编也编不过；
+#     对应功能由 lv_conf.h 里的 LV_USE_* 全部关掉，不链接即可。
+#
+#   lv_conf.h 的位置：
+#     放在本目录的 lvgl/ 下，靠 -I lvgl 被 lv_conf_internal.h 的
+#     __has_include("lv_conf.h") 探测到，进而自动开 LV_CONF_INCLUDE_SIMPLE。
+#     若哪天探测失效（换到不支持 __has_include 的编译器），把它移到
+#     User/Third_Party/lv_conf.h（与 lvgl 同级）即可走默认回退路径。
 #
 #   为什么用 GLOB_RECURSE：
 #     上游模块随版本增删，逐个列 480 个 .c 只会得到一份永远在过期的清单。

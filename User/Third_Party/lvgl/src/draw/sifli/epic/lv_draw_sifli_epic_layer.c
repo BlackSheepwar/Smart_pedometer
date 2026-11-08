@@ -41,9 +41,9 @@
  *   GLOBAL FUNCTIONS
  **********************/
 
-void lv_draw_sifli_epic_layer(lv_draw_unit_t * draw_unit, lv_layer_t * layer, const lv_area_t * clip_area,
-                              const lv_draw_image_dsc_t * dsc, const lv_area_t * coords)
+void lv_draw_sifli_epic_layer(lv_draw_task_t * task)
 {
+    const lv_draw_image_dsc_t * dsc = (const lv_draw_image_dsc_t *)task->draw_dsc;
     lv_layer_t * layer_to_draw = (lv_layer_t *)dsc->src;
 
     if(dsc->opa <= LV_OPA_MIN) {
@@ -68,7 +68,10 @@ void lv_draw_sifli_epic_layer(lv_draw_unit_t * draw_unit, lv_layer_t * layer, co
     lv_draw_image_dsc_t new_draw_dsc = *dsc;
     new_draw_dsc.src = layer_to_draw->draw_buf;
 
-    lv_draw_sifli_epic_img(draw_unit, layer, clip_area, &new_draw_dsc, coords);
+    lv_draw_task_t img_task = *task;
+    img_task.draw_dsc = &new_draw_dsc;
+
+    lv_draw_sifli_epic_img(&img_task);
 }
 
 /**********************

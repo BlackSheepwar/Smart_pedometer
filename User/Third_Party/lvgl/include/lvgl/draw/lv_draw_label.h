@@ -30,10 +30,7 @@ extern "C" {
  **********************/
 
 typedef struct {
-    lv_draw_dsc_t base;
-
-    /**The area to draw*/
-    lv_area_t coords;
+    lv_draw_dsc_base_t base;
 
     /**The text to draw*/
     const char * text;
@@ -117,10 +114,7 @@ typedef struct {
 } lv_draw_label_dsc_t;
 
 typedef struct {
-    lv_draw_dsc_t base;
-
-    /**The area to draw*/
-    lv_area_t coords;
+    lv_draw_dsc_base_t base;
 
     uint32_t unicode;
     const lv_font_t * font;
@@ -147,8 +141,7 @@ typedef struct {
 /**
  * Passed as a parameter to `lv_draw_label_iterate_characters` to
  * draw the characters one by one
- * @param layer         the target layer
- * @param clip_area     the clip area
+ * @param t             pointer to a draw task
  * @param dsc           pointer to `lv_draw_glyph_dsc_t` to describe the character to draw
  *                      if NULL don't draw character
  * @param fill_dsc      pointer to a fill descriptor to draw a background for the character or
@@ -156,10 +149,9 @@ typedef struct {
  *                      if NULL do not fill anything
  * @param fill_area     the area to fill
  *                      if NULL do not fill anything
- * @param user_data     the `user_data` passed to `lv_draw_label_iterate_characters` or `lv_draw_unit_draw_letter`
  */
-typedef void (*lv_draw_glyph_cb_t)(lv_layer_t * layer, const lv_area_t * clip_area, lv_draw_glyph_dsc_t * dsc,
-                                   lv_draw_fill_dsc_t * fill_dsc, const lv_area_t * fill_area, void * user_data);
+typedef void(*lv_draw_glyph_cb_t)(lv_draw_task_t * t, lv_draw_glyph_dsc_t * dsc, lv_draw_fill_dsc_t * fill_dsc,
+                                  const lv_area_t * fill_area);
 
 /**********************
  * GLOBAL PROTOTYPES
@@ -176,25 +168,9 @@ void /* LV_ATTRIBUTE_FAST_MEM */ lv_draw_label_dsc_init(lv_draw_label_dsc_t * ds
 /**
  * Try to get a label draw descriptor from a draw task.
  * @param task      draw task
- * @return          the task's draw descriptor or NULL if the task is not of type LV_DRAW_DSC_TYPE_LABEL
+ * @return          the task's draw descriptor or NULL if the task is not of type LV_DRAW_TASK_TYPE_LABEL
  */
 lv_draw_label_dsc_t * lv_draw_task_get_label_dsc(lv_draw_task_t * task);
-
-/**
- * Get the label draw descriptor from a generic draw descriptor.
- * `dsc` must be of type LV_DRAW_DSC_TYPE_LABEL, use `lv_draw_dsc_get_type()` to check it first.
- * @param dsc       draw descriptor
- * @return          the label draw descriptor
- */
-lv_draw_label_dsc_t * lv_draw_dsc_get_label_dsc(lv_draw_dsc_t * dsc);
-
-/**
- * Get the letter draw descriptor from a generic draw descriptor.
- * `dsc` must be of type LV_DRAW_DSC_TYPE_LETTER, use `lv_draw_dsc_get_type()` to check it first.
- * @param dsc       draw descriptor
- * @return          the letter draw descriptor
- */
-lv_draw_letter_dsc_t * lv_draw_dsc_get_letter_dsc(lv_draw_dsc_t * dsc);
 
 /**
  * Initialize a glyph draw descriptor.
@@ -234,19 +210,16 @@ void /* LV_ATTRIBUTE_FAST_MEM */ lv_draw_letter(lv_layer_t * layer, lv_draw_lett
 /**
  * Should be used during rendering the characters to get the position and other
  * parameters of the characters
- * @param layer         the target layer
- * @param clip_area     the clip area
+ * @param t             pointer to a draw task
  * @param dsc           pointer to draw descriptor
  * @param coords        coordinates of the label
  * @param cb            a callback to call to draw each glyphs one by one
- * @param user_data     passed to cb as is @nullable
  */
-void lv_draw_label_iterate_characters(lv_layer_t * layer, const lv_area_t * clip_area,
-                                      const lv_draw_label_dsc_t * dsc, const lv_area_t * coords,
-                                      lv_draw_glyph_cb_t cb, void * user_data);
+void lv_draw_label_iterate_characters(lv_draw_task_t * t, const lv_draw_label_dsc_t * dsc,
+                                      const lv_area_t * coords, lv_draw_glyph_cb_t cb);
 
 /**
- * @brief Draw a single letter using the provided layer, glyph descriptor, position, font, and callback.
+ * @brief Draw a single letter using the provided draw unit, glyph descriptor, position, font, and callback.
  *
  * This function is responsible for rendering a single character from a text string,
  * applying the necessary styling described by the glyph descriptor (`dsc`). It handles
@@ -254,18 +227,15 @@ void lv_draw_label_iterate_characters(lv_layer_t * layer, const lv_area_t * clip
  * and invokes the callback (`cb`) to render the glyph at the specified position (`pos`)
  * using the given font (`font`).
  *
- * @param layer         the target layer
- * @param clip_area     the clip area
+ * @param t             Pointer to the drawing task.
  * @param dsc           Pointer to the descriptor containing styling for the glyph to be drawn.
  * @param pos           Pointer to the point coordinates where the letter should be drawn.
  * @param font          Pointer to the font containing the glyph.
  * @param letter        The Unicode code point of the letter to be drawn.
  * @param cb            Callback function to execute the actual rendering of the glyph.
- * @param user_data     passed to cb as is @nullable
  */
-void lv_draw_unit_draw_letter(lv_layer_t * layer, const lv_area_t * clip_area, lv_draw_glyph_dsc_t * dsc,
-                              const lv_point_t * pos, const lv_font_t * font, uint32_t letter,
-                              lv_draw_glyph_cb_t cb, void * user_data);
+void lv_draw_unit_draw_letter(lv_draw_task_t * t, lv_draw_glyph_dsc_t * dsc,  const lv_point_t * pos,
+                              const lv_font_t * font, uint32_t letter, lv_draw_glyph_cb_t cb);
 
 /***********************
  * GLOBAL VARIABLES

@@ -52,16 +52,13 @@ static void convert_row_argb8888_to_argb4444(const uint8_t * src, uint8_t * dst,
  *   GLOBAL FUNCTIONS
  **********************/
 
-void lv_draw_eve_image(lv_draw_unit_t * draw_unit, lv_layer_t * layer, const lv_area_t * clip_area,
-                       const lv_draw_image_dsc_t * dsc, const lv_area_t * coords)
+void lv_draw_eve_image(lv_draw_task_t * t, const lv_draw_image_dsc_t * draw_dsc, const lv_area_t * coords)
 {
-    LV_UNUSED(draw_unit);
-    LV_UNUSED(layer);
-    if(!lv_draw_eve_image_src_check(dsc->src)) {
+    if(!lv_draw_eve_image_src_check(draw_dsc->src)) {
         return;
     }
 
-    const lv_image_dsc_t * img_dsc = dsc->src;
+    const lv_image_dsc_t * img_dsc = draw_dsc->src;
 
     int32_t src_w = img_dsc->header.w;
     int32_t src_h = img_dsc->header.h;
@@ -100,14 +97,14 @@ void lv_draw_eve_image(lv_draw_unit_t * draw_unit, lv_layer_t * layer, const lv_
         return;
     }
 
-    lv_eve_scissor(clip_area->x1, clip_area->y1, clip_area->x2, clip_area->y2);
+    lv_eve_scissor(t->clip_area.x1, t->clip_area.y1, t->clip_area.x2, t->clip_area.y2);
 
     lv_eve_save_context();
 
-    lv_eve_color_opa(dsc->opa);
+    lv_eve_color_opa(draw_dsc->opa);
 
-    if(dsc->recolor_opa > LV_OPA_MIN) {
-        lv_eve_color(lv_color_mix(dsc->recolor, lv_color_white(), dsc->recolor_opa));
+    if(draw_dsc->recolor_opa > LV_OPA_MIN) {
+        lv_eve_color(lv_color_mix(draw_dsc->recolor, lv_color_white(), draw_dsc->recolor_opa));
     }
 
     lv_eve_primitive(LV_EVE_PRIMITIVE_BITMAPS);
@@ -117,23 +114,23 @@ void lv_draw_eve_image(lv_draw_unit_t * draw_unit, lv_layer_t * layer, const lv_
 
     lv_eve_bitmap_layout(eve_format, eve_stride, src_h);
 
-    if(dsc->rotation || dsc->scale_x != LV_SCALE_NONE || dsc->scale_y != LV_SCALE_NONE) {
+    if(draw_dsc->rotation || draw_dsc->scale_x != LV_SCALE_NONE || draw_dsc->scale_y != LV_SCALE_NONE) {
         EVE_cmd_dl_burst(CMD_LOADIDENTITY);
 
-        EVE_cmd_translate_burst(F16(coords->x1 - clip_area->x1 + dsc->pivot.x),
-                                F16(coords->y1 - clip_area->y1 + dsc->pivot.y));
-        if(dsc->scale_x != LV_SCALE_NONE || dsc->scale_y != LV_SCALE_NONE) {
+        EVE_cmd_translate_burst(F16(coords->x1 - t->clip_area.x1 + draw_dsc->pivot.x),
+                                F16(coords->y1 - t->clip_area.y1 + draw_dsc->pivot.y));
+        if(draw_dsc->scale_x != LV_SCALE_NONE || draw_dsc->scale_y != LV_SCALE_NONE) {
             /*Image Scale*/
-            EVE_cmd_scale_burst(F16_SCALE_DIV_256(dsc->scale_x), F16_SCALE_DIV_256(dsc->scale_y));
+            EVE_cmd_scale_burst(F16_SCALE_DIV_256(draw_dsc->scale_x), F16_SCALE_DIV_256(draw_dsc->scale_y));
         }
-        if(dsc->rotation != 0) {
+        if(draw_dsc->rotation != 0) {
             /*Image Rotate*/
-            EVE_cmd_rotate_burst(DEGREES(dsc->rotation));
+            EVE_cmd_rotate_burst(DEGREES(draw_dsc->rotation));
         }
-        EVE_cmd_translate_burst(-F16(dsc->pivot.x), -F16(dsc->pivot.y));
+        EVE_cmd_translate_burst(-F16(draw_dsc->pivot.x), -F16(draw_dsc->pivot.y));
         EVE_cmd_dl_burst(CMD_SETMATRIX);
         EVE_cmd_dl_burst(CMD_LOADIDENTITY);
-        lv_eve_vertex_2f(clip_area->x1, clip_area->y1);
+        lv_eve_vertex_2f(t->clip_area.x1, t->clip_area.y1);
     }
     else {
         lv_eve_vertex_2f(coords->x1, coords->y1);

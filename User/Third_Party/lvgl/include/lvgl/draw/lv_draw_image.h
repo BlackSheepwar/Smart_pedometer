@@ -27,10 +27,7 @@ extern "C" {
  **********************/
 
 struct _lv_draw_image_dsc_t {
-    lv_draw_dsc_t base;
-
-    /**The area to draw*/
-    lv_area_t coords;
+    lv_draw_dsc_base_t base;
 
     /**The image source: pointer to `lv_image_dsc_t` or a path to a file*/
     const void * src;
@@ -104,18 +101,16 @@ struct _lv_draw_image_dsc_t {
 
 /**
  * PErform the actual rendering of a decoded image
- * @param layer             the target layer
+ * @param t                 pointer to a draw task
  * @param draw_dsc          the draw descriptor of the image
  * @param decoder_dsc       pointer to the decoded image's descriptor
  * @param sup               supplementary data
  * @param img_coords        the absolute coordinates of the image
- * @param clipped_img_area  the absolute coordinates of the image area to draw (already clipped)
- * @param user_data         custom data passed to the image helper
+ * @param clipped_img_area  the absolute clip coordinates
  */
-typedef void (*lv_draw_image_core_cb)(lv_layer_t * layer, const lv_draw_image_dsc_t * draw_dsc,
+typedef void (*lv_draw_image_core_cb)(lv_draw_task_t * t, const lv_draw_image_dsc_t * draw_dsc,
                                       const lv_image_decoder_dsc_t * decoder_dsc, lv_draw_image_sup_t * sup,
-                                      const lv_area_t * img_coords, const lv_area_t * clipped_img_area,
-                                      void * user_data);
+                                      const lv_area_t * img_coords, const lv_area_t * clipped_img_area);
 
 /**********************
  * GLOBAL PROTOTYPES
@@ -130,17 +125,9 @@ void lv_draw_image_dsc_init(lv_draw_image_dsc_t * dsc);
 /**
  * Try to get an image draw descriptor from a draw task.
  * @param task      draw task
- * @return          the task's draw descriptor or NULL if the task is not of type LV_DRAW_DSC_TYPE_IMAGE
+ * @return          the task's draw descriptor or NULL if the task is not of type LV_DRAW_TASK_TYPE_IMAGE
  */
 lv_draw_image_dsc_t * lv_draw_task_get_image_dsc(lv_draw_task_t * task);
-
-/**
- * Get the image draw descriptor from a generic draw descriptor.
- * `dsc` must be of type LV_DRAW_DSC_TYPE_IMAGE, use `lv_draw_dsc_get_type()` to check it first.
- * @param dsc       draw descriptor
- * @return          the image draw descriptor
- */
-lv_draw_image_dsc_t * lv_draw_dsc_get_image_dsc(lv_draw_dsc_t * dsc);
 
 /**
  * Create an image draw task

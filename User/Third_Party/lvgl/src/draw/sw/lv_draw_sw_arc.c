@@ -49,8 +49,7 @@ static inline lv_opa_t * allocate_circle_mask(const lv_draw_arc_dsc_t * dsc, int
  *   GLOBAL FUNCTIONS
  **********************/
 
-void lv_draw_sw_arc(lv_layer_t * layer, const lv_area_t * clip_area, const lv_draw_arc_dsc_t * dsc,
-                    const lv_area_t * coords)
+void lv_draw_sw_arc(lv_draw_task_t * t, const lv_draw_arc_dsc_t * dsc, const lv_area_t * coords)
 {
 #if LV_DRAW_SW_COMPLEX
     if(dsc->opa <= LV_OPA_MIN) return;
@@ -62,7 +61,7 @@ void lv_draw_sw_arc(lv_layer_t * layer, const lv_area_t * clip_area, const lv_dr
 
     lv_area_t area_out = *coords;
     lv_area_t clipped_area;
-    if(!lv_area_intersect(&clipped_area, &area_out, clip_area)) return;
+    if(!lv_area_intersect(&clipped_area, &area_out, &t->clip_area)) return;
 
     /*Draw a full ring*/
     if(dsc->img_src == NULL &&
@@ -74,7 +73,7 @@ void lv_draw_sw_arc(lv_layer_t * layer, const lv_area_t * clip_area, const lv_dr
         cir_dsc.width = width;
         cir_dsc.radius = LV_RADIUS_CIRCLE;
         cir_dsc.side = LV_BORDER_SIDE_FULL;
-        lv_draw_sw_border(layer, clip_area, &cir_dsc, &area_out);
+        lv_draw_sw_border(t, &cir_dsc, &area_out);
         return;
     }
 
@@ -217,7 +216,7 @@ void lv_draw_sw_arc(lv_layer_t * layer, const lv_area_t * clip_area, const lv_dr
             }
         }
 
-        lv_draw_sw_blend(layer, &clipped_area, &blend_dsc);
+        lv_draw_sw_blend(t, &blend_dsc);
 
         blend_area.y1 ++;
         blend_area.y2 ++;
@@ -351,11 +350,9 @@ static inline lv_opa_t * allocate_circle_mask(const lv_draw_arc_dsc_t * dsc, int
 
 #else /*LV_DRAW_SW_COMPLEX*/
 
-void lv_draw_sw_arc(lv_layer_t * layer, const lv_area_t * clip_area, const lv_draw_arc_dsc_t * dsc,
-                    const lv_area_t * coords)
+void lv_draw_sw_arc(lv_draw_task_t * t, const lv_draw_arc_dsc_t * dsc, const lv_area_t * coords)
 {
-    LV_UNUSED(layer);
-    LV_UNUSED(clip_area);
+    LV_UNUSED(t);
     LV_UNUSED(dsc);
     LV_UNUSED(coords);
 

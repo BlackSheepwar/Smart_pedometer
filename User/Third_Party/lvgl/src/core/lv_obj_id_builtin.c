@@ -112,7 +112,6 @@ void lv_objid_builtin_destroy(void)
     if(global == NULL) return;
 
     lv_free(global->objid_array);
-    global->objid_array = NULL;
     global->objid_count = 0;
 }
 
