@@ -11,7 +11,6 @@
 #   任务体直接平铺在 TASK/ 下，不按任务再分子目录：
 #     TASK/task_key_scan.c     Task_Key_Scan     10 ms 采样，产出按键事件
 #     TASK/task_key_cmd.c      Task_Key_Cmd      阻塞收事件，执行按键业务
-#     TASK/task_oled.c         Task_OLED         刷屏
 #     TASK/task_lvgl.c         Task_LVGL         每 10 ms 同步界面数据 + 推进 LVGL
 #   一个任务一个文件，文件名就是任务名的小写下划线形式，一眼能对上。
 #
@@ -25,7 +24,7 @@
 #     两者都会把 .o 加进可执行文件（CMake ≥ 3.12），但"链接"还会顺带
 #     传递本库的 INTERFACE 头文件路径与 PRIVATE 依赖。于是
 #       - freertos.c 想 include 任务头文件时找得到路径；
-#       - 主目标的链接列表不必把 app_key_cmd / dev_oled 再抄一遍。
+#       - 主目标的链接列表不必把 app_key_cmd 等依赖再抄一遍。
 #     写成 target_sources 的话这两样都不传递，只能靠"主目标重复列依赖"补，
 #     依赖关系就有了两份，改一处忘一处就是 undefined reference。
 # =============================================================================
@@ -33,7 +32,6 @@
 add_library(task_objects OBJECT
     task_key_scan.c
     task_key_cmd.c
-    task_oled.c
     task_lvgl.c
 )
 
@@ -43,7 +41,6 @@ target_link_libraries(task_objects
             app_level
             app_step
             svc_key_logic
-            dev_oled
             svc_lvgl
             app_screen
 )

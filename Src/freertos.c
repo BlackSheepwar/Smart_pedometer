@@ -89,18 +89,6 @@ const osThreadAttr_t KEY_CMD_T_attributes = {
   .stack_size = sizeof(KEY_CMD_TBuffer),
   .priority = (osPriority_t) osPriorityHigh,
 };
-/* Definitions for OLED_T */
-osThreadId_t OLED_THandle;
-uint32_t OLED_TBuffer[ 256 ];
-osStaticThreadDef_t OLED_TControlBlock;
-const osThreadAttr_t OLED_T_attributes = {
-  .name = "OLED_T",
-  .cb_mem = &OLED_TControlBlock,
-  .cb_size = sizeof(OLED_TControlBlock),
-  .stack_mem = &OLED_TBuffer[0],
-  .stack_size = sizeof(OLED_TBuffer),
-  .priority = (osPriority_t) osPriorityBelowNormal,
-};
 /* Definitions for LVGL_T */
 osThreadId_t LVGL_THandle;
 uint32_t LVGL_TBuffer[ 2048 ];
@@ -157,7 +145,6 @@ const osSemaphoreAttr_t LVGL_SW_SEM_attributes = {
 void StartDefaultTask(void *argument);
 void Task_Key_Scan(void *argument);
 void Task_Key_Cmd(void *argument);
-void Task_OLED(void *argument);
 void Task_LVGL(void *argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
@@ -219,9 +206,6 @@ void MX_FREERTOS_Init(void) {
 
   /* creation of KEY_CMD_T */
   KEY_CMD_THandle = osThreadNew(Task_Key_Cmd, NULL, &KEY_CMD_T_attributes);
-
-  /* creation of OLED_T */
-  OLED_THandle = osThreadNew(Task_OLED, NULL, &OLED_T_attributes);
 
   /* creation of LVGL_T */
   LVGL_THandle = osThreadNew(Task_LVGL, NULL, &LVGL_T_attributes);
@@ -288,24 +272,6 @@ __weak void Task_Key_Cmd(void *argument)
     osDelay(1);
   }
   /* USER CODE END Task_Key_Cmd */
-}
-
-/* USER CODE BEGIN Header_Task_OLED */
-/**
-* @brief Function implementing the OLED_T thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_Task_OLED */
-__weak void Task_OLED(void *argument)
-{
-  /* USER CODE BEGIN Task_OLED */
-  /* Infinite loop */
-  for(;;)
-  {
-    osDelay(1);
-  }
-  /* USER CODE END Task_OLED */
 }
 
 /* USER CODE BEGIN Header_Task_LVGL */
