@@ -1,19 +1,24 @@
 /**
  * @file task_lvgl.c
- * @brief 任务层：LVGL 显示线程体（等切换通知 → 切屏 → 推进渲染）
+ * @brief 任务层：LVGL 显示线程体（每个节拍同步数据 → 推进渲染）
  * @author Ricardo
  * @date 2026-11-07
  *
  * @note 分工：
  *         - Svc_LVGL      管"怎么把 LVGL 画到 ST7789 上"；
- *         - APP_Screen    管"有哪几屏、当前是哪一屏"；
- *         - 本文件        只回答"多久跑一次、什么时候切屏"。
- *       业务判断（B10 按下算切屏请求）在 APP_Key_Cmd，切屏接口在
- *       APP_Screen，唤醒机制在 Svc_LVGL；本线程只做接收与执行。
+ *         - APP_Screen    管"界面什么时候建、每拍刷什么值"；
+ *         - APP_Step      管"步数是多少"（纯整数，不碰 LVGL）；
+ *         - 本文件        只回答"多久跑一次、按什么顺序跑"。
+ *       业务判断（B10 按下算计数一次）在 APP_Key_Cmd，界面形态在
+ *       界面形态在 UI_Export（LVGL Pro 导出），
+ *       数据同步在 APP_Screen；本线程只做
+ *       "按节拍驱动"这一件事。
  *
- *       为什么用"带超时的 Acquire"而不是另起一个切屏线程：
- *       LVGL 不是线程安全的，切屏与 lv_timer_handler() 必须在同一线程。
- *       用 10 ms 超时等信号量，既能及时响应按键，又能保证渲染节拍不断。
+ *       为什么节拍固定 10 ms 而不是事件驱动：
+ *       LVGL 不是线程安全的，所有 lv_ 调用必须集中在同一个线程。
+ *       用"带超时的 Acquire"而不是 osDelay，是为了保留一条
+ *       低延迟唤醒通道（Svc_LVGL_Request_Update），当前计数链路用不上
+ *       ——计数由本线程轮询，滞后一个节拍 10 ms，人眼不可感知。
  *
  *       毫秒时基与毫秒延时都在本文件实现并注入 Svc_LVGL：Service 层因此
  *       不读时钟、也不提供延时手段，"换 OS 只改 TASK"这条约定对显示链路
@@ -49,10 +54,12 @@
  * 外部声明
  *============================================================================*/
 /**
- * @brief 切换请求二值信号量：由 CubeMX 在 Src/freertos.c 里创建
- * @note 生产者是 Svc_LVGL_Request_Update()（由 APP_Screen_Request_Next()
- *       在按键命令线程里调用），消费者是本线程。两边都不拥有这个对象，
- *       它由 .ioc 创建在 freertos.c 里。
+ * @brief 显示线程的唤醒信号量：由 CubeMX 在 Src/freertos.c 里创建
+ * @note 当前**没有生产者**：B10 改成计数后不再调 Svc_LVGL_Request_Update()，
+ *       下面的 Acquire 每次都以超时结束，作用退化为"把循环节拍钉在 10 ms"。
+ *       保留它而不是换成 osDelay，是因为 Svc_LVGL 的唤醒机制仍在：
+ *       将来若出现"必须立刻上屏"的动作（动画起始、第二屏切换），
+ *       调用方直接 Request_Update 即可，本线程不用改。
  */
 extern osSemaphoreId_t LVGL_SW_SEMHandle;
 
@@ -126,13 +133,18 @@ void Task_LVGL(void *argument)
     }
     APP_Screen_Init();
 
-    /* ---------- 2. 等通知 → 切屏 → 推进渲染，三件事都在本线程 ---------- */
+    /* ---------- 2. 同步数据 → 推进渲染，两件事都在本线程 ---------- */
     for (;;) {
-        if (osSemaphoreAcquire(LVGL_SW_SEMHandle, TASK_LVGL_PERIOD_MS) == osOK) {
-            APP_Screen_Next();
-        }
+        /* 恒超时：没有生产者，这里只等出 10 ms 的节拍。
+         * 若将来恢复唤醒通道，把返回值判 osOK 后再做一次立即同步即可。 */
+        (void)osSemaphoreAcquire(LVGL_SW_SEMHandle, TASK_LVGL_PERIOD_MS);
 
-        /* 无论有没有按键都要推进：动画、重绘与屏幕首次上屏都靠它 */
+        /* 先同步业务数据（值没变时只有一次整数比较，不产生 LVGL 调用），
+         * 再推进 LVGL：写在 subject 上的新值会在同一次 handler 里被渲染，
+         * 顺序反过来会让新值多等一个节拍才上屏。 */
+        APP_Screen_Step();
+
+        /* 无论数据有没有变都要推进：动画、重绘与屏幕首次上屏都靠它 */
         Svc_LVGL_Step();
     }
 }

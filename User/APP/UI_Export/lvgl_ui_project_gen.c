@@ -35,15 +35,15 @@ static uint32_t lvgl_ui_project_target = LVGL_UI_PROJECT_COMPILE_TARGET;
  * Translations
  *----------------*/
 
-#ifndef LV_EDITOR_PREVIEW
-    static const char * translation_languages[] = {"en", "de", NULL};
-    static const char * translation_tags[] = {"dog", "cat", "house", NULL};
-    static const char * translation_texts[] = {
-        "This is a dog", "Das ist ein Hund", /* dog */
-        "A curious little cat", "Eine neugierige kleine Katze", /* cat */
-        "The house is cozy and warm", "Das Haus ist gemütlich und warm", /* house */
-    };
-#endif
+/* 本地改动：原处是一份 Editor 空模板残留的示例翻译表
+ * （languages = en/de，tags = dog/cat/house），screen1 一处都没有引用。
+ * 保留它就必须在 lv_conf.h 打开 LV_USE_TRANSLATION，代价是多编译一个
+ * 模块、多一个 pack 的 RAM/FLASH 开销。本工程无多语言需求，整段删除。
+ * 重新导出后此处会重新出现，按本注释再删一次即可；完整清单见
+ * app_ui_port.h 顶部的「重新导出后必须重做的手改」。
+ *
+ * 同时删掉的还有 lvgl_ui_project_init_gen() 末尾的
+ * lv_translation_add_static() / lv_translation_set_language() 两行调用。 */
 
 /**********************
  *  GLOBAL VARIABLES
@@ -187,11 +187,7 @@ void lvgl_ui_project_init_gen(const char * asset_path)
     /*----------------
      * Translations
      *----------------*/
-
-    #ifndef LV_EDITOR_PREVIEW
-        lv_translation_add_static(translation_languages, translation_tags, translation_texts);
-        lv_translation_set_language(translation_languages[0]);
-    #endif
+    /* 本地改动：随上面的示例翻译表一并删除，本工程不开 LV_USE_TRANSLATION。 */
 
 #if defined(LV_USE_XML) && LV_USE_XML
     /* Register widgets */

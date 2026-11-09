@@ -8,11 +8,13 @@
  *       事件有 DOWN / CLICK / LONG / REPEAT / LONG_UP 五种；
  *       表里没列的组合一律丢弃。本头文件是两者之间唯一的接口。
  *
- *       需要"请求切屏"时（例如 B10），handler 调 APP 层的切屏接口
- *       APP_Screen_Request_Next()；它内部再转给 Service 的唤醒机制。
- *       本层因此不 include FreeRTOS.h / cmsis_os2.h，也不用返回值把意图
- *       透传给 TASK——TASK 只负责"取事件、调命令表"，不承担任何 UI
- *       通知策略。
+ *       需要"改变业务状态"时（例如 B10 计数），handler 调对应的 APP 层
+ *       业务接口（APP_Step_Add / APP_Level_Step）即可：它们都只改整数或
+ *       GPIO，不碰 LVGL、不发跨线程通知。界面刷新由显示线程按 10 ms
+ *       节拍轮询业务状态完成。
+ *       本层因此不 include FreeRTOS.h / cmsis_os2.h，也不 include lvgl.h，
+ *       也不用返回值把意图透传给 TASK——TASK 只负责"取事件、调命令表"，
+ *       不承担任何 UI 通知策略。
  */
 
 #ifndef __APP_KEY_CMD_H__

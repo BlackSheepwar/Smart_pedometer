@@ -10,18 +10,21 @@
  *
  *       当前的分工：
  *         单击   → 档位 ±1
- *         长按   → 满 300 ms 后开始连发 REPEAT，每次 ±1（灯带跟着一格一格动）
- *         B10    → 调 APP_Screen_Request_Next()，请显示线程切到下一屏
+ *         长按   → 满 200 ms 后开始连发 REPEAT，每次 ±1（灯带跟着一格一格动）
+ *         B10    → 步数 +1；按住不放则 LONG 后每 200 ms 继续 +1
  *
  *       处理函数一律无参、只做短动作：它们跑在 Task_Key_Cmd 线程里，
  *       一旦阻塞，8 格事件队列就会撑满、新事件被丢弃。
- *       所以 B10 不再像早期测试那样直接刷整屏（约 85 ms 阻塞），而是只
- *       向 APP_Screen 发一次"切下一屏"的请求，真正的换屏与绘制由 LVGL
- *       线程完成。
  *
- *       本层不碰 OS：请求经 APP_Screen_Request_Next() → Service 的唤醒
- *       机制下发，这里一行内核调用都没有；TASK 层因此只负责"取事件、
- *       调命令表"两件事，不承担任何 UI 通知策略。
+ *       B10 走的是"只改业务状态、不碰界面"的路线：handler 里只调
+ *       APP_Step_Add() 改一个整数，既没有 LVGL 调用，也不唤醒显示线程。
+ *       界面线程本来就以 10 ms 周期在跑，每个节拍读一次计数，
+ *       值变了才写 subject。计数显示滞后一个节拍（10 ms），
+ *       比"按键线程直接刷屏"和"每次按键都发一次跨线程唤醒"都简单。
+ *
+ *       本层不碰 OS：这里一行内核调用都没有（上一版 B10 调用的
+ *       Svc_LVGL_Request_Update 已移除）；TASK 层因此只负责
+ *       "取事件、调命令表"两件事，不承担任何 UI 通知策略。
  */
 
 /*==============================================================================
@@ -32,7 +35,7 @@
 // 功能包含
 #include "app_key_cmd.h"
 #include "app_level.h"
-#include "svc_lvgl.h"
+#include "app_step.h"
 #include "dev_led.h"
 
 /*==============================================================================
@@ -87,17 +90,20 @@ static void Key_OFF(void)
 }
 
 /**
- * @brief B10 界面键：请求切到下一屏
+ * @brief B10 界面键：步数 +1
  * @retval 无
- * @note 只发一次请求，不碰 LVGL、不碰 SPI、不碰信号量：切屏接口在
- *       APP_Screen，跨线程唤醒封在 Service 的机制里。LVGL 不是线程安全
- *       的，真正的换屏必须发生在 Task_LVGL 里。
- *       上一次请求还没被消费时返回 -1，这里静默丢弃，符合"请求不排队"
- *       的二值语义，不需要重试或计数。
+ * @note 只改 APP_Step 里的一个整数：不碰 LVGL、不碰 SPI、不碰信号量。
+ *       绘制发生在 Task_LVGL —— 它每 10 ms 读一次计数，值变了才写 subject，
+ *       由 LVGL 的 observer 自动刷新中央大号数字与圆弧进度。
+ *       因此本函数执行时间是常数，不会拖慢 8 格深的事件队列。
+ *
+ *       长按连续计数不在这里实现：命令表把同一个 handler 绑到
+ *       DOWN / LONG / REPEAT 三个事件上，长按阈值与连发间隔来自
+ *       Svc_Key_Logic 的配置表（dev_key_color 当前是 200 ms / 200 ms）。
  */
-static void Key_Ui_Switch(void)
+static void Key_Step_Inc(void)
 {
-    (void)Svc_LVGL_Request_Update();
+    APP_Step_Add(1);
 }
 
 /*==============================================================================
@@ -121,7 +127,9 @@ static const app_key_cmd_entry_t APP_KEY_CMD_TABLE[] = {
     { &dev_key_led, KEY_EVENT_DOWN,    Key_ON     },
     { &dev_key_led, KEY_EVENT_LONG_UP, Key_OFF    },
 
-    { &dev_key_color, KEY_EVENT_DOWN,  Key_Ui_Switch },
+    { &dev_key_color, KEY_EVENT_DOWN,   Key_Step_Inc },
+    { &dev_key_color, KEY_EVENT_LONG,   Key_Step_Inc },
+    { &dev_key_color, KEY_EVENT_REPEAT, Key_Step_Inc },
 };
 
 /**

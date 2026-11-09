@@ -12,7 +12,7 @@
 #     TASK/task_key_scan.c     Task_Key_Scan     10 ms 采样，产出按键事件
 #     TASK/task_key_cmd.c      Task_Key_Cmd      阻塞收事件，执行按键业务
 #     TASK/task_oled.c         Task_OLED         刷屏
-#     TASK/task_lvgl.c         Task_LVGL         等二值信号量切屏 + 推进 LVGL
+#     TASK/task_lvgl.c         Task_LVGL         每 10 ms 同步界面数据 + 推进 LVGL
 #   一个任务一个文件，文件名就是任务名的小写下划线形式，一眼能对上。
 #
 #   为什么用 OBJECT 库而不是 STATIC 库：
@@ -41,9 +41,9 @@ target_link_libraries(task_objects
     PRIVATE stm32cubemx
             app_key_cmd
             app_level
+            app_step
             svc_key_logic
             dev_oled
-            dev_st7789
             svc_lvgl
             app_screen
 )

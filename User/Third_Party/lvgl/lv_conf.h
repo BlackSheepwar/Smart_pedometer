@@ -733,8 +733,11 @@
 /** Speed up style property lookups by adding 2 x 32 bit variables to each lv_obj_t. */
 #define LV_OBJ_STYLE_CACHE 1
 
-/** Widget names (lv_obj_set_name) */
-#define LV_USE_OBJ_NAME 0
+/** Widget names (lv_obj_set_name)
+ *  置 1 是 LVGL Pro 导出代码的硬性要求：screen1_gen.c 调用的
+ *  lv_obj_set_name_static() 声明在 lv_obj_tree.h 的 #if LV_USE_OBJ_NAME 内，
+ *  关闭时该函数不存在，在 -Werror 下直接编译失败。 */
+#define LV_USE_OBJ_NAME 1
 
 /** Widget id (lv_obj_set_id) */
 #define LV_USE_OBJ_ID 0

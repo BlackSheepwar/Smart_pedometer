@@ -1,65 +1,56 @@
 /**
  * @file app_screen.h
- * @brief 应用层：两个 LVGL 界面的创建与切换
+ * @brief 应用层：界面生命周期与数据同步
  * @author Ricardo
- * @date 2026-11-07
+ * @date 2026-11-09
  *
- * @note 本模块管"有几屏、当前是哪一屏、切到下一屏"，不管"什么时候切"
- *       （那是按键业务，在 APP_Key_Cmd），也不管"怎么画到面板上"
- *       （那是 Service 的 Svc_LVGL 显示服务）。
+ * @note 本模块管两件事，且只这两件：
+ *         1. 什么时候把界面建起来（Init）；
+ *         2. 每个显示节拍把业务数据送到界面上（Step）。
+ *       不管"界面长什么样"（那是 UI_Export/ 下的导出代码，
+ *       由 APP_UI_Port 适配），
+ *       也不管"计数什么时候变"（那是 APP_Step 与按键命令表）。
  *
- *       对外提供两种"切屏"入口，别混用：
- *         - APP_Screen_Request_Next()  任意线程可调，只发一次请求；
- *         - APP_Screen_Next()          只能在 LVGL 线程里调，真的换屏。
- *       前者是**切屏接口**（本层拥有屏幕语义），后者是显示线程的执行动作。
+ *       与上一版（两屏手写界面 + APP_Screen_Next）的区别：
+ *         界面改成 LVGL Pro 导出的单屏，切屏语义随之消失。
+ *         现在只有一屏，也就没有"当前是哪一屏"这个状态，
+ *         因此 Index/Next 一并移除，不要再加回来——将来真的要多屏时，
+ *         应当在 Editor 里加 screen2.xml 重新导出，然后在这里加一层
+ *         "当前屏索引 + 切屏函数"，而不是退回手写界面。
  *
- *       头文件不出现 lv_obj_t：screen 指针留在本模块的 static 里，
- *       上层只能调 Init / Next / Index。LVGL 因此是 PRIVATE 依赖。
+ *       头文件不出现 lv_obj_t，也不出现任何 lv_ 类型：
+ *       导出代码的符号被 app_ui_port.h 挡在下面，本模块对外只有两个名字。
  *
- *       线程约束：除 Request_Next 外，三个函数都必须在 LVGL 线程里调用
- *       （Task_LVGL），不能从按键线程直接调——LVGL 不是线程安全的。
- *       Request_Next 之所以安全，是因为它内部只调 Service 的信号量释放，
- *       一个 lv_ 函数都不碰。
+ *       线程约束：两个函数都必须在 LVGL 线程（Task_LVGL）里调用。
+ *       LVGL 不是线程安全的（本工程 LV_USE_OS = LV_OS_NONE，内核里没有锁）。
  */
 
-#ifndef __APP_Screen_H__
-#define __APP_Screen_H__
-
-/*==============================================================================
- * 头文件包含
- *============================================================================*/
-// 固定包含
-#include <stdint.h>
+#ifndef __APP_SCREEN_H__
+#define __APP_SCREEN_H__
 
 /*==============================================================================
  * 函数声明
  *============================================================================*/
 /**
- * @brief 创建两个界面并加载第 0 屏
+ * @brief 建立界面并显示首帧
  * @retval 无
- * @note 必须在 Svc_LVGL_Init() 成功之后调用：screen 要挂到 display 上。
- *       两屏都常驻内存，切换只是 lv_screen_load() 换指针，没有重建开销；
- *       代价是多占一屏的对象堆（约几百字节），对 24 KB 的 LVGL 堆可接受。
- *       重复调用会重复建屏，本工程只在上电时调一次。
+ * @note 必须在 Svc_LVGL_Init() 成功之后调用：界面要挂到 display 上。
+ *       内部顺序：初始化导出界面 → 加载 screen1 → 立刻同步一次步数，
+ *       让上电首帧就显示 0 而不是导出时的演示值 8432。
+ *       重复调用会重建 13 个控件并泄漏上一份，本工程只在上电时调一次。
  */
 void APP_Screen_Init(void);
 
 /**
- * @brief 切到下一屏（0 → 1 → 0 循环）
+ * @brief 把一个显示节拍的数据同步到界面
  * @retval 无
- * @note **只能在 LVGL 线程里调用**（Task_LVGL），按键线程请用
- *       APP_Screen_Request_Next() 发请求。
- *       内部只是换 screen 并标记重绘，真正的像素输出发生在下一次
- *       Svc_LVGL_Step()（lv_timer_handler）里。
+ * @note 由 Task_LVGL 每 10 ms 调用一次（与 Svc_LVGL_Step 同一循环）。
+ *       读 APP_Step_Total() 并与上次写入值比较，值没变时整条路径只有
+ *       一次整数比较，不会产生任何 LVGL 调用。
+ *       这是**轮询**而不是事件驱动：按键线程只改整数、不唤醒显示线程，
+ *       界面刷新最多滞后一个节拍（10 ms），对计数显示不可感知，
+ *       换来的是按键线程与界面线程之间零耦合。
  */
-void APP_Screen_Next(void);
+void APP_Screen_Step(void);
 
-/**
- * @brief 查询当前界面索引
- * @retval 0: 当前是 SCREEN 1
- * @retval 1: 当前是 SCREEN 2
- * @note 供按键侧或日志判断"现在显示的是哪一屏"，不用于切屏决策本身。
- */
-uint8_t APP_Screen_Index(void);
-
-#endif /* __APP_Screen_H__ */
+#endif /* __APP_SCREEN_H__ */
