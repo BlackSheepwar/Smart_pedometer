@@ -84,17 +84,4 @@ int Svc_LVGL_Init(svc_lvgl_tick_ms_t tick_ms, svc_lvgl_delay_ms_t delay_ms);
  */
 void Svc_LVGL_Step(void);
 
-/**
- * @brief 请求显示线程尽快执行一次界面动作
- * @retval 0: 请求已发出
- * @retval -1: 句柄尚未创建，或上一次请求还没被消费（二值语义：请求不排队）
- * @note 这是**机制**，不是业务接口：它只把显示线程叫醒，不携带"做什么"，
- *       也不知道界面上有什么。谁在什么条件下请求、请求之后执行什么，
- *       全由调用方决定，本服务一概不关心。
- *       非阻塞，可在任意线程调用，不会拖慢事件处理。
- *       二值语义决定"请求不排队"：显示线程还没处理完时再次请求，本次
- *       被丢弃，不会积压成"松开手后连做好几次"。
- */
-int Svc_LVGL_Request_Update(void);
-
 #endif /* __Svc_LVGL_H__ */

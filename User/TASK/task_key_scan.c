@@ -76,10 +76,7 @@ void Task_Key_Scan(void *argument)
 
     (void)argument;
 
-    /* ---------- 1. 业务服务只清状态、不碰调度器，在线程里初始化即可 ---------- */
-    Svc_Key_Logic_Init();
-
-    /* ---------- 2. 以当前时刻为基准，第一拍由循环里的 += 决定 ---------- */
+    /* ---------- 1. 以当前时刻为基准，第一拍由循环里的 += 决定 ---------- */
     last_tick = osKernelGetTickCount();
     next_tick = last_tick;
 
@@ -88,7 +85,7 @@ void Task_Key_Scan(void *argument)
 
         (void)osDelayUntil(next_tick);
 
-        /* ---------- 3. 实测间隔：1 tick = 1 ms，直接相减，无乘法也无除法 ---------- */
+        /* ---------- 2. 实测间隔：1 tick = 1 ms，直接相减，无乘法也无除法 ---------- */
         now        = osKernelGetTickCount();
         elapsed_ms = now - last_tick;   /* 无符号减法，49.7 天回绕后仍正确 */
         last_tick  = now;

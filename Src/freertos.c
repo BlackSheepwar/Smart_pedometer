@@ -26,6 +26,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "svc_key_logic.h"
+#include "app_level.h"
+#include "app_step.h"
 #include "bsp_iic.h"
 #include "bsp_spi.h"
 /* USER CODE END Includes */
@@ -34,7 +36,6 @@
 typedef StaticTask_t osStaticThreadDef_t;
 typedef StaticQueue_t osStaticMessageQDef_t;
 typedef StaticSemaphore_t osStaticMutexDef_t;
-typedef StaticSemaphore_t osStaticSemaphoreDef_t;
 /* USER CODE BEGIN PTD */
 
 /* USER CODE END PTD */
@@ -128,14 +129,6 @@ const osMutexAttr_t SPI_LOCK_attributes = {
   .cb_mem = &SPI_LOCKControlBlock,
   .cb_size = sizeof(SPI_LOCKControlBlock),
 };
-/* Definitions for LVGL_SW_SEM */
-osSemaphoreId_t LVGL_SW_SEMHandle;
-osStaticSemaphoreDef_t LVGL_SW_SEMControlBlock;
-const osSemaphoreAttr_t LVGL_SW_SEM_attributes = {
-  .name = "LVGL_SW_SEM",
-  .cb_mem = &LVGL_SW_SEMControlBlock,
-  .cb_size = sizeof(LVGL_SW_SEMControlBlock),
-};
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
@@ -156,7 +149,9 @@ void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
   */
 void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
-
+  Svc_Key_Logic_Init();   /* 以当前键电平作为"已确认"初态，避免上电误报 DOWN */
+  APP_Level_Init();       /* 档位归零 + 灯带全灭，不依赖 MX_GPIO_Init 的复位电平 */
+  APP_Step_Init();        /* 计数归零，让"上电 0 步"由代码表达而不是靠 .bss 清零 */
   /* USER CODE END Init */
   /* Create the mutex(es) */
   /* creation of IIC_LOCK */
@@ -172,17 +167,8 @@ void MX_FREERTOS_Init(void) {
   BSP_SPI_Init();
   /* USER CODE END RTOS_MUTEX */
 
-  /* Create the semaphores(s) */
-  /* creation of LVGL_SW_SEM */
-  LVGL_SW_SEMHandle = osSemaphoreNew(1, 0, &LVGL_SW_SEM_attributes);
-
   /* USER CODE BEGIN RTOS_SEMAPHORES */
-  /* 当前生成值是 osSemaphoreNew(1, 0, ...)，初始即"不可用"，语义正确。
-     但 CubeMX 对二值信号量习惯生成 (1, 1)，一旦重新生成把初值改回 1，
-     LVGL 线程第一次 Acquire 就会成功，表现为"没按键就先切了一屏"。
-     下面这一步是幂等的保护：初值为 0 时 Acquire 立即失败、什么也不改；
-     初值为 1 时把它取走。生产者在 Task_Key_Cmd，消费者在 Task_LVGL。 */
-  (void)osSemaphoreAcquire(LVGL_SW_SEMHandle, 0u);
+  /* add semaphores, ... */
   /* USER CODE END RTOS_SEMAPHORES */
 
   /* USER CODE BEGIN RTOS_TIMERS */

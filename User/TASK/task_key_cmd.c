@@ -31,8 +31,6 @@
 #include "cmsis_os2.h"
 // 功能包含
 #include "app_key_cmd.h"
-#include "app_level.h"
-#include "app_step.h"
 
 /*==============================================================================
  * 外部声明
@@ -58,11 +56,6 @@ void Task_Key_Cmd(void *argument)
     key_event_msg_t msg;
 
     (void)argument;
-    APP_Level_Init();
-    /* 计数在开始收事件之前归零：上电第一屏显示 0 步。
-     * 放在这里（而不是 APP_Screen_Init）是因为它是业务状态，
-     * 不该由界面层初始化；两者都早于第一次按键，顺序无影响。 */
-    APP_Step_Init();
 
     /* ---------- 阻塞收事件，来一条处理一条 ---------- */
     for (;;) {

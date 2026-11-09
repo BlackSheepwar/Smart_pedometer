@@ -202,21 +202,3 @@ void Svc_LVGL_Step(void)
 {
     (void)lv_timer_handler();
 }
-
-/**
- * @brief 请求显示线程尽快执行一次界面动作
- * @retval 0: 请求已发出
- * @retval -1: 句柄尚未创建，或上一次请求还没被消费（二值已为"可用"）
- * @note 不等待、不重试：调用方必须保持短动作，信号量已为可用时直接丢弃
- *       本次请求（二值语义，请求不排队）。
- *       本函数不碰 LVGL，只发一次内核通知，所以可以从任意线程调用；
- *       具体做什么由 APP 决定——本服务只负责把线程叫醒，不参与决策。
- */
-int Svc_LVGL_Request_Update(void)
-{
-    if (LVGL_SW_SEMHandle == NULL) {
-        return -1;
-    }
-
-    return (osSemaphoreRelease(LVGL_SW_SEMHandle) == osOK) ? 0 : -1;
-}

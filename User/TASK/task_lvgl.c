@@ -135,9 +135,7 @@ void Task_LVGL(void *argument)
 
     /* ---------- 2. 同步数据 → 推进渲染，两件事都在本线程 ---------- */
     for (;;) {
-        /* 恒超时：没有生产者，这里只等出 10 ms 的节拍。
-         * 若将来恢复唤醒通道，把返回值判 osOK 后再做一次立即同步即可。 */
-        (void)osSemaphoreAcquire(LVGL_SW_SEMHandle, TASK_LVGL_PERIOD_MS);
+        osDelay(TASK_LVGL_PERIOD_MS);
 
         /* 先同步业务数据（值没变时只有一次整数比较，不产生 LVGL 调用），
          * 再推进 LVGL：写在 subject 上的新值会在同一次 handler 里被渲染，

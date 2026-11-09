@@ -49,6 +49,9 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     bsp_spi
     # Service 层
     svc_key_logic
+    # APP 层
+    app_level
+    app_step
     # CubeMX
     stm32cubemx
 )
