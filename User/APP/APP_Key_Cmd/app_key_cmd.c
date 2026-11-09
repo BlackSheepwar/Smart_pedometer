@@ -5,7 +5,7 @@
  * @date 2026-10-23
  *
  * @note 参照 RC_Dog 的 app_key_cmd.c：命令不写在 if 里，全部集中到
- *       APP_KEY_CMD_TABLE 一张表，表里一行 = 一个"键 × 事件 → 动作"。
+ *       s_key_cmd_table 一张表，表里一行 = 一个"键 × 事件 → 动作"。
  *       新增按键或新增事件，只需写一个 handler 再在表里加一行。
  *
  *       当前的分工：
@@ -72,19 +72,19 @@ static void Key_Dec(void)
 }
 
 /**
- * @brief 翻转板载 LED
+ * @brief 翻转板载 LED（按下亮、再按下灭）
  * @retval 无
  */
-static void Key_ON(void)
+static void Key_Led_Toggle(void)
 {
     Dev_LED_Toggle(&dev_led_1);
 }
 
 /**
- * @brief 关闭板载 LED
+ * @brief 关闭板载 LED（长按松手时强制熄灭）
  * @retval 无
  */
-static void Key_OFF(void)
+static void Key_Led_Off(void)
 {
     Dev_LED_Write(&dev_led_1, LED_OFF);
 }
@@ -115,27 +115,27 @@ static void Key_Step_Inc(void)
  *       档位在按下（DOWN）当拍就动，长按由 LONG 与 REPEAT 负责连发，
  *       CLICK / LONG_UP 不产生动作。
  */
-static const app_key_cmd_entry_t APP_KEY_CMD_TABLE[] = {
-    { &dev_key_inc, KEY_EVENT_DOWN,    Key_Inc    },
-    { &dev_key_inc, KEY_EVENT_LONG,    Key_Inc    },
-    { &dev_key_inc, KEY_EVENT_REPEAT,  Key_Inc    },
+static const app_key_cmd_entry_t s_key_cmd_table[] = {
+    { &dev_key_inc,   KEY_EVENT_DOWN,    Key_Inc         },
+    { &dev_key_inc,   KEY_EVENT_LONG,    Key_Inc         },
+    { &dev_key_inc,   KEY_EVENT_REPEAT,  Key_Inc         },
 
-    { &dev_key_dec, KEY_EVENT_DOWN,    Key_Dec    },
-    { &dev_key_dec, KEY_EVENT_LONG,    Key_Dec    },
-    { &dev_key_dec, KEY_EVENT_REPEAT,  Key_Dec    },
+    { &dev_key_dec,   KEY_EVENT_DOWN,    Key_Dec         },
+    { &dev_key_dec,   KEY_EVENT_LONG,    Key_Dec         },
+    { &dev_key_dec,   KEY_EVENT_REPEAT,  Key_Dec         },
 
-    { &dev_key_led, KEY_EVENT_DOWN,    Key_ON     },
-    { &dev_key_led, KEY_EVENT_LONG_UP, Key_OFF    },
+    { &dev_key_led,   KEY_EVENT_DOWN,    Key_Led_Toggle  },
+    { &dev_key_led,   KEY_EVENT_LONG_UP, Key_Led_Off     },
 
-    { &dev_key_color, KEY_EVENT_DOWN,   Key_Step_Inc },
-    { &dev_key_color, KEY_EVENT_LONG,   Key_Step_Inc },
-    { &dev_key_color, KEY_EVENT_REPEAT, Key_Step_Inc },
+    { &dev_key_color, KEY_EVENT_DOWN,    Key_Step_Inc    },
+    { &dev_key_color, KEY_EVENT_LONG,    Key_Step_Inc    },
+    { &dev_key_color, KEY_EVENT_REPEAT,  Key_Step_Inc    },
 };
 
 /**
  * @brief 命令表行数
  */
-#define APP_KEY_CMD_COUNT  (sizeof(APP_KEY_CMD_TABLE) / sizeof(APP_KEY_CMD_TABLE[0]))
+#define APP_KEY_CMD_COUNT  (sizeof(s_key_cmd_table) / sizeof(s_key_cmd_table[0]))
 
 /*==============================================================================
  * 接口实现
@@ -154,9 +154,9 @@ void APP_Key_Cmd_Packet(const dev_key_t *key, key_event_t event)
     uint8_t index;
 
     for (index = 0u; index < (uint8_t)APP_KEY_CMD_COUNT; ++index) {
-        if ((APP_KEY_CMD_TABLE[index].key == key) &&
-            (APP_KEY_CMD_TABLE[index].event == event)) {
-            APP_KEY_CMD_TABLE[index].handler();
+        if ((s_key_cmd_table[index].key == key) &&
+            (s_key_cmd_table[index].event == event)) {
+            s_key_cmd_table[index].handler();
             return;
         }
     }
