@@ -7,7 +7,7 @@
 #   一个模块一件事，目录名 = 模块名，文件名 = 模块名小写：
 #     APP_Level/app_level.c          档位与显示（业务状态）
 #     APP_Step/app_step.c            步数计数（业务状态，纯整数）
-#     APP_Key_Cmd/app_key_cmd.c      按键命令表（事件 → 动作）
+#     APP_Key_Cmd/app_key_cmd.c      按键命令表与处理函数（"哪个键做什么"）
 #     APP_Screen/app_screen.c        界面生命周期与数据同步
 #     APP_UI_Port/app_ui_port.c      导出代码的本地适配层（唯一手写边界）
 #
@@ -16,7 +16,8 @@
 #   它没有 APP_ 前缀，因为它不是一个模块——里面没有一行手写代码，
 #   目录内容由编辑器整体覆盖，所以不参与本工程的命名与 -Werror 治理。
 #
-#   依赖方向单向：app_key_cmd → app_step / app_level，app_screen → app_ui / app_step。
+#   依赖方向单向：app_key_cmd → svc_key_cmd / app_step / app_level，
+#   app_screen → app_ui / app_step。
 #   两个"使用者"都只依赖业务状态 app_step，彼此之间没有边——
 #   按键不需要知道界面存在，界面也不需要知道按键存在。
 #
@@ -120,7 +121,13 @@ target_compile_options(app_ui_port PRIVATE ${USER_WARN_FLAGS})
 
 # -----------------------------------------------------------------------------
 # app_key_cmd：按键命令表
-#   B10 的处理函数调 APP_Step_Add()——只改一个整数，不碰 LVGL、
+#   本库只剩"表 + 处理函数"，没有任何对外函数：表是 const 数据（进 .rodata），
+#   行数一起导出，由 TASK 把表和事件交给 svc_key_cmd。少一层纯转调的包装，
+#   代价是表项类型与表长成为跨模块契约（见 app_key_cmd.h 的两条说明）。
+#
+#   svc_key_cmd 必须 PUBLIC：本库的公开头要暴露 svc_key_cmd_entry_t，
+#   用它的代码（TASK）得顺带拿到 svc_key_cmd.h 与 svc_key_logic.h。
+#   B10 的处理函数仍只调 APP_Step_Add()——只改一个整数，不碰 LVGL、
 #   不碰信号量。本层因此既不 include FreeRTOS.h / cmsis_os2.h，
 #   也不依赖 svc_lvgl（上一版调 Svc_LVGL_Request_Update 的那条边已删除）。
 # -----------------------------------------------------------------------------
@@ -131,8 +138,8 @@ target_include_directories(app_key_cmd
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/APP_Key_Cmd
 )
 target_link_libraries(app_key_cmd
-    PRIVATE svc_key_logic
-            app_level
+    PUBLIC  svc_key_cmd
+    PRIVATE app_level
             app_step
             dev_led
 )

@@ -1,20 +1,37 @@
 /**
  * @file app_key_cmd.h
- * @brief 按键命令分发：一条事件的唯一入口
+ * @brief 按键命令表：本工程"哪个键的哪个事件做什么"
  * @author Ricardo
  * @date 2026-10-23
  *
- * @note 消抖服务只产事件，命令表决定事件做什么。
- *       事件有 DOWN / CLICK / LONG / REPEAT / LONG_UP 五种；
- *       表里没列的组合一律丢弃。本头文件是两者之间唯一的接口。
+ * @note 本模块对外只提供两样东西：一张命令表和它的行数，没有任何函数。
+ *       分发由调用方完成：
  *
- *       需要"改变业务状态"时（例如 B10 计数），handler 调对应的 APP 层
- *       业务接口（APP_Step_Add / APP_Level_Step）即可：它们都只改整数或
- *       GPIO，不碰 LVGL、不发跨线程通知。界面刷新由显示线程按 10 ms
- *       节拍轮询业务状态完成。
- *       本层因此不 include FreeRTOS.h / cmsis_os2.h，也不 include lvgl.h，
- *       也不用返回值把意图透传给 TASK——TASK 只负责"取事件、调命令表"，
- *       不承担任何 UI 通知策略。
+ *           Svc_Key_Cmd_Dispatch(APP_KEY_CMD_TABLE, APP_KEY_CMD_COUNT,
+ *                                msg.key, msg.event);
+ *
+ *       三层分工：
+ *         APP（本模块）  表的实体与处理函数——"哪个键做什么"是产品行为；
+ *         Svc_Key_Cmd    { 键, 事件 } → handler 的查表机制，表由参数传入；
+ *         TASK           把两者接起来，只接线，不含策略。
+ *
+ *       为什么是 extern const 数组，而不是再包一个 APP_Key_Cmd_Packet()：
+ *         包装函数只做"把表交给服务"这一件事，没有分支、没有状态，属于
+ *         纯转调。删掉它，表的归属就摆在明处，谁都不多一层壳。
+ *         代价有两个，接受前要清楚：
+ *           1) svc_key_cmd_entry_t 与表长成为跨模块契约，改表要同步调用方；
+ *           2) 将来若出现第二张表（多页面各一套键位），"选哪张表"属于产品
+ *              策略，不能写在 TASK —— 那时应改回"APP 提供 Packet 包装"，
+ *              或改用服务层的注册接口，本文件的导出形态会再变一次。
+ *
+ *       行数为什么是 const 变量而不是宏：
+ *         别的翻译单元只看见 `extern const T TABLE[]`（不完整类型），
+ *         sizeof 对它编不过，所以长度只能在定义处算好后一起导出。
+ *
+ *       handler 的约束不变：必须是无参短动作，跑在 Task_Key_Cmd 线程里，
+ *       一旦阻塞，8 格事件队列就会撑满、新事件被丢弃。需要改业务状态时
+ *       只调 APP_Level_Step / APP_Step_Add 这类纯整数接口，不碰 LVGL、
+ *       不发跨线程唤醒——界面刷新由显示线程按 10 ms 节拍轮询完成。
  */
 
 #ifndef __APP_KEY_CMD_H__
@@ -26,20 +43,22 @@
 // 固定包含
 #include <stdint.h>
 // 功能包含
-#include "svc_key_logic.h"
+#include "svc_key_cmd.h"        /* svc_key_cmd_entry_t：表的元素类型 */
 
 /*==============================================================================
- * 函数声明
+ * 外部声明
  *============================================================================*/
 /**
- * @brief 按键命令分发入口
- * @param key   按键设备句柄（命令表按这个地址匹配）
- * @param event 按键事件（KEY_EVENT_*）
- * @retval 无
- * @note 由 Task_Key_Cmd 在命令线程里调用；handler 必须是短动作，
- *       不能阻塞，否则 8 格事件队列撑满后新事件会被丢弃。
- *       表里没有的组合一律静默丢弃。
+ * @brief 命令表：一行 = 一个"键 × 事件 → 处理函数"
+ * @note const 数据，链接期进 .rodata，运行期不可改；数组大小由此处的
+ *       定义决定，调用方只能读、不能 sizeof。
+ *       表里有函数指针，指向本模块的处理函数，服务层不认识它们的含义。
  */
-void APP_Key_Cmd_Packet(const dev_key_t *key, key_event_t event);
+extern const svc_key_cmd_entry_t APP_KEY_CMD_TABLE[];
+
+/**
+ * @brief 命令表行数，等于 APP_KEY_CMD_TABLE 的元素个数
+ */
+extern const uint8_t APP_KEY_CMD_COUNT;
 
 #endif /* __APP_KEY_CMD_H__ */

@@ -1,12 +1,19 @@
 /**
  * @file app_key_cmd.c
- * @brief 按键命令分发（配置表驱动）
+ * @brief 按键命令表：本工程"哪个键的哪个事件做什么"
  * @author Ricardo
  * @date 2026-10-23
  *
- * @note 参照 RC_Dog 的 app_key_cmd.c：命令不写在 if 里，全部集中到
- *       s_key_cmd_table 一张表，表里一行 = 一个"键 × 事件 → 动作"。
- *       新增按键或新增事件，只需写一个 handler 再在表里加一行。
+ * @note 本文件只提供一张表，以及表里引用的处理函数，没有任何对外函数。
+ *       查表匹配在 Service/Svc_Key_Cmd，接线在 TASK：取到一条事件后直接
+ *       调 Svc_Key_Cmd_Dispatch(APP_KEY_CMD_TABLE, APP_KEY_CMD_COUNT, ...)。
+ *
+ *       为什么把分发机制交给服务、自己只留数据：
+ *         查表是"机制"，与产品无关，谁都能用；表里填什么动作是"策略"，
+ *         是本工程的产品行为。两者放在一个文件里时，服务层的判据
+ *         （能脱离硬件单测、与产品无关、有第二个使用者）永远无法满足。
+ *         表本身是 const，链接期进 .rodata，导出后也没有被改写的风险，
+ *         所以不需要一个包装函数替它挡着。
  *
  *       当前的分工：
  *         单击   → 档位 ±1
@@ -22,8 +29,7 @@
  *       值变了才写 subject。计数显示滞后一个节拍（10 ms），
  *       比"按键线程直接刷屏"和"每次按键都发一次跨线程唤醒"都简单。
  *
- *       本层不碰 OS：这里一行内核调用都没有（上一版 B10 调用的
- *       Svc_LVGL_Request_Update 已移除）；TASK 层因此只负责
+ *       本层不碰 OS：这里一行内核调用都没有；TASK 层因此只负责
  *       "取事件、调命令表"两件事，不承担任何 UI 通知策略。
  */
 
@@ -37,18 +43,7 @@
 #include "app_level.h"
 #include "app_step.h"
 #include "dev_led.h"
-
-/*==============================================================================
- * 内部类型
- *============================================================================*/
-/**
- * @brief 命令表条目：哪个键的哪个事件调哪个处理函数
- */
-typedef struct {
-    const dev_key_t *key;
-    key_event_t      event;
-    void           (*handler)(void);
-} app_key_cmd_entry_t;
+#include "svc_key_cmd.h"        /* svc_key_cmd_entry_t：表的元素类型 */
 
 /*==============================================================================
  * 按键事件处理函数
@@ -114,8 +109,10 @@ static void Key_Step_Inc(void)
  * @note 只列有意义的组合；没列的组合查表查不到，直接丢弃。
  *       档位在按下（DOWN）当拍就动，长按由 LONG 与 REPEAT 负责连发，
  *       CLICK / LONG_UP 不产生动作。
+ *       表的顺序不影响语义（各组合互不重复），按"一颗键一组"排列只是为了好读。
+ *       导出符号名全大写，是为了让调用点一眼看出"这是配置数据，不是函数"。
  */
-static const app_key_cmd_entry_t s_key_cmd_table[] = {
+const svc_key_cmd_entry_t APP_KEY_CMD_TABLE[] = {
     { &dev_key_inc,   KEY_EVENT_DOWN,    Key_Inc         },
     { &dev_key_inc,   KEY_EVENT_LONG,    Key_Inc         },
     { &dev_key_inc,   KEY_EVENT_REPEAT,  Key_Inc         },
@@ -134,30 +131,8 @@ static const app_key_cmd_entry_t s_key_cmd_table[] = {
 
 /**
  * @brief 命令表行数
+ * @note 在定义处算好再导出：别的翻译单元看见的表是不完整类型，算不了 sizeof。
+ *       uint8_t 与服务层 Svc_Key_Cmd_Dispatch 的 count 形参同宽，调用点不必转换。
  */
-#define APP_KEY_CMD_COUNT  (sizeof(s_key_cmd_table) / sizeof(s_key_cmd_table[0]))
-
-/*==============================================================================
- * 接口实现
- *============================================================================*/
-/**
- * @brief 按键命令分发入口
- * @param key   按键设备句柄（与表里存的是同一个对象地址，按地址比较）
- * @param event 按键事件（DOWN / CLICK / LONG / REPEAT / LONG_UP）
- * @retval 无
- * @note 由 Task_Key_Cmd 每取到一条事件调用一次；查不到组合就静默丢弃。
- *       句柄是 const 全局对象，地址唯一，所以"是不是这个键"等价于
- *       "是不是这个地址"；运行期拷贝句柄会让这条判断失效。
- */
-void APP_Key_Cmd_Packet(const dev_key_t *key, key_event_t event)
-{
-    uint8_t index;
-
-    for (index = 0u; index < (uint8_t)APP_KEY_CMD_COUNT; ++index) {
-        if ((s_key_cmd_table[index].key == key) &&
-            (s_key_cmd_table[index].event == event)) {
-            s_key_cmd_table[index].handler();
-            return;
-        }
-    }
-}
+const uint8_t APP_KEY_CMD_COUNT =
+    (uint8_t)(sizeof(APP_KEY_CMD_TABLE) / sizeof(APP_KEY_CMD_TABLE[0]));

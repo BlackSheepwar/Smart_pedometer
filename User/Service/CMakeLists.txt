@@ -27,6 +27,28 @@ target_link_libraries(svc_key_logic
 target_compile_options(svc_key_logic PRIVATE ${USER_WARN_FLAGS})
 
 # -----------------------------------------------------------------------------
+# svc_key_cmd：按键命令表分发（表由调用方传入）
+#
+#   本库只有"查表 → 调函数"这一步机制：没有状态、没有 Init、没有 static 变量，
+#   也不认识任何业务符号。表的实体留在 APP（const 静态数组），每次调用传进来，
+#   因此依赖方向保持 APP → Service，服务层一行 APP 头文件都不用 include。
+#
+#   与 svc_key_logic 是 PUBLIC：本库的头文件要暴露 svc_key_cmd_entry_t，
+#   而它的两个匹配键是 dev_key_t / key_event_t。这两个类型来自 svc_key_logic
+#   （它已 PUBLIC 链 dev_key），所以用本库的代码能顺着头文件看见它们。
+# -----------------------------------------------------------------------------
+add_library(svc_key_cmd STATIC
+    Svc_Key_Cmd/svc_key_cmd.c
+)
+target_include_directories(svc_key_cmd
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/Svc_Key_Cmd
+)
+target_link_libraries(svc_key_cmd
+    PUBLIC svc_key_logic
+)
+target_compile_options(svc_key_cmd PRIVATE ${USER_WARN_FLAGS})
+
+# -----------------------------------------------------------------------------
 # svc_lvgl：把 LVGL 的显示服务绑定到 ST7789 设备上
 #   第三方库的适配器放在 Service（跨设备组合），不放 Device：
 #   Device 层只保留"窗怎么开、像素怎么写"，不含任何 GUI 概念。

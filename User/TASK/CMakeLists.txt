@@ -10,7 +10,7 @@
 #
 #   任务体直接平铺在 TASK/ 下，不按任务再分子目录：
 #     TASK/task_key_scan.c     Task_Key_Scan     10 ms 采样，产出按键事件
-#     TASK/task_key_cmd.c      Task_Key_Cmd      阻塞收事件，执行按键业务
+#     TASK/task_key_cmd.c      Task_Key_Cmd      阻塞收事件，把表和事件交给分发服务
 #     TASK/task_lvgl.c         Task_LVGL         每 10 ms 同步界面数据 + 推进 LVGL
 #   一个任务一个文件，文件名就是任务名的小写下划线形式，一眼能对上。
 #
@@ -40,6 +40,7 @@ target_link_libraries(task_objects
             app_key_cmd
             app_level
             app_step
+            svc_key_cmd
             svc_key_logic
             svc_lvgl
             app_screen
