@@ -1,9 +1,9 @@
 /**
- * @file screen3_gen.h
+ * @file screen_hud_gen.h
  */
 
-#ifndef LVGL_PRO_SCREEN3_GEN_H
-#define LVGL_PRO_SCREEN3_GEN_H
+#ifndef LVGL_PRO_SCREEN_HUD_GEN_H
+#define LVGL_PRO_SCREEN_HUD_GEN_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -37,7 +37,7 @@ extern "C" {
 
 
 
-lv_obj_t * screen3_create(void);
+lv_obj_t * screen_hud_create(void);
 
 /**********************
  *      MACROS
@@ -47,4 +47,4 @@ lv_obj_t * screen3_create(void);
 } /*extern "C"*/
 #endif
 
-#endif /*LVGL_PRO_SCREEN3_GEN_H*/
+#endif /*LVGL_PRO_SCREEN_HUD_GEN_H*/

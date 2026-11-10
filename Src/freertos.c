@@ -26,7 +26,6 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "svc_key_logic.h"
-#include "app_step.h"
 #include "bsp_iic.h"
 #include "bsp_spi.h"
 #include "bsp_uart.h"
@@ -158,7 +157,6 @@ void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
   Svc_Key_Logic_Init();   /* 以当前键电平作为"已确认"初态，避免上电误报 DOWN */
-  APP_Step_Init();        /* 计数归零，让"上电 0 步"由代码表达而不是靠 .bss 清零 */
   /* USER CODE END Init */
   /* Create the mutex(es) */
   /* creation of IIC_LOCK */

@@ -37,7 +37,7 @@ static uint32_t lvgl_ui_project_target = LVGL_UI_PROJECT_COMPILE_TARGET;
 
 /* 本地改动（每次重新导出后都要重做，清单见 app_ui_port.h 顶部）：
  * 原处是一份 Editor 空模板残留的示例翻译表（languages = en/de，
- * tags = dog/cat/house），三个 screen 一处都没有引用。
+ * tags = dog/cat/house），本工程的界面一处都没有引用。
  * 保留它就必须在 lv_conf.h 打开 LV_USE_TRANSLATION，代价是多编译一个
  * 模块、多一份 pack 的 RAM/FLASH 开销。本工程无多语言需求，整段删除。
  *
@@ -52,7 +52,7 @@ static uint32_t lvgl_ui_project_target = LVGL_UI_PROJECT_COMPILE_TARGET;
  *  Permanent screens
  *-------------------*/
 
-lv_obj_t * screen1 = NULL;
+lv_obj_t * screen_hud = NULL;
 
 /*----------------
  * Fonts
@@ -66,6 +66,12 @@ lv_font_t * font_16;
 extern lv_font_t font_16_data;
 lv_font_t * font_num_36;
 extern lv_font_t font_num_36_data;
+lv_font_t * font_num_44;
+extern lv_font_t font_num_44_data;
+lv_font_t * font_num_28;
+extern lv_font_t font_num_28_data;
+lv_font_t * font_cjk_16;
+extern lv_font_t font_cjk_16_data;
 
 /*----------------
  * Images
@@ -82,6 +88,15 @@ lv_style_t style_screen_paper;
 lv_style_t style_screen_hud;
 lv_style_t style_seg_off;
 lv_style_t style_seg_lit;
+lv_style_t style_screen_ice;
+lv_style_t style_ice_hair;
+lv_style_t style_ice_frame;
+lv_style_t style_ice_tick;
+lv_style_t style_ice_block_off;
+lv_style_t style_ice_block_on;
+lv_style_t style_ice_block_hi;
+lv_style_t style_ice_warn_text;
+lv_style_t style_ice_pane;
 
 /*----------------
  * Subjects
@@ -94,6 +109,15 @@ lv_subject_t * subject_dist_m;
 lv_subject_t * subject_active_min;
 lv_subject_t * subject_cnt2;
 lv_subject_t * subject_cnt3;
+lv_subject_t * subject_time;
+lv_subject_t * subject_date;
+lv_subject_t * subject_batt;
+lv_subject_t * subject_mode;
+lv_subject_t * subject_speed_txt;
+lv_subject_t * subject_speed;
+lv_subject_t * subject_lat;
+lv_subject_t * subject_lon;
+lv_subject_t * subject_sat;
 
 /**********************
  *      MACROS
@@ -138,6 +162,24 @@ void lvgl_ui_project_init_gen(const char * asset_path)
             font_num_36 = &font_num_36_data;
 
         }
+        if (!font_num_44) {
+            /* font_num_44 */
+            /* get font 'font_num_44' from a C array */
+            font_num_44 = &font_num_44_data;
+
+        }
+        if (!font_num_28) {
+            /* font_num_28 */
+            /* get font 'font_num_28' from a C array */
+            font_num_28 = &font_num_28_data;
+
+        }
+        if (!font_cjk_16) {
+            /* font_cjk_16 */
+            /* get font 'font_cjk_16' from a C array */
+            font_cjk_16 = &font_cjk_16_data;
+
+        }
     }
     #endif
 
@@ -160,6 +202,15 @@ void lvgl_ui_project_init_gen(const char * asset_path)
         lv_style_init(&style_screen_hud);
         lv_style_init(&style_seg_off);
         lv_style_init(&style_seg_lit);
+        lv_style_init(&style_screen_ice);
+        lv_style_init(&style_ice_hair);
+        lv_style_init(&style_ice_frame);
+        lv_style_init(&style_ice_tick);
+        lv_style_init(&style_ice_block_off);
+        lv_style_init(&style_ice_block_on);
+        lv_style_init(&style_ice_block_hi);
+        lv_style_init(&style_ice_warn_text);
+        lv_style_init(&style_ice_pane);
 
         lv_style_set_bg_color(&style_screen, COLOR_BG);
         lv_style_set_bg_opa(&style_screen, (255 * 100 / 100));
@@ -179,6 +230,39 @@ void lvgl_ui_project_init_gen(const char * asset_path)
         lv_style_set_bg_color(&style_seg_lit, COLOR_HUD_LIT);
         lv_style_set_bg_opa(&style_seg_lit, (255 * 100 / 100));
         lv_style_set_radius(&style_seg_lit, 3);
+        lv_style_set_bg_color(&style_screen_ice, COLOR_ICE_BG);
+        lv_style_set_bg_opa(&style_screen_ice, (255 * 100 / 100));
+        lv_style_set_text_color(&style_screen_ice, COLOR_ICE_INK);
+        lv_style_set_text_font(&style_screen_ice, font_16);
+        lv_style_set_bg_color(&style_ice_hair, COLOR_ICE_HAIR);
+        lv_style_set_bg_opa(&style_ice_hair, (255 * 100 / 100));
+        lv_style_set_radius(&style_ice_hair, 0);
+        lv_style_set_border_width(&style_ice_hair, 0);
+        lv_style_set_bg_color(&style_ice_frame, COLOR_ICE_FRAME);
+        lv_style_set_bg_opa(&style_ice_frame, (255 * 100 / 100));
+        lv_style_set_radius(&style_ice_frame, 0);
+        lv_style_set_border_width(&style_ice_frame, 0);
+        lv_style_set_bg_color(&style_ice_tick, COLOR_ICE_TICK);
+        lv_style_set_bg_opa(&style_ice_tick, (255 * 100 / 100));
+        lv_style_set_radius(&style_ice_tick, 0);
+        lv_style_set_border_width(&style_ice_tick, 0);
+        lv_style_set_bg_color(&style_ice_block_off, COLOR_ICE_TRACK);
+        lv_style_set_bg_opa(&style_ice_block_off, (255 * 100 / 100));
+        lv_style_set_radius(&style_ice_block_off, 0);
+        lv_style_set_border_width(&style_ice_block_off, 0);
+        lv_style_set_bg_color(&style_ice_block_on, COLOR_ICE_INK);
+        lv_style_set_bg_opa(&style_ice_block_on, (255 * 100 / 100));
+        lv_style_set_radius(&style_ice_block_on, 0);
+        lv_style_set_border_width(&style_ice_block_on, 0);
+        lv_style_set_bg_color(&style_ice_block_hi, COLOR_ICE_HI);
+        lv_style_set_bg_opa(&style_ice_block_hi, (255 * 100 / 100));
+        lv_style_set_radius(&style_ice_block_hi, 0);
+        lv_style_set_border_width(&style_ice_block_hi, 0);
+        lv_style_set_text_color(&style_ice_warn_text, COLOR_ICE_WARN);
+        lv_style_set_bg_opa(&style_ice_pane, 0);
+        lv_style_set_border_width(&style_ice_pane, 0);
+        lv_style_set_radius(&style_ice_pane, 0);
+        lv_style_set_pad_all(&style_ice_pane, 0);
 
         style_inited = true;
     }
@@ -214,13 +298,54 @@ void lvgl_ui_project_init_gen(const char * asset_path)
     lv_subject_set_min_value_int(subject_cnt3, 0);
     lv_subject_set_max_value_int(subject_cnt3, 100);
     lv_subject_set_int(subject_cnt3, 62);
+    static char subject_time_buf[UI_SUBJECT_STRING_LENGTH];
+    static char subject_time_prev_buf[UI_SUBJECT_STRING_LENGTH];
+    subject_time = lv_subject_create(LV_SUBJECT_TYPE_STRING);
+    lv_subject_set_string_buffer_static(subject_time, subject_time_buf, subject_time_prev_buf, UI_SUBJECT_STRING_LENGTH);
+    lv_subject_set_string(subject_time, "20:44");
+    static char subject_date_buf[UI_SUBJECT_STRING_LENGTH];
+    static char subject_date_prev_buf[UI_SUBJECT_STRING_LENGTH];
+    subject_date = lv_subject_create(LV_SUBJECT_TYPE_STRING);
+    lv_subject_set_string_buffer_static(subject_date, subject_date_buf, subject_date_prev_buf, UI_SUBJECT_STRING_LENGTH);
+    lv_subject_set_string(subject_date, "26-11-10");
+    subject_batt = lv_subject_create(LV_SUBJECT_TYPE_INT);
+    lv_subject_set_min_value_int(subject_batt, 0);
+    lv_subject_set_max_value_int(subject_batt, 100);
+    lv_subject_set_int(subject_batt, 78);
+    subject_mode = lv_subject_create(LV_SUBJECT_TYPE_INT);
+    lv_subject_set_min_value_int(subject_mode, 0);
+    lv_subject_set_max_value_int(subject_mode, 1);
+    lv_subject_set_int(subject_mode, 0);
+    static char subject_speed_txt_buf[UI_SUBJECT_STRING_LENGTH];
+    static char subject_speed_txt_prev_buf[UI_SUBJECT_STRING_LENGTH];
+    subject_speed_txt = lv_subject_create(LV_SUBJECT_TYPE_STRING);
+    lv_subject_set_string_buffer_static(subject_speed_txt, subject_speed_txt_buf, subject_speed_txt_prev_buf, UI_SUBJECT_STRING_LENGTH);
+    lv_subject_set_string(subject_speed_txt, "24.8");
+    subject_speed = lv_subject_create(LV_SUBJECT_TYPE_INT);
+    lv_subject_set_min_value_int(subject_speed, 0);
+    lv_subject_set_max_value_int(subject_speed, 120);
+    lv_subject_set_int(subject_speed, 25);
+    static char subject_lat_buf[UI_SUBJECT_STRING_LENGTH];
+    static char subject_lat_prev_buf[UI_SUBJECT_STRING_LENGTH];
+    subject_lat = lv_subject_create(LV_SUBJECT_TYPE_STRING);
+    lv_subject_set_string_buffer_static(subject_lat, subject_lat_buf, subject_lat_prev_buf, UI_SUBJECT_STRING_LENGTH);
+    lv_subject_set_string(subject_lat, "39.9042N");
+    static char subject_lon_buf[UI_SUBJECT_STRING_LENGTH];
+    static char subject_lon_prev_buf[UI_SUBJECT_STRING_LENGTH];
+    subject_lon = lv_subject_create(LV_SUBJECT_TYPE_STRING);
+    lv_subject_set_string_buffer_static(subject_lon, subject_lon_buf, subject_lon_prev_buf, UI_SUBJECT_STRING_LENGTH);
+    lv_subject_set_string(subject_lon, "116.4074E");
+    subject_sat = lv_subject_create(LV_SUBJECT_TYPE_INT);
+    lv_subject_set_min_value_int(subject_sat, 0);
+    lv_subject_set_max_value_int(subject_sat, 24);
+    lv_subject_set_int(subject_sat, 9);
 
     /*----------------
      * Translations
      *----------------*/
 
-    /* 本地改动：两行 lv_translation_* 调用随示例翻译表一起删除，
-     * 理由见文件上方 Translations 段。 */
+    #ifndef LV_EDITOR_PREVIEW
+    #endif
 
 #if defined(LV_USE_XML) && LV_USE_XML
     /* Register widgets */
@@ -231,12 +356,18 @@ void lvgl_ui_project_init_gen(const char * asset_path)
     check_font(&font_14, "font_14");
     check_font(&font_16, "font_16");
     check_font(&font_num_36, "font_num_36");
+    check_font(&font_num_44, "font_num_44");
+    check_font(&font_num_28, "font_num_28");
+    check_font(&font_cjk_16, "font_cjk_16");
 
     /* Register fonts */
     lv_xml_register_font(NULL, "font_12", font_12);
     lv_xml_register_font(NULL, "font_14", font_14);
     lv_xml_register_font(NULL, "font_16", font_16);
     lv_xml_register_font(NULL, "font_num_36", font_num_36);
+    lv_xml_register_font(NULL, "font_num_44", font_num_44);
+    lv_xml_register_font(NULL, "font_num_28", font_num_28);
+    lv_xml_register_font(NULL, "font_cjk_16", font_cjk_16);
 
     /* Register subjects */
     lv_xml_register_subject(NULL, "subject_steps", subject_steps);
@@ -246,6 +377,15 @@ void lvgl_ui_project_init_gen(const char * asset_path)
     lv_xml_register_subject(NULL, "subject_active_min", subject_active_min);
     lv_xml_register_subject(NULL, "subject_cnt2", subject_cnt2);
     lv_xml_register_subject(NULL, "subject_cnt3", subject_cnt3);
+    lv_xml_register_subject(NULL, "subject_time", subject_time);
+    lv_xml_register_subject(NULL, "subject_date", subject_date);
+    lv_xml_register_subject(NULL, "subject_batt", subject_batt);
+    lv_xml_register_subject(NULL, "subject_mode", subject_mode);
+    lv_xml_register_subject(NULL, "subject_speed_txt", subject_speed_txt);
+    lv_xml_register_subject(NULL, "subject_speed", subject_speed);
+    lv_xml_register_subject(NULL, "subject_lat", subject_lat);
+    lv_xml_register_subject(NULL, "subject_lon", subject_lon);
+    lv_xml_register_subject(NULL, "subject_sat", subject_sat);
 
     /* Register callbacks */
 
@@ -265,9 +405,9 @@ void lvgl_ui_project_init_gen(const char * asset_path)
     /* If XML is enabled it's assumed that the permanent screens are created
      * manually from XML using lv_xml_create() */
     /* Create all the permanent screens first so that they can reference each other */
-    screen1 = lv_obj_create(NULL);
+    screen_hud = lv_obj_create(NULL);
 
-    screen1_create();
+    screen_hud_create();
 #endif
 }
 

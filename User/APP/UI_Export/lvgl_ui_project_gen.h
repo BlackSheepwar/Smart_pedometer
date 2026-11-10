@@ -72,6 +72,16 @@ bool lvgl_ui_project_check_target(uint32_t target);
 #define COLOR_HUD_OFF (lv_color_hex(0x232B34))
 #define COLOR_HUD_SOFT (lv_color_hex(0x9FB0C0))
 #define COLOR_HUD_TEXT (lv_color_hex(0xE8EDF2))
+#define COLOR_ICE_BG (lv_color_hex(0xF2F6FA))
+#define COLOR_ICE_INK (lv_color_hex(0x0A1B28))
+#define COLOR_ICE_MUTED (lv_color_hex(0x5A7386))
+#define COLOR_ICE_HAIR (lv_color_hex(0xC9DAE6))
+#define COLOR_ICE_TICK (lv_color_hex(0x8FA9BC))
+#define COLOR_ICE_TRACK (lv_color_hex(0xD3E1EC))
+#define COLOR_ICE_ACCENT (lv_color_hex(0x0B7285))
+#define COLOR_ICE_HI (lv_color_hex(0x14B8CC))
+#define COLOR_ICE_WARN (lv_color_hex(0xD9611F))
+#define COLOR_ICE_FRAME (lv_color_hex(0xA8C2D0))
 
 
 #ifndef LV_XML_EVAL_STRING_BUF_SIZE
@@ -105,7 +115,7 @@ static inline int32_t lvgl_ui_project_style_transition_bezier_path_helper(const 
  * Permanent screens
  *------------------*/
 
-extern lv_obj_t * screen1;
+extern lv_obj_t * screen_hud;
 
 /*----------------
  * Global styles
@@ -116,6 +126,15 @@ extern lv_style_t style_screen_paper;
 extern lv_style_t style_screen_hud;
 extern lv_style_t style_seg_off;
 extern lv_style_t style_seg_lit;
+extern lv_style_t style_screen_ice;
+extern lv_style_t style_ice_hair;
+extern lv_style_t style_ice_frame;
+extern lv_style_t style_ice_tick;
+extern lv_style_t style_ice_block_off;
+extern lv_style_t style_ice_block_on;
+extern lv_style_t style_ice_block_hi;
+extern lv_style_t style_ice_warn_text;
+extern lv_style_t style_ice_pane;
 
 /*----------------
  * Fonts
@@ -126,6 +145,9 @@ extern lv_font_t * font_12;
 extern lv_font_t * font_14;
 extern lv_font_t * font_16;
 extern lv_font_t * font_num_36;
+extern lv_font_t * font_num_44;
+extern lv_font_t * font_num_28;
+extern lv_font_t * font_cjk_16;
 
 
 /*----------------
@@ -145,6 +167,15 @@ extern lv_subject_t * subject_dist_m;
 extern lv_subject_t * subject_active_min;
 extern lv_subject_t * subject_cnt2;
 extern lv_subject_t * subject_cnt3;
+extern lv_subject_t * subject_time;
+extern lv_subject_t * subject_date;
+extern lv_subject_t * subject_batt;
+extern lv_subject_t * subject_mode;
+extern lv_subject_t * subject_speed_txt;
+extern lv_subject_t * subject_speed;
+extern lv_subject_t * subject_lat;
+extern lv_subject_t * subject_lon;
+extern lv_subject_t * subject_sat;
 
 /**********************
  * GLOBAL PROTOTYPES
@@ -173,9 +204,7 @@ void lvgl_ui_project_init_gen(const char * asset_path);
  **********************/
 
 /*Include all the widgets, components and screens of this library*/
-#include "screens/screen1_gen.h"
-#include "screens/screen2_gen.h"
-#include "screens/screen3_gen.h"
+#include "screens/screen_hud_gen.h"
 
 #ifdef __cplusplus
 } /*extern "C"*/

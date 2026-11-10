@@ -1,21 +1,22 @@
 /**
  * @file app_screen.c
- * @brief 应用层：界面生命周期、切屏与数据同步实现
+ * @brief 应用层：界面生命周期、模式切换与数据同步实现（单屏）
  * @author Ricardo
  * @date 2026-11-10
  *
- * @note 本文件只有几十行，看起来"薄"，但它承担的是界面语义的所有权：
- *       谁建屏、当前显示哪一屏、什么时候刷、刷什么值。
+ * @note 本文件只有一百多行，看起来"薄"，但它承担的是界面语义的所有权：
+ *       谁建屏、当前显示哪块面板、什么时候刷、刷什么值。
  *       把这些散到 Task_LVGL 里会让线程体同时知道 UI 和业务；
  *       散到 app_ui_port 里又会让"适配层"变成"业务层"。
  *
  *       线程模型（本模块唯一的复杂点）：
- *         s_pending  写入者 = Task_Key_Cmd（APP_Screen_Next）
- *         s_pending  读取者 = Task_LVGL（APP_Screen_Step）
- *         s_active   只被 Task_LVGL 读写，记录"已经真正显示的是哪一屏"
- *       两个变量都是 8 位对齐量，Cortex-M4 上单条 STR/LDR 不可分割，
- *       所以不加锁也不会有"半个索引"。volatile 只是防止编译器把
- *       s_pending 提到寄存器里缓存，导致显示线程永远读不到新请求。
+ *         s_*         写入者 = 各数据源线程（每项单写者）
+ *         s_*         读取者 = Task_LVGL（APP_Screen_Step）
+ *         s_shown_*   只被 Task_LVGL 读写，记录"上次真正推给界面的值"
+ *         s_pending_mode / s_active_mode  按键线程写请求，显示线程落地
+ *       所有量都是 8/16/32 位对齐整数，Cortex-M4 上单条 STR/LDR 不可分割，
+ *       所以不加锁也不会有"半个值"。volatile 只是防止编译器把数据源写入的
+ *       变量提到寄存器里缓存，导致显示线程永远读不到新值。
  */
 
 /*==============================================================================
@@ -25,24 +26,98 @@
 #include <stdint.h>
 #include "app_screen.h"
 // 功能包含
-#include "app_step.h"            /* 业务数据来源 */
-#include "app_ui_port.h"         /* 界面适配层：Init / Show / Set_Steps */
+#include "app_ui_port.h"         /* 界面适配层：Init / Set_* / 模式常量 */
 
 /*==============================================================================
- * 静态变量
+ * 宏定义与常量
+ *============================================================================*/
+/** @brief "未设置"哨兵：8 位量（电量、卫星数）用 0xFF */
+#define APP_SCREEN_UNSET_U8     0xFFu
+/** @brief "未设置"哨兵：16 位量（速度、打包后的时间）用 0xFFFF */
+#define APP_SCREEN_UNSET_U16    0xFFFFu
+/**
+ * @brief "未设置"哨兵：32 位量（打包后的日期、经纬度）用 0x7FFFFFFF
+ * @note 不能用 0xFFFFFFFF：转成 int32 是 -1，而 -1 微度是赤道上完全合法的
+ *       纬度。取 INT32_MAX 才真正不可能出现——它折合 2147.48°，
+ *       而端口层把 |lat| 限在 90°、|lon| 限在 180°。
+ */
+#define APP_SCREEN_UNSET_U32    0x7FFFFFFFu
+
+/*==============================================================================
+ * 编译期检查
+ *============================================================================*/
+/* 本层的 APP_SCREEN_MODE_* 与适配层的 APP_UI_MODE_* 是同一件事的两种说法：
+ * 前者是"界面策略"，后者是"界面实现"。数值必须一致，写死断言而不是靠注释，
+ * 否则改了一边、另一边还在用旧值，症状是"按 B10 切到了另一块面板"。
+ */
+_Static_assert((uint8_t)APP_UI_MODE_SPEED == APP_SCREEN_MODE_SPEED,
+               "APP_SCREEN_MODE_SPEED 与 APP_UI_MODE_SPEED 必须同值");
+_Static_assert((uint8_t)APP_UI_MODE_POS == APP_SCREEN_MODE_POS,
+               "APP_SCREEN_MODE_POS 与 APP_UI_MODE_POS 必须同值");
+
+/*==============================================================================
+ * 静态变量：数据源写入区（每项单写者、显示线程只读）
  *============================================================================*/
 /**
- * @brief 待显示的屏序号（按键线程写）
- * @note 初值 0：上电显示 screen1。用 volatile 的理由见文件头。
+ * @brief 时间，打包成 hour×100 + minute
+ * @note 打包而不是两个字节：一次 16 位写入，读侧不会拿到"新小时 + 旧分钟"。
+ *       初值 0xFFFF 表示还没人提交过，Step() 直接跳过。
  */
-static volatile uint8_t s_pending = 0;
+static volatile uint16_t s_hhmm = APP_SCREEN_UNSET_U16;
 
 /**
- * @brief 已经真正加载到 display 的屏序号（显示线程独占）
- * @note 与 s_pending 分开存：请求和"已生效"是两件事，
- *       混成一个变量会让显示线程误判"已经切过了"。
+ * @brief 日期，打包成 yy×10000 + month×100 + day
+ * @note 同 s_hhmm，一次 32 位写入。0xFFFFFFFF 表示未设置。
  */
-static uint8_t s_active = 0;
+static volatile uint32_t s_date = APP_SCREEN_UNSET_U32;
+
+/** @brief 电量百分比 0~100，0xFF 表示未设置 */
+static volatile uint8_t s_batt = APP_SCREEN_UNSET_U8;
+
+/** @brief 速度 × 10（0.1 km/h），0xFFFF 表示未设置 */
+static volatile uint16_t s_speed_d10 = APP_SCREEN_UNSET_U16;
+
+/** @brief 纬度 × 1e6，0xFFFFFFFF 表示未设置 */
+static volatile int32_t s_lat_e6 = (int32_t)APP_SCREEN_UNSET_U32;
+
+/** @brief 经度 × 1e6，与 s_lat_e6 成对写入 */
+static volatile int32_t s_lon_e6 = (int32_t)APP_SCREEN_UNSET_U32;
+
+/** @brief 卫星颗数 0~24，0xFF 表示未设置 */
+static volatile uint8_t s_sat = APP_SCREEN_UNSET_U8;
+
+/**
+ * @brief 待显示的模式（按键线程写）
+ * @note 初值 = 速度面板。volatile 理由见文件头。
+ */
+static volatile uint8_t s_pending_mode = APP_SCREEN_MODE_SPEED;
+
+/*==============================================================================
+ * 静态变量：显示线程独占区（记录已推送的值）
+ *============================================================================*/
+/** @brief 已经真正加载的模式（显示线程独占） */
+static uint8_t s_active_mode = APP_SCREEN_MODE_SPEED;
+
+/** @brief 上次推给界面的时间（打包格式），初值 = 哨兵，保证第一次提交必生效 */
+static uint16_t s_shown_hhmm = APP_SCREEN_UNSET_U16;
+
+/** @brief 上次推给界面的日期（打包格式） */
+static uint32_t s_shown_date = APP_SCREEN_UNSET_U32;
+
+/** @brief 上次推给界面的电量 */
+static uint8_t s_shown_batt = APP_SCREEN_UNSET_U8;
+
+/** @brief 上次推给界面的速度 */
+static uint16_t s_shown_speed_d10 = APP_SCREEN_UNSET_U16;
+
+/** @brief 上次推给界面的纬度 */
+static int32_t s_shown_lat_e6 = (int32_t)APP_SCREEN_UNSET_U32;
+
+/** @brief 上次推给界面的经度 */
+static int32_t s_shown_lon_e6 = (int32_t)APP_SCREEN_UNSET_U32;
+
+/** @brief 上次推给界面的卫星颗数 */
+static uint8_t s_shown_sat = APP_SCREEN_UNSET_U8;
 
 /*==============================================================================
  * 接口实现
@@ -50,55 +125,193 @@ static uint8_t s_active = 0;
 /**
  * @brief 建立界面并显示首帧
  * @retval 无
- * @note 先 Init 再补一次 Step：导出代码里 subject 的初值是演示数据
- *       （8432 / 12480 / 62），不立刻覆盖的话上电会先闪一下。
- *       App_UI_Init() 已经把三屏的 subject 清零，所以这里补 Step 的作用
- *       是把业务侧的当前值（可能是 0）与界面拉齐，顺便走通一次同步路径。
+ * @note 不清空数据区：留成哨兵，所以第一次 Step 不会把界面刷成 00:00。
+ *       App_UI_Init() 里已经 load 了 screen_hud，这里再把模式显式写一次，
+ *       是为了让"上电一定是速度面板"这条不依赖导出代码里的 subject 初值。
  */
 void APP_Screen_Init(void)
 {
-    s_pending = 0;
-    s_active  = 0;
+    s_pending_mode = APP_SCREEN_MODE_SPEED;
+    s_active_mode  = APP_SCREEN_MODE_SPEED;
 
-    App_UI_Init();          /* 建三屏 + 统一 0~100 量程 + 加载第 0 屏 */
-    APP_Screen_Step();      /* 数值与界面拉齐 */
+    App_UI_Init();
+    App_UI_Set_Mode(APP_SCREEN_MODE_SPEED);
 }
 
 /**
- * @brief 请求切到下一屏（循环）
+ * @brief 请求在"速度 / 经纬度"之间切换
  * @retval 无
- * @note 只改 s_pending，不碰 LVGL。单写者，所以"读-改-写"三步之间
+ * @note 只翻 s_pending_mode，不碰 LVGL。单写者，所以"读-改-写"之间
  *       不会被打断；将来若出现第二个写入者（例如另一颗键），必须改成
- *       临界区，否则两次按键可能只前进一格。
+ *       临界区，否则两次按键可能只翻一次。
  */
-void APP_Screen_Next(void)
+void APP_Screen_Toggle_Mode(void)
 {
-    uint8_t next = (uint8_t)(s_pending + 1u);
+    s_pending_mode = (s_pending_mode == APP_SCREEN_MODE_SPEED)
+                     ? APP_SCREEN_MODE_POS
+                     : APP_SCREEN_MODE_SPEED;
+}
 
-    if (next >= APP_UI_SCREEN_COUNT) {
-        next = 0;
+/**
+ * @brief 直接选定某块模式面板
+ * @param mode APP_SCREEN_MODE_SPEED / APP_SCREEN_MODE_POS
+ * @retval 无
+ * @note 只认这两个值：传别的进来直接丢掉，而不是"非 0 就当经纬度"——
+ *       那样一个笔误就会把界面锁在经纬度面板上，还查不出原因。
+ */
+void APP_Screen_Select_Mode(uint8_t mode)
+{
+    if ((mode != APP_SCREEN_MODE_SPEED) && (mode != APP_SCREEN_MODE_POS)) {
+        return;
     }
 
-    s_pending = next;
+    s_pending_mode = mode;
+}
+
+/**
+ * @brief 提交时间
+ * @param hour   0~23
+ * @param minute 0~59
+ * @retval 无
+ * @note 打包成 hh×100+mm 后一次写入。越界值不做夹取也不在此拦——
+ *       先写进去，由 App_UI_Set_Time() 在显示线程里丢掉，这样即使
+ *       RTC 读失败（返回 0xFF）也不会把非法时间画到屏上。
+ */
+void APP_Screen_Set_Time(uint8_t hour, uint8_t minute)
+{
+    s_hhmm = (uint16_t)(((uint16_t)hour * 100u) + (uint16_t)minute);
+}
+
+/**
+ * @brief 提交日期
+ * @param year  完整年份，只保留后两位
+ * @param month 1~12
+ * @param day   1~31
+ * @retval 无
+ * @note 年份取模放在这里而不是显示层：数据区只存"要显示的东西"，
+ *       免得读的人还要再想一次 2026 与 26 的关系。
+ */
+void APP_Screen_Set_Date(uint16_t year, uint8_t month, uint8_t day)
+{
+    s_date = ((uint32_t)(year % 100u) * 10000u)
+             + ((uint32_t)month * 100u)
+             + (uint32_t)day;
+}
+
+/**
+ * @brief 提交电量百分比
+ * @param percent 0~100
+ * @retval 无
+ */
+void APP_Screen_Set_Battery(uint8_t percent)
+{
+    s_batt = percent;
+}
+
+/**
+ * @brief 提交速度
+ * @param speed_d10 速度 × 10（0.1 km/h）
+ * @retval 无
+ */
+void APP_Screen_Set_Speed(uint16_t speed_d10)
+{
+    s_speed_d10 = speed_d10;
+}
+
+/**
+ * @brief 提交经纬度
+ * @param lat_e6 纬度 × 1e6，北正南负
+ * @param lon_e6 经度 × 1e6，东正西负
+ * @retval 无
+ * @note 先写经度再写纬度：Step() 以纬度为"这一对已经写完"的判据，
+ *       反过来的话会有一帧「新纬度 + 旧经度」。
+ */
+void APP_Screen_Set_Position(int32_t lat_e6, int32_t lon_e6)
+{
+    s_lat_e6 = (int32_t)APP_SCREEN_UNSET_U32;   /* 先标记为未完成 */
+    s_lon_e6 = lon_e6;
+    s_lat_e6 = lat_e6;                          /* 再落地纬度，这一帧才有效 */
+}
+
+/**
+ * @brief 提交卫星颗数
+ * @param count 0~24
+ * @retval 无
+ */
+void APP_Screen_Set_Satellites(uint8_t count)
+{
+    s_sat = count;
 }
 
 /**
  * @brief 把一个显示节拍的数据同步到界面
  * @retval 无
- * @note 先落地切屏请求，再同步数值。顺序有意义：先切屏，新屏的第一帧
- *       就带着当前计数，不会出现"旧屏的值已经刷新、新屏还是旧数据"的
- *       中间态（虽然只有一帧，但在 30 fps 下看得见）。
- *       去重放在 App_UI_Set_Steps() 里（它记得上次写入的值），
- *       本函数不重复持有第二份缓存——两份缓存迟早会不同步。
+ * @note 先落地模式请求，再逐项比对数据。顺序有意义：先换面板，
+ *       新面板的第一帧就带着当前数据，不会出现"旧面板已刷新、新面板
+ *       还是旧值"的中间态（虽然只有一帧，但在 30 fps 下看得见）。
+ *       每一项都先读进局部变量再比较：读两次的话，数据源可能在两次读之间
+ *       改了值，导致"比较用旧值、推送用新值"这种看起来对、实际漏一帧的行为。
  */
 void APP_Screen_Step(void)
 {
-    uint8_t wanted = s_pending;
+    /* ---------- 1. 模式 ---------- */
+    uint8_t mode = s_pending_mode;
 
-    if (wanted != s_active) {
-        s_active = wanted;
-        App_UI_Show(s_active);
+    if (mode != s_active_mode) {
+        s_active_mode = mode;
+        App_UI_Set_Mode(mode);
     }
 
-    App_UI_Set_Steps(APP_Step_Total());
+    /* ---------- 2. 时间 ---------- */
+    uint16_t hhmm = s_hhmm;
+
+    if ((hhmm != APP_SCREEN_UNSET_U16) && (hhmm != s_shown_hhmm)) {
+        s_shown_hhmm = hhmm;
+        App_UI_Set_Time((uint8_t)(hhmm / 100u), (uint8_t)(hhmm % 100u));
+    }
+
+    /* ---------- 3. 日期 ---------- */
+    uint32_t date = s_date;
+
+    if ((date != APP_SCREEN_UNSET_U32) && (date != s_shown_date)) {
+        s_shown_date = date;
+        App_UI_Set_Date((uint16_t)(date / 10000u),
+                        (uint8_t)((date / 100u) % 100u),
+                        (uint8_t)(date % 100u));
+    }
+
+    /* ---------- 4. 电量 ---------- */
+    uint8_t batt = s_batt;
+
+    if ((batt != APP_SCREEN_UNSET_U8) && (batt != s_shown_batt)) {
+        s_shown_batt = batt;
+        App_UI_Set_Battery(batt);
+    }
+
+    /* ---------- 5. 速度 ---------- */
+    uint16_t speed = s_speed_d10;
+
+    if ((speed != APP_SCREEN_UNSET_U16) && (speed != s_shown_speed_d10)) {
+        s_shown_speed_d10 = speed;
+        App_UI_Set_Speed(speed);
+    }
+
+    /* ---------- 6. 经纬度 ---------- */
+    int32_t lat = s_lat_e6;
+    int32_t lon = s_lon_e6;
+
+    if ((lat != (int32_t)APP_SCREEN_UNSET_U32) &&
+        ((lat != s_shown_lat_e6) || (lon != s_shown_lon_e6))) {
+        s_shown_lat_e6 = lat;
+        s_shown_lon_e6 = lon;
+        App_UI_Set_Position(lat, lon);
+    }
+
+    /* ---------- 7. 卫星颗数 ---------- */
+    uint8_t sat = s_sat;
+
+    if ((sat != APP_SCREEN_UNSET_U8) && (sat != s_shown_sat)) {
+        s_shown_sat = sat;
+        App_UI_Set_Satellites(sat);
+    }
 }

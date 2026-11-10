@@ -50,8 +50,7 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     bsp_uart
     # Service 层
     svc_key_logic
-    # APP 层
-    app_step
+    # APP 层（app_key_cmd / app_screen / app_ui_port 由各自模块的内部依赖引入）
     # CubeMX
     stm32cubemx
 )

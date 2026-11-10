@@ -30,8 +30,8 @@
  *
  *       handler 的约束不变：必须是无参短动作，跑在 Task_Key_Cmd 线程里，
  *       一旦阻塞，8 格事件队列就会撑满、新事件被丢弃。需要改业务状态时
- *       只调 APP_Step_Add / APP_Screen_Next 这类纯整数接口，不碰 LVGL、
- *       不发跨线程唤醒——界面刷新与切屏落地由显示线程按 10 ms 节拍轮询完成。
+ *       只调 APP_Screen_Toggle_Mode / Select_Mode 这类纯整数接口，不碰 LVGL、
+ *       不发跨线程唤醒——界面刷新与换面板落地由显示线程按 10 ms 节拍轮询完成。
  */
 
 #ifndef __APP_KEY_CMD_H__
