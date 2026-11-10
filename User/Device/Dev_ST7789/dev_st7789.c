@@ -90,8 +90,7 @@
  *       static 里——这也意味着本模块是单实例设计，见头文件说明。
  */
 struct dev_st7789 {
-    bsp_spi_t           *bus;       /* 所属 SPI 总线，负责搬字节 */
-    const bsp_spi_dev_t *dev;       /* 片选设备句柄，只负责 CS */
+    const bsp_spi_dev_t *dev;       /* SPI 设备句柄：片选与所属总线都由它携带 */
     const bsp_gpio_t    *dc;        /* 数据/命令选择：0 命令，1 数据 */
     const bsp_gpio_t    *rst;       /* 硬复位，NULL 表示接板级复位 */
     const bsp_gpio_t    *bl;        /* 背光，NULL 表示常亮 */
@@ -113,7 +112,6 @@ struct dev_st7789 {
  *       说明模组从第 0 列开始映射，把 x_offset 改 0 即可。
  */
 const dev_st7789_t dev_st7789_0 = {
-    .bus      = &bsp_spi2,
     .dev      = &bsp_spi2_dev_lcd,
     .dc       = &bsp_gpio_pb0,
     .rst      = &bsp_gpio_pb12,
@@ -155,7 +153,7 @@ static int Dev_ST7789_Raw(const dev_st7789_t *lcd, const uint8_t *data,
         uint16_t chunk = (len > DEV_ST7789_CHUNK) ?
                          (uint16_t)DEV_ST7789_CHUNK : (uint16_t)len;
 
-        if (BSP_SPI_TransferLocked(lcd->bus, data, NULL, chunk, 0u)
+        if (BSP_SPI_TransferLocked(lcd->dev, data, NULL, chunk, 0u)
             != BSP_SPI_OK) {
             return -2;
         }
@@ -282,8 +280,7 @@ int Dev_ST7789_Init(const dev_st7789_t *lcd, dev_st7789_delay_t delay_ms)
                                         0x2Cu, 0x3Fu, 0x44u, 0x51u, 0x2Fu,
                                         0x1Fu, 0x1Fu, 0x20u, 0x23u };
 
-    if ((lcd == NULL) || (lcd->bus == NULL) ||
-        (lcd->dev == NULL) || (lcd->dc == NULL) ||
+    if ((lcd == NULL) || (lcd->dev == NULL) || (lcd->dc == NULL) ||
         (delay_ms == NULL)) {
         return -1;
     }

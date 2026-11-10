@@ -76,12 +76,12 @@ typedef enum {
 } bsp_spi_dir_t;
 
 /**
- * @brief SPI 总线对象
+ * @brief SPI 总线对象（BSP 内部类型，不对外暴露；上层只拿设备句柄）
  * @note hal 用 void *，避免头文件引入 HAL；lock 存句柄地址，句柄值要等
  *       freertos.c 运行时才产生，存地址才能在实例定义处一次配好。
  *       caps / dma_mask 是 Init 时的能力快照，传输路径只查位。
  */
-struct bsp_spi {
+typedef struct bsp_spi {
     void             *hal;        /* HAL SPI 句柄（SPI_HandleTypeDef *） */
     osMutexId_t      *lock;       /* 指向 freertos.c 生成的互斥量句柄 */
     TaskHandle_t volatile waiter; /* 正在等完成的任务，空闲为 NULL */
@@ -91,7 +91,7 @@ struct bsp_spi {
     volatile uint8_t  initialized;     /* 1: 已完成初始化 */
     uint8_t           caps;            /* 方向能力位，见 BSP_SPI_CAP_* */
     uint8_t           dma_mask;        /* DMA 能力位，见 BSP_SPI_DMA_* */
-};
+} bsp_spi_t;
 
 /**
  * @brief SPI 设备对象
@@ -117,8 +117,8 @@ typedef struct {
 /*==============================================================================
  * 内部变量
  *============================================================================*/
-/** @brief SPI2 总线对象；hal/lock 都指向 CubeMX 生成的句柄 */
-bsp_spi_t bsp_spi2 = {
+/** @brief SPI2 总线对象；hal/lock 都指向 CubeMX 生成的句柄，仅本文件可见 */
+static bsp_spi_t bsp_spi2 = {
     .hal         = &hspi2,
     .lock        = &SPI_LOCKHandle,
     .waiter      = NULL,
@@ -482,38 +482,48 @@ bsp_spi_status_t BSP_SPI_Init(void)
 }
 
 /**
- * @brief 在已持有的总线上搬一段字节（不抢锁、不碰片选）
- * @param bus        总线句柄，不能为 NULL
+ * @brief 在设备所属的已持有总线上搬一段字节（不抢锁、不碰片选）
+ * @param dev        设备句柄，不能为 NULL，且必须是 Select() 选中的那台
  * @param tx         发送缓冲区，NULL 表示本次不发
  * @param rx         接收缓冲区，NULL 表示本次不收
  * @param len        传输字节数，不能为 0
  * @param timeout_ms 本次传输的超时预算，0 表示用默认 50 ms
  * @retval BSP_SPI_OK: 传输成功
  * @retval BSP_SPI_ERR_PARAM: 句柄或长度非法，或两个缓冲区都为 NULL
- * @retval BSP_SPI_ERR_STATE: 驱动未初始化，或调用者并未持有总线
+ * @retval BSP_SPI_ERR_STATE: 驱动未初始化、调度器未运行，或当前帧不是
+ *         本任务、本设备开的
  * @retval BSP_SPI_ERR_TIMEOUT: 传输超时（不存在排队，只有传输）
  * @retval BSP_SPI_ERR_MODE: 外设当前方向不支持本次传输
  * @retval BSP_SPI_ERR_BUS: 总线错误
  * @retval BSP_SPI_ERR_HAL: HAL 启动失败或 DMA 错误
- * @note 只给帧内分段用：调用前必须 BSP_SPI_Dev_Select()，与 Deselect() 成对。
- *       内部校验 frame_owner 是否为当前任务，不是就返回 ERR_STATE，
- *       把"忘了开帧"和"跨任务误用"变成可查的错误码。
+ * @note 只给帧内分段用：调用前必须 BSP_SPI_Dev_Select() 同一个设备，与
+ *       Deselect() 成对。总线由 dev->bus 取得，调用者不用单独持有总线句柄。
+ *       内部校验 frame_owner 与 frame_dev，不是"本任务 + 本设备"就返回
+ *       ERR_STATE，把"忘了开帧""开了别的设备的帧""跨任务误用"变成可查的
+ *       错误码。
  *       方向由 tx / rx 推出：只发 / 只收 / 全双工 / ERR_PARAM。不得在中断调用。
  */
-bsp_spi_status_t BSP_SPI_TransferLocked(bsp_spi_t *bus, const uint8_t *tx,
-                                        uint8_t *rx, uint16_t len,
-                                        uint32_t timeout_ms)
+bsp_spi_status_t BSP_SPI_TransferLocked(const bsp_spi_dev_t *dev,
+                                        const uint8_t *tx, uint8_t *rx,
+                                        uint16_t len, uint32_t timeout_ms)
 {
     bsp_spi_msg_t    msg;
     bsp_spi_status_t status;
+    bsp_spi_t       *bus;
+
+    if ((dev == NULL) || (dev->bus == NULL)) {
+        return BSP_SPI_ERR_PARAM;
+    }
+    bus = dev->bus;
 
     status = BSP_SPI_Prepare(bus, tx, rx, len, &msg);
     if (status != BSP_SPI_OK) {
         return status;
     }
 
-    /* 帧外误用：没开帧、或帧是别的任务开的，都按状态错处理 */
-    if (bus->frame_owner != xTaskGetCurrentTaskHandle()) {
+    /* 帧外误用：没开帧、帧是别的任务开的，或帧开在别的设备上 */
+    if ((bus->frame_owner != xTaskGetCurrentTaskHandle()) ||
+        (bus->frame_dev != dev)) {
         return BSP_SPI_ERR_STATE;
     }
 
@@ -642,7 +652,7 @@ bsp_spi_status_t BSP_SPI_Dev_Transfer(const bsp_spi_dev_t *dev,
     }
 
     /* ---------- 2. 搬字节，成功失败都要把片选与总线还回去 ---------- */
-    status = BSP_SPI_TransferLocked(dev->bus, tx, rx, len, timeout_ms);
+    status = BSP_SPI_TransferLocked(dev, tx, rx, len, timeout_ms);
     BSP_SPI_Dev_Deselect(dev);
     return status;
 }

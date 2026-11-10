@@ -1,12 +1,13 @@
 /**
  * @file bsp_spi.h
- * @brief SPI 硬件驱动层：总线句柄 + 片选设备句柄，互斥量排队 + 完成唤醒
+ * @brief SPI 硬件驱动层：设备句柄统一入口，互斥量排队 + 完成唤醒
  * @author Ricardo
  * @date 2026-10-29
  *
- * @note 两级句柄：bsp_spi_t 是一路 SPI 外设（一条总线一把互斥量，负责排队），
- *       bsp_spi_dev_t 是挂在该总线上的一路片选（一个设备一个句柄）。
- *       设备级函数自动拉/放 CS，总线级函数只管搬字节。
+ * @note 对外只有一级句柄：bsp_spi_dev_t 描述"挂在哪条总线上、用哪根片选"，
+ *       所有传输都从设备句柄进入；总线对象是 BSP 内部实现，不对外暴露——
+ *       同一条总线挂多个设备时，每个设备各持一份自己的设备句柄。
+ *       设备级函数自动拉/放 CS，帧内入口只管搬字节。
  *
  *       两种用法，按事务长度选：
  *         单段  BSP_SPI_Dev_Transfer()，一次调用走完 Select→写→Deselect；
@@ -47,11 +48,6 @@ typedef enum {
 } bsp_spi_status_t;
 
 /**
- * @brief SPI 总线句柄（不透明类型，成员定义在 bsp_spi.c）
- */
-typedef struct bsp_spi bsp_spi_t;
-
-/**
  * @brief SPI 设备句柄（不透明类型，成员定义在 bsp_spi.c）
  * @note 只描述"挂在哪条总线上、用哪根片选、什么极性"，不含引脚号。
  */
@@ -60,7 +56,6 @@ typedef struct bsp_spi_dev bsp_spi_dev_t;
 /*==============================================================================
  * 外部变量
  *============================================================================*/
-extern bsp_spi_t bsp_spi2;
 extern const bsp_spi_dev_t bsp_spi2_dev_lcd;
 
 /*==============================================================================
@@ -78,27 +73,30 @@ extern const bsp_spi_dev_t bsp_spi2_dev_lcd;
 bsp_spi_status_t BSP_SPI_Init(void);
 
 /**
- * @brief 在已持有的总线上搬一段字节（不抢锁、不碰片选）
- * @param bus        总线句柄，不能为 NULL
+ * @brief 在设备所属的已持有总线上搬一段字节（不抢锁、不碰片选）
+ * @param dev        设备句柄，不能为 NULL，且必须是 Select() 选中的那台
  * @param tx         发送缓冲区，NULL 表示本次不发
  * @param rx         接收缓冲区，NULL 表示本次不收
  * @param len        传输字节数，不能为 0
  * @param timeout_ms 本次传输的超时预算（毫秒），0 表示用默认 50 ms
  * @retval BSP_SPI_OK: 传输成功
  * @retval BSP_SPI_ERR_PARAM: 句柄或长度非法，或两个缓冲区都为 NULL
- * @retval BSP_SPI_ERR_STATE: 驱动未初始化，或调用者并未持有总线
+ * @retval BSP_SPI_ERR_STATE: 驱动未初始化、调度器未运行，或当前帧不是
+ *         本任务、本设备开的
  * @retval BSP_SPI_ERR_TIMEOUT: 传输超时（不存在排队，只有传输）
  * @retval BSP_SPI_ERR_MODE: 外设当前方向不支持本次传输
  * @retval BSP_SPI_ERR_BUS: 总线错误
  * @retval BSP_SPI_ERR_HAL: HAL 启动失败或 DMA 错误
- * @note 只给帧内分段用：调用前必须 BSP_SPI_Dev_Select()，与 Deselect() 成对。
- *       内部校验 frame_owner 是否为当前任务，不是就返回 ERR_STATE，
- *       把"忘了开帧"和"跨任务误用"变成可查的错误码。
+ * @note 只给帧内分段用：调用前必须 BSP_SPI_Dev_Select() 同一个设备，与
+ *       Deselect() 成对。总线由 dev->bus 取得，调用者不用单独持有总线句柄。
+ *       内部校验 frame_owner 与 frame_dev，不是"本任务 + 本设备"就返回
+ *       ERR_STATE，把"忘了开帧""开了别的设备的帧""跨任务误用"变成可查的
+ *       错误码。
  *       方向由 tx / rx 推出：只发 / 只收 / 全双工 / ERR_PARAM。不得在中断调用。
  */
-bsp_spi_status_t BSP_SPI_TransferLocked(bsp_spi_t *bus, const uint8_t *tx,
-                                        uint8_t *rx, uint16_t len,
-                                        uint32_t timeout_ms);
+bsp_spi_status_t BSP_SPI_TransferLocked(const bsp_spi_dev_t *dev,
+                                        const uint8_t *tx, uint8_t *rx,
+                                        uint16_t len, uint32_t timeout_ms);
 
 /**
  * @brief 取得总线所有权并拉有效片选（帧开始）
