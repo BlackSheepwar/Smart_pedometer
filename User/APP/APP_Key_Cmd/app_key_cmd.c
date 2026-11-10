@@ -16,9 +16,13 @@
  *         所以不需要一个包装函数替它挡着。
  *
  *       当前的分工：
- *         单击   → 档位 ±1
- *         长按   → 满 200 ms 后开始连发 REPEAT，每次 ±1（灯带跟着一格一格动）
+ *         PC13   → 每按一次翻转板载 LED；长按松手时强制熄灭
  *         B10    → 步数 +1；按住不放则 LONG 后每 200 ms 继续 +1
+ *
+ *       PB11 / PB1（原灯排档位加、减键）自灯排移除后不再绑动作：
+ *       这两颗键仍在 Svc_Key_Logic 的扫描表里，产生的事件在本表中查不到，
+ *       由分发层直接丢弃。保留键句柄是为了保住硬件事实（键还在板上），
+ *       将来要复用只需在本表加行，不必改 Device 与 Service。
  *
  *       处理函数一律无参、只做短动作：它们跑在 Task_Key_Cmd 线程里，
  *       一旦阻塞，8 格事件队列就会撑满、新事件被丢弃。
@@ -40,7 +44,6 @@
 #include <stdint.h>
 // 功能包含
 #include "app_key_cmd.h"
-#include "app_level.h"
 #include "app_step.h"
 #include "dev_led.h"
 #include "svc_key_cmd.h"        /* svc_key_cmd_entry_t：表的元素类型 */
@@ -48,24 +51,6 @@
 /*==============================================================================
  * 按键事件处理函数
  *============================================================================*/
-/**
- * @brief 档位 +1
- * @retval 无
- */
-static void Key_Inc(void)
-{
-    APP_Level_Step(1);
-}
-
-/**
- * @brief 档位 -1
- * @retval 无
- */
-static void Key_Dec(void)
-{
-    APP_Level_Step(-1);
-}
-
 /**
  * @brief 翻转板载 LED（按下亮、再按下灭）
  * @retval 无
@@ -107,20 +92,13 @@ static void Key_Step_Inc(void)
 /**
  * @brief 键 × 事件 → 处理函数
  * @note 只列有意义的组合；没列的组合查表查不到，直接丢弃。
- *       档位在按下（DOWN）当拍就动，长按由 LONG 与 REPEAT 负责连发，
+ *       表里剩下的两颗键都只在有意义的事件上动作：
+ *       LED 键按下即翻转、长按松手熄灭；B10 在 DOWN / LONG / REPEAT 上连续计数，
  *       CLICK / LONG_UP 不产生动作。
  *       表的顺序不影响语义（各组合互不重复），按"一颗键一组"排列只是为了好读。
  *       导出符号名全大写，是为了让调用点一眼看出"这是配置数据，不是函数"。
  */
 const svc_key_cmd_entry_t APP_KEY_CMD_TABLE[] = {
-    { &dev_key_inc,   KEY_EVENT_DOWN,    Key_Inc         },
-    { &dev_key_inc,   KEY_EVENT_LONG,    Key_Inc         },
-    { &dev_key_inc,   KEY_EVENT_REPEAT,  Key_Inc         },
-
-    { &dev_key_dec,   KEY_EVENT_DOWN,    Key_Dec         },
-    { &dev_key_dec,   KEY_EVENT_LONG,    Key_Dec         },
-    { &dev_key_dec,   KEY_EVENT_REPEAT,  Key_Dec         },
-
     { &dev_key_led,   KEY_EVENT_DOWN,    Key_Led_Toggle  },
     { &dev_key_led,   KEY_EVENT_LONG_UP, Key_Led_Off     },
 

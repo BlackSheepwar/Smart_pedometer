@@ -3,9 +3,9 @@
 #
 #   Third_Party 第 0 层  第三方只读区  LVGL 源码
 #   BSP     第 1 层  硬件驱动层    GPIO 句柄与读写（引脚配置由 CubeMX 负责）
-#   Device  第 2 层  设备抽象层    灯带、按键、单灯、ST7789（不含 GUI 概念）
+#   Device  第 2 层  设备抽象层    按键、单灯、ST7789（不含 GUI 概念）
 #   Service 第 3 层  服务层        消抖/长按/连发、命令表分发、LVGL 显示绑定
-#   APP     第 4 层  应用层        档位业务：初始化 + 每步
+#   APP     第 4 层  应用层        步数业务：初始化 + 累加
 #   TASK    任务层   线程体        一个任务一个 .c，覆盖 CubeMX 的 __weak 入口
 #
 # 分层规则由"链接关系"保证，不靠自觉：
@@ -37,7 +37,7 @@ add_subdirectory(TASK)
 
 # -----------------------------------------------------------------------------
 # 挂到主可执行文件：只列"主程序自己直接引用"的库
-#   其它依赖（app_key_cmd、dev_led_bar 等）由各库自己的 PRIVATE 链带过来，
+#   其它依赖（app_key_cmd、dev_led 等）由各库自己的 PRIVATE 链带过来，
 #   这里不再重复抄依赖树。新增模块要么由上一层 PUBLIC/PRIVATE 传递，
 #   要么就是你真的在 freertos.c / main.c 里直接 include 了它。
 # -----------------------------------------------------------------------------
@@ -50,7 +50,6 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     # Service 层
     svc_key_logic
     # APP 层
-    app_level
     app_step
     # CubeMX
     stm32cubemx

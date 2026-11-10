@@ -42,15 +42,6 @@ struct bsp_gpio {
 /*==============================================================================
  * 句柄实例：端口、引脚号、方向只出现在这里
  *============================================================================*/
-// LED灯条
-const bsp_gpio_t bsp_gpio_pa0 = { .port = GPIOA, .pin = GPIO_PIN_0, .dir = BSP_GPIO_DIR_OUT };
-const bsp_gpio_t bsp_gpio_pa1 = { .port = GPIOA, .pin = GPIO_PIN_1, .dir = BSP_GPIO_DIR_OUT };
-const bsp_gpio_t bsp_gpio_pa2 = { .port = GPIOA, .pin = GPIO_PIN_2, .dir = BSP_GPIO_DIR_OUT };
-const bsp_gpio_t bsp_gpio_pa3 = { .port = GPIOA, .pin = GPIO_PIN_3, .dir = BSP_GPIO_DIR_OUT };
-const bsp_gpio_t bsp_gpio_pa4 = { .port = GPIOA, .pin = GPIO_PIN_4, .dir = BSP_GPIO_DIR_OUT };
-const bsp_gpio_t bsp_gpio_pa5 = { .port = GPIOA, .pin = GPIO_PIN_5, .dir = BSP_GPIO_DIR_OUT };
-const bsp_gpio_t bsp_gpio_pa6 = { .port = GPIOA, .pin = GPIO_PIN_6, .dir = BSP_GPIO_DIR_OUT };
-const bsp_gpio_t bsp_gpio_pa7 = { .port = GPIOA, .pin = GPIO_PIN_7, .dir = BSP_GPIO_DIR_OUT };
 // 单个LED灯
 const bsp_gpio_t bsp_gpio_pb2 = { .port = GPIOB, .pin = GPIO_PIN_2, .dir = BSP_GPIO_DIR_OUT };
 // 按键

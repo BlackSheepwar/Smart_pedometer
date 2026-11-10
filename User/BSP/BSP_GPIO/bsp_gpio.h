@@ -51,15 +51,6 @@ typedef struct bsp_gpio bsp_gpio_t;
 /*==============================================================================
  * 外部声明：每个用到的引脚一份句柄
  *============================================================================*/
-// LED灯条
-extern const bsp_gpio_t bsp_gpio_pa0;
-extern const bsp_gpio_t bsp_gpio_pa1;
-extern const bsp_gpio_t bsp_gpio_pa2;
-extern const bsp_gpio_t bsp_gpio_pa3;
-extern const bsp_gpio_t bsp_gpio_pa4;
-extern const bsp_gpio_t bsp_gpio_pa5;
-extern const bsp_gpio_t bsp_gpio_pa6;
-extern const bsp_gpio_t bsp_gpio_pa7;
 // 单个LED灯
 extern const bsp_gpio_t bsp_gpio_pb2;
 // 按键

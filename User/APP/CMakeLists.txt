@@ -5,7 +5,6 @@
 #   线程由 CubeMX 的 .ioc 配置、线程体在 User/TASK 里，本层不建线程、不碰内核。
 #
 #   一个模块一件事，目录名 = 模块名，文件名 = 模块名小写：
-#     APP_Level/app_level.c          档位与显示（业务状态）
 #     APP_Step/app_step.c            步数计数（业务状态，纯整数）
 #     APP_Key_Cmd/app_key_cmd.c      按键命令表与处理函数（"哪个键做什么"）
 #     APP_Screen/app_screen.c        界面生命周期与数据同步
@@ -16,31 +15,16 @@
 #   它没有 APP_ 前缀，因为它不是一个模块——里面没有一行手写代码，
 #   目录内容由编辑器整体覆盖，所以不参与本工程的命名与 -Werror 治理。
 #
-#   依赖方向单向：app_key_cmd → svc_key_cmd / app_step / app_level，
+#   依赖方向单向：app_key_cmd → svc_key_cmd / app_step，
 #   app_screen → app_ui / app_step。
 #   两个"使用者"都只依赖业务状态 app_step，彼此之间没有边——
 #   按键不需要知道界面存在，界面也不需要知道按键存在。
 #
 #   头文件可见性：
-#     app_level.h 不外泄任何下层类型，所以 svc_key_logic 与 dev_led_bar 都用
-#     PRIVATE：需要事件类型的是 app_key_cmd（它自己 PUBLIC 链 svc_key_logic），
-#     不是 app。TASK 层链 app_key_cmd 就能看见 svc_key_logic.h。
+#     app_key_cmd.h 不外泄任何下层类型，所以 svc_key_logic 用
+#     PRIVATE：需要事件类型的是 app_key_cmd 自己（它 PUBLIC 链 svc_key_cmd）。
 #     少一条 PUBLIC，上层就少一层"可以不经过我就能拿到下层"的机会。
 # =============================================================================
-
-# -----------------------------------------------------------------------------
-# app_level：档位与显示
-# -----------------------------------------------------------------------------
-add_library(app_level STATIC
-    APP_Level/app_level.c
-)
-target_include_directories(app_level
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/APP_Level
-)
-target_link_libraries(app_level
-    PRIVATE dev_led_bar
-)
-target_compile_options(app_level PRIVATE ${USER_WARN_FLAGS})
 
 # -----------------------------------------------------------------------------
 # app_step：步数计数（业务状态）
@@ -139,8 +123,7 @@ target_include_directories(app_key_cmd
 )
 target_link_libraries(app_key_cmd
     PUBLIC  svc_key_cmd
-    PRIVATE app_level
-            app_step
+    PRIVATE app_step
             dev_led
 )
 target_compile_options(app_key_cmd PRIVATE ${USER_WARN_FLAGS})

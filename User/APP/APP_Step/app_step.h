@@ -4,9 +4,7 @@
  * @author Ricardo
  * @date 2026-11-09
  *
- * @note 为什么单独一个模块，而不是塞进 APP_Screen 或 APP_Level：
- *         - APP_Level 是灯带档位（0~8 档），与步数无关，混进去会让
- *           "档位"和"计数"两条业务纠缠在同一个 static 里；
+ * @note 为什么单独一个模块，而不是塞进 APP_Screen：
  *         - APP_Screen 是界面层，计数是业务状态，且按键侧要改计数，
  *           若计数放界面层，app_key_cmd 就得依赖 app_screen，
  *           而 app_screen 又会依赖 app_ui —— 一条本不该存在的边。
@@ -52,8 +50,8 @@
 /**
  * @brief 计数归零
  * @retval 无
- * @note 由 Src/freertos.c 的 MX_FREERTOS_Init() 在调度器启动前调用（与
- *       APP_Level_Init 同一处），语义是"上电从 0 步开始"。
+ * @note 由 Src/freertos.c 的 MX_FREERTOS_Init() 在调度器启动前调用，
+ *       语义是"上电从 0 步开始"。
  *       静态量本来就是 0，显式调用是为了让"上电初值"由代码表达，
  *       而不是依赖 .bss 清零。
  *       放启动前的理由：它是全局业务状态，不该由消费它的线程来初始化——
