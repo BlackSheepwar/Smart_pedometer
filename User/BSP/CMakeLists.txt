@@ -48,3 +48,18 @@ target_link_libraries(bsp_spi
     PRIVATE bsp_gpio
 )
 target_compile_options(bsp_spi PRIVATE ${USER_WARN_FLAGS})
+
+# -----------------------------------------------------------------------------
+# bsp_uart：UART 模块（DMA 乒乓接收 + 环形发送队列 + 互斥量排队）
+#   收发全程不阻塞调用者；接收侧单生产单消费无锁，发送侧靠 UART_LOCK 排队。
+# -----------------------------------------------------------------------------
+add_library(bsp_uart STATIC
+    BSP_UART/bsp_uart.c
+)
+target_include_directories(bsp_uart
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/BSP_UART
+)
+target_link_libraries(bsp_uart
+    PRIVATE stm32cubemx
+)
+target_compile_options(bsp_uart PRIVATE ${USER_WARN_FLAGS})

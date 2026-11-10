@@ -29,6 +29,7 @@
 #include "app_step.h"
 #include "bsp_iic.h"
 #include "bsp_spi.h"
+#include "bsp_uart.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -128,6 +129,14 @@ const osMutexAttr_t SPI_LOCK_attributes = {
   .cb_mem = &SPI_LOCKControlBlock,
   .cb_size = sizeof(SPI_LOCKControlBlock),
 };
+/* Definitions for UART_LOCK */
+osMutexId_t UART_LOCKHandle;
+osStaticMutexDef_t UART_LOCKControlBlock;
+const osMutexAttr_t UART_LOCK_attributes = {
+  .name = "UART_LOCK",
+  .cb_mem = &UART_LOCKControlBlock,
+  .cb_size = sizeof(UART_LOCKControlBlock),
+};
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
@@ -158,11 +167,15 @@ void MX_FREERTOS_Init(void) {
   /* creation of SPI_LOCK */
   SPI_LOCKHandle = osMutexNew(&SPI_LOCK_attributes);
 
+  /* creation of UART_LOCK */
+  UART_LOCKHandle = osMutexNew(&UART_LOCK_attributes);
+
   /* USER CODE BEGIN RTOS_MUTEX */
   /* 要互斥量的 BSP 初始化必须在这里：CubeMX 刚把两把锁建出来，
    早一段（Init）句柄还是 NULL，会被 BSP_xxx_Init() 判成 ERR_STATE。 */
   BSP_IIC_Init();
   BSP_SPI_Init();
+  BSP_UART_Init();
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */

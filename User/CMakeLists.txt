@@ -47,6 +47,7 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     # BSP 层
     bsp_iic
     bsp_spi
+    bsp_uart
     # Service 层
     svc_key_logic
     # APP 层
