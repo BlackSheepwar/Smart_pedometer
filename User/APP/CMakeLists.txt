@@ -15,10 +15,11 @@
 #   它没有 APP_ 前缀，因为它不是一个模块——里面没有一行手写代码，
 #   目录内容由编辑器整体覆盖，所以不参与本工程的命名与 -Werror 治理。
 #
-#   依赖方向单向：app_key_cmd → svc_key_cmd / app_step，
-#   app_screen → app_ui / app_step。
-#   两个"使用者"都只依赖业务状态 app_step，彼此之间没有边——
-#   按键不需要知道界面存在，界面也不需要知道按键存在。
+#   依赖方向单向：app_key_cmd → svc_key_cmd / app_step / app_screen，
+#   app_screen → app_ui_port / app_step。
+#   app_key_cmd → app_screen 这条边只用于"请求切屏"（写一个索引，见
+#   app_screen.h 的 Next/Step 拆分），它不引入任何 lv_ 类型；
+#   反过来 app_screen 不依赖 app_key_cmd，所以两条边不会成环。
 #
 #   头文件可见性：
 #     app_key_cmd.h 不外泄任何下层类型，所以 svc_key_logic 用
@@ -53,13 +54,15 @@ target_compile_options(app_step PRIVATE ${USER_WARN_FLAGS})
 #     error，便于发现真正的问题。
 #
 #   为什么不用 CONFIGURE_DEPENDS 的 GLOB：
-#     这 7 个文件是导出产物的固定集合，重新导出时文件名不变；
+#     这 9 个文件是导出产物的固定集合，重新导出时文件名不变；
 #     显式列出来反而能在一份文件被删时立刻报错，而不是悄悄少编一个。
 # -----------------------------------------------------------------------------
 add_library(ui_export STATIC
     UI_Export/lvgl_ui_project.c
     UI_Export/lvgl_ui_project_gen.c
     UI_Export/screens/screen1_gen.c
+    UI_Export/screens/screen2_gen.c
+    UI_Export/screens/screen3_gen.c
     UI_Export/fonts/font_12_data.c
     UI_Export/fonts/font_14_data.c
     UI_Export/fonts/font_16_data.c
@@ -111,9 +114,9 @@ target_compile_options(app_ui_port PRIVATE ${USER_WARN_FLAGS})
 #
 #   svc_key_cmd 必须 PUBLIC：本库的公开头要暴露 svc_key_cmd_entry_t，
 #   用它的代码（TASK）得顺带拿到 svc_key_cmd.h 与 svc_key_logic.h。
-#   B10 的处理函数仍只调 APP_Step_Add()——只改一个整数，不碰 LVGL、
-#   不碰信号量。本层因此既不 include FreeRTOS.h / cmsis_os2.h，
-#   也不依赖 svc_lvgl（上一版调 Svc_LVGL_Request_Update 的那条边已删除）。
+#   三个处理函数各自只碰一样东西：APP_Step_Add()（整数）、
+#   APP_Screen_Next()（索引）、Dev_LED_Write()（GPIO），都不碰 LVGL。
+#   本层因此既不 include FreeRTOS.h / cmsis_os2.h，也不依赖 svc_lvgl。
 # -----------------------------------------------------------------------------
 add_library(app_key_cmd STATIC
     APP_Key_Cmd/app_key_cmd.c
@@ -123,7 +126,8 @@ target_include_directories(app_key_cmd
 )
 target_link_libraries(app_key_cmd
     PUBLIC  svc_key_cmd
-    PRIVATE app_step
+    PRIVATE app_screen      # 只为 APP_Screen_Next()：写索引，不碰 LVGL
+            app_step
             dev_led
 )
 target_compile_options(app_key_cmd PRIVATE ${USER_WARN_FLAGS})

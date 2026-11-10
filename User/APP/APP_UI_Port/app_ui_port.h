@@ -1,8 +1,8 @@
 /**
  * @file app_ui_port.h
- * @brief 应用层：LVGL Pro 导出界面的本地适配层
+ * @brief 应用层：LVGL Pro 导出界面的本地适配层（三屏）
  * @author Ricardo
- * @date 2026-11-09
+ * @date 2026-11-10
  *
  * @note 目录分工（这是本模块存在的理由）：
  *         User/APP/UI_Export/      LVGL Pro 的导出物，纯生成，勿手改；
@@ -17,19 +17,27 @@
  *       "lvgl 是 PRIVATE 依赖"这条约定随即失效（改一个 UI 就要重编上层）。
  *       本头文件里一个 lv_ 都没有，app_screen.c 因此连 lvgl.h 都不用包含。
  *
- *       UI 在 Editor 里改一次就要重新导出并整体覆盖 UI_Export/，
- *       凡是生成文件里的本地改动都会丢。把"适配"集中在手写的 port 层，
- *       重新导出后只需要重做下面这几处：
+ *       ★本工程量程：0~APP_UI_STEPS_MAX（100）★
+ *       导出代码是按"计步器演示"生成的：screen1 的 subject_steps 上限 200000、
+ *       初值 8432，screen2 / screen3 各带一套独立演示值（12480 / 62）。
+ *       本工程只有一路计数，三屏显示同一个值，量程统一成 100。
+ *       这些覆盖**全部在 App_UI_Init() 里用 subject API 完成**，不写进生成
+ *       代码——重新导出后会自动重新生效，不需要人工补改。
  *
- *         1. lv_conf.h 的 LV_USE_OBJ_NAME 必须为 1（已改，不会丢）
- *         2. UI_Export/lvgl_ui_project_gen.c 里两处 Translations 段落要删掉
- *            （示例翻译表 + lv_translation_add_static 调用），
- *            否则必须打开 LV_USE_TRANSLATION
- *         3. 本文件与 app_ui_port.c 不用动，UI_Export/ 下其余文件不用动
+ *       重新导出后必须重做的手改（都在 UI_Export/ 内，共四处）：
+ *         1. lv_conf.h 的 LV_USE_OBJ_NAME 必须为 1（已改在 lv_conf.h，不会丢）
+ *         2. lvgl_ui_project_gen.c 的两段 Translations 要删掉（示例翻译表 +
+ *            lv_translation_add_static 调用），否则必须打开 LV_USE_TRANSLATION
+ *         3. screens/screen2_gen.c 里进度条的 max 与 "/ 20000" 文案改成 100
+ *            （控件属性没有 subject 绑定，只能在生成代码里改）
+ *         4. 三个 screen*_gen.c 底部的按键提示 "B10  NEXT" 改成 "B1  NEXT"
+ *            （演示工程里切屏键是 B10，本工程是 B1）
+ *       量程与初值不在此列：它们在 App_UI_Init() 里用 subject API 覆盖，
+ *       重新导出后自动生效。
  *
- *       线程约束：两个函数都只能在本工程的 LVGL 线程（Task_LVGL）里调用。
+ *       线程约束：三个函数都只能在本工程的 LVGL 线程（Task_LVGL）里调用。
  *       LV_USE_OS 是 LV_OS_NONE，LVGL 内部没有任何锁；本层不做线程安全
- *       包装，跨线程的数据传递在 APP_Step 里完成（那边只碰整数）。
+ *       包装，跨线程的数据传递在 APP_Step / APP_Screen 里完成（只碰整数）。
  */
 
 #ifndef __APP_UI_PORT_H__
@@ -45,42 +53,58 @@
  * 宏定义与常量
  *============================================================================*/
 /**
- * @brief 界面可显示的最大步数
- * @note 与 globals.xml 里 subject_steps 的 max_value 保持一致（200000）。
- *       UI 侧的 subject 也有同样的上下限，这里再夹一次是为了让"界面能显示
- *       多少"这件事在 C 侧也有明确出处，不必去翻 XML。
+ * @brief 导出代码里的界面数量（screen1 / screen2 / screen3）
+ * @note 与 UI_Export/screens/ 下的三个 .xml 一一对应，增删界面时同步。
+ *       APP_Screen 的循环切屏按这个数取模，不另设第二个常量。
  */
-#define APP_UI_STEPS_MAX        200000
+#define APP_UI_SCREEN_COUNT     3
+
+/**
+ * @brief 界面可显示的最大计数值
+ * @note 与 APP_STEP_MAX 保持一致（业务上限在 APP_Step 里，本常量只负责
+ *       "界面能显示多少"这一侧）。导出代码里 subject 的 200000 会在
+ *       App_UI_Init() 里被覆盖成这个值。
+ */
+#define APP_UI_STEPS_MAX        100
 
 /*==============================================================================
  * 函数声明
  *============================================================================*/
 /**
- * @brief 初始化导出界面并把它挂到当前 display 上
+ * @brief 建三块屏、统一量程、加载首屏
  * @retval 无
- * @note 必须在 Svc_LVGL_Init() 成功之后调用：screen 要挂到 display 上，
- *       subject 的绑定回调也要在 display 存在时才会被触发。
- *       内部做两件事：
+ * @note 必须在本工程的 LVGL 初始化之后调用（Svc_LVGL_Init 成功）。
+ *       内部顺序：
  *         1. lvgl_ui_project_init(NULL) —— 注册 4 个字体、建全局样式、
- *            建 5 个 subject、创建并填充 screen1（13 个控件）；
- *         2. lv_screen_load(screen1) —— 真正让它上屏。
+ *            建 7 个 subject、创建并填充常驻屏 screen1；
+ *         2. screen2_create() / screen3_create() —— 各建一次并自持指针；
+ *         3. 覆盖 subject 的上下限与初值（量程 0~100，初值 0）；
+ *         4. lv_screen_load(screen1)。
  *       参数传 NULL 是安全的：导出代码里 asset_path 只在签名上存在，
- *       没有任何一处读它（全部资产都是烧进 FLASH 的 C 数组，不走文件系统）。
- *       本函数会从 LVGL 堆里分配控件与 subject，堆不足时 LVGL 自身会打
- *       断言或返回 NULL，本层不做额外检查。
+ *       没有任何一处读它（全部资产都是烧进 FLASH 的 C 数组）。
+ *       重复调用会重建 screen2 / screen3 并泄漏上一份，本工程只在上电调一次。
  */
 void App_UI_Init(void);
 
 /**
- * @brief 把步数写进界面
- * @param steps 要显示的步数，超出 [0, APP_UI_STEPS_MAX] 会被夹取
+ * @brief 切换到第 index 块屏
+ * @param index 屏序号，0 = screen1，1 = screen2，2 = screen3
  * @retval 无
- * @note 写的是 subject_steps，LVGL 会通过 observer 自动刷新两处控件：
- *          - 屏幕中央 36px 大号数字；
- *          - 圆弧进度（value = steps，max = subject_goal = 10000）。
- *       所以调用方不需要持有任何控件指针，也不该去改控件。
+ * @note index 越界或界面未初始化时直接返回，不做静默取模——越界是调用方
+ *       的 bug，悄悄绕回去只会让问题更难查。循环语义属于 APP_Screen。
+ */
+void App_UI_Show(uint8_t index);
+
+/**
+ * @brief 把计数值写进三块屏
+ * @param steps 要显示的计数，超出 [0, APP_UI_STEPS_MAX] 会被夹取
+ * @retval 无
+ * @note 一次写三个 subject：screen1 的大号数字与圆弧、screen2 的数字与
+ *       进度条、screen3 的数字与 5 段点阵。三屏只有一屏可见，但隐藏屏的
+ *       observer 照样会被触发——这是有意的：切屏瞬间画面已经是新值，
+ *       不会先闪一帧旧数据。
  *       值没变化时本函数直接返回：lv_subject_set_int() 即使值相同也会
- *       遍历 observer，在一次 10 ms 节拍里白跑一遍没有意义。
+ *       遍历 observer，在一次 10 ms 节拍里白跑三遍没有意义。
  */
 void App_UI_Set_Steps(int32_t steps);
 

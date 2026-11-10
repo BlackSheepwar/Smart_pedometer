@@ -56,7 +56,13 @@
 
 #if LV_USE_STDLIB_MALLOC == LV_STDLIB_BUILTIN
 /** Size of the pool `lv_malloc()` allocates from. Needs to be at least 2kB (2048). */
-#define LV_MEM_SIZE 24576
+/* 本工程改动：24576 -> 32768。界面从单屏（14 个对象）扩到三屏
+ * （21 个对象 + 7 个 subject + 11 个 observer），三屏常驻不销毁。
+ * 按对象尺寸估算新增占用约 1.5~2 KB，24 KB 本来仍有余量，但余量无法在
+ * 编译期验证：一旦耗尽，LVGL 会直接断言（LV_ASSERT_MALLOC），表现为
+ * 上电黑屏或某块屏建不出来，属于"最难查"的那类故障。
+ * 本工程 RAM 只用了六成，多给 8 KB 换确定性是划算的。 */
+#define LV_MEM_SIZE 32768
 
 /** Place the pool at a fixed address instead of allocating it as a normal array.
  *  0: unused.

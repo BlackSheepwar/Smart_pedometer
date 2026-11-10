@@ -75,15 +75,16 @@ typedef struct {
 } svc_key_cfg_t;
 
 /**
- * @brief 板上四个按键：加键 PB11、减键 PB1、灯键 PC13、颜色键 PB10，手感参数一致
+ * @brief 板上四个按键：切屏 B1(PB1)、加 B10(PB10)、减 B11(PB11)、灯键 PC13
  * @note 只在本文件里用，所以是 static：整张表进 .rodata，不占 RAM。
  *       加一个键 = 表里加一行 + Device 层定义它的句柄，本文件其余代码不用动。
+ *       表里只有"物理事实 + 手感参数"，按键做什么由 APP 层的命令表决定。
  */
 static const svc_key_cfg_t s_key_cfg_table[] = {
-    { &dev_key_inc,   20u, 200u, 200u },
-    { &dev_key_dec,   20u, 200u, 200u },
-    { &dev_key_led,   20u, 200u, 200u },
-    { &dev_key_color, 20u, 200u, 200u },
+    { &dev_key_screen, 20u, 200u, 100u },
+    { &dev_key_plus,   20u, 200u, 100u },
+    { &dev_key_minus,  20u, 200u, 100u },
+    { &dev_key_led,    20u, 200u, 100u },
 };
 
 /**

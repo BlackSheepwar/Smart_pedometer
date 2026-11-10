@@ -30,10 +30,12 @@
 /*==============================================================================
  * 设备句柄
  *============================================================================*/
-const dev_key_t dev_key_dec   = { .gpio= &bsp_gpio_pb1,  .polarity = 0u};
-const dev_key_t dev_key_inc   = { .gpio= &bsp_gpio_pb11, .polarity = 0u};
-const dev_key_t dev_key_led   = { .gpio= &bsp_gpio_pc13, .polarity = 1u};
-const dev_key_t dev_key_color = { .gpio= &bsp_gpio_pb10, .polarity = 0u};
+/* 名字按"现在做什么"起，括号里是板子丝印与引脚，改用途时三处一起改：
+ * 本文件、dev_key.h 的 extern、Svc_Key_Logic 的扫描表。 */
+const dev_key_t dev_key_screen = { .gpio= &bsp_gpio_pb1,  .polarity = 0u};  /* B1  PB1  */
+const dev_key_t dev_key_plus   = { .gpio= &bsp_gpio_pb10, .polarity = 0u};  /* B10 PB10 */
+const dev_key_t dev_key_minus  = { .gpio= &bsp_gpio_pb11, .polarity = 0u};  /* B11 PB11 */
+const dev_key_t dev_key_led    = { .gpio= &bsp_gpio_pc13, .polarity = 1u};  /* B?  PC13 */
 
 /*==============================================================================
  * 接口实现

@@ -55,12 +55,23 @@ bool lvgl_ui_project_check_target(uint32_t target);
 #define SPACE_MD (8)
 #define SPACE_LG (12)
 #define RADIUS_MD (10)
-#define ARC_THICKNESS (10)
+#define ARC_THICKNESS (14)
 #define COLOR_BG (lv_color_hex(0x0E1420))
 #define COLOR_TEXT (lv_color_hex(0xFFFFFF))
-#define COLOR_MUTED (lv_color_hex(0x8A97AD))
-#define COLOR_ACCENT (lv_color_hex(0x34D399))
-#define COLOR_TRACK (lv_color_hex(0x243044))
+#define COLOR_SOFT (lv_color_hex(0xD8E2EE))
+#define COLOR_MUTED (lv_color_hex(0xA8B8CC))
+#define COLOR_ACCENT (lv_color_hex(0x3EE0A6))
+#define COLOR_TRACK (lv_color_hex(0x22304A))
+#define COLOR_PAPER_BG (lv_color_hex(0xF7F5EF))
+#define COLOR_PAPER_INK (lv_color_hex(0x14120E))
+#define COLOR_PAPER_MUTED (lv_color_hex(0x6B6459))
+#define COLOR_PAPER_ACCENT (lv_color_hex(0xC8452D))
+#define COLOR_PAPER_TRACK (lv_color_hex(0xDCD6C8))
+#define COLOR_HUD_BG (lv_color_hex(0x0B0E11))
+#define COLOR_HUD_LIT (lv_color_hex(0xFFB020))
+#define COLOR_HUD_OFF (lv_color_hex(0x232B34))
+#define COLOR_HUD_SOFT (lv_color_hex(0x9FB0C0))
+#define COLOR_HUD_TEXT (lv_color_hex(0xE8EDF2))
 
 
 #ifndef LV_XML_EVAL_STRING_BUF_SIZE
@@ -101,6 +112,10 @@ extern lv_obj_t * screen1;
  *----------------*/
 
 extern lv_style_t style_screen;
+extern lv_style_t style_screen_paper;
+extern lv_style_t style_screen_hud;
+extern lv_style_t style_seg_off;
+extern lv_style_t style_seg_lit;
 
 /*----------------
  * Fonts
@@ -128,6 +143,8 @@ extern lv_subject_t * subject_goal;
 extern lv_subject_t * subject_kcal;
 extern lv_subject_t * subject_dist_m;
 extern lv_subject_t * subject_active_min;
+extern lv_subject_t * subject_cnt2;
+extern lv_subject_t * subject_cnt3;
 
 /**********************
  * GLOBAL PROTOTYPES
@@ -157,6 +174,8 @@ void lvgl_ui_project_init_gen(const char * asset_path);
 
 /*Include all the widgets, components and screens of this library*/
 #include "screens/screen1_gen.h"
+#include "screens/screen2_gen.h"
+#include "screens/screen3_gen.h"
 
 #ifdef __cplusplus
 } /*extern "C"*/

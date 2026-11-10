@@ -2,7 +2,7 @@
  * @file app_key_cmd.c
  * @brief 按键命令表：本工程"哪个键的哪个事件做什么"
  * @author Ricardo
- * @date 2026-10-23
+ * @date 2026-11-10
  *
  * @note 本文件只提供一张表，以及表里引用的处理函数，没有任何对外函数。
  *       查表匹配在 Service/Svc_Key_Cmd，接线在 TASK：取到一条事件后直接
@@ -15,23 +15,27 @@
  *         表本身是 const，链接期进 .rodata，导出后也没有被改写的风险，
  *         所以不需要一个包装函数替它挡着。
  *
- *       当前的分工：
- *         PC13   → 每按一次翻转板载 LED；长按松手时强制熄灭
- *         B10    → 步数 +1；按住不放则 LONG 后每 200 ms 继续 +1
- *
- *       PB11 / PB1（原灯排档位加、减键）自灯排移除后不再绑动作：
- *       这两颗键仍在 Svc_Key_Logic 的扫描表里，产生的事件在本表中查不到，
- *       由分发层直接丢弃。保留键句柄是为了保住硬件事实（键还在板上），
- *       将来要复用只需在本表加行，不必改 Device 与 Service。
+ *       ★当前的分工（板子丝印 → 动作）★
+ *         B1  / PB1  → 切换界面（三屏循环，只在 DOWN 动作一次）
+ *         B10 / PB10 → 计数 +1；按住不放则 LONG 后每 200 ms 继续 +1
+ *         B11 / PB11 → 计数 -1；按住不放则 LONG 后每 200 ms 继续 -1
+ *         PC13       → 每按一次翻转板载 LED（PB2）；长按松手时强制熄灭
  *
  *       处理函数一律无参、只做短动作：它们跑在 Task_Key_Cmd 线程里，
  *       一旦阻塞，8 格事件队列就会撑满、新事件被丢弃。
  *
- *       B10 走的是"只改业务状态、不碰界面"的路线：handler 里只调
- *       APP_Step_Add() 改一个整数，既没有 LVGL 调用，也不唤醒显示线程。
- *       界面线程本来就以 10 ms 周期在跑，每个节拍读一次计数，
- *       值变了才写 subject。计数显示滞后一个节拍（10 ms），
- *       比"按键线程直接刷屏"和"每次按键都发一次跨线程唤醒"都简单。
+ *       三类动作各自只碰一样东西，谁都不越界：
+ *         计数 → APP_Step_Add()      改一个整数；
+ *         切屏 → APP_Screen_Next()   改一个索引（真正的 lv_screen_load 在
+ *                                     Task_LVGL 里，见 app_screen.h）；
+ *         灯   → Dev_LED_Write()     写一个 GPIO。
+ *       三者都不碰 LVGL、不碰 SPI、不发跨线程唤醒。界面刷新与切屏落地
+ *       由显示线程按 10 ms 节拍轮询完成，因此按键线程与界面线程之间零耦合，
+ *       计数显示滞后一个节拍（10 ms），不可感知。
+ *
+ *       依赖说明：本文件因此多了一条 app_key_cmd → app_screen 的边。
+ *       它只用到"请求切屏"这一个写索引的入口，不涉及任何 lv_ 类型；
+ *       app_screen.h 里也没有 lv_ 类型，所以 LVGL 不会顺着这条边漏到 APP 层。
  *
  *       本层不碰 OS：这里一行内核调用都没有；TASK 层因此只负责
  *       "取事件、调分发"两件事，不承担任何 UI 通知策略。
@@ -44,6 +48,7 @@
 #include <stdint.h>
 // 功能包含
 #include "app_key_cmd.h"
+#include "app_screen.h"         /* APP_Screen_Next()：请求切屏，只写索引 */
 #include "app_step.h"
 #include "dev_led.h"
 #include "svc_key_cmd.h"        /* svc_key_cmd_entry_t：表的元素类型 */
@@ -70,20 +75,43 @@ static void Key_Led_Off(void)
 }
 
 /**
- * @brief B10 界面键：步数 +1
+ * @brief B1：切到下一块屏
+ * @retval 无
+ * @note 只提请求，不切屏。真正的 lv_screen_load() 在 Task_LVGL 的
+ *       APP_Screen_Step() 里执行——LVGL 不是线程安全的，按键线程
+ *       一行 lv_ 都不能碰。代价是切屏滞后一个节拍（10 ms）。
+ */
+static void Key_Screen_Next(void)
+{
+    APP_Screen_Next();
+}
+
+/**
+ * @brief B10：计数 +1
  * @retval 无
  * @note 只改 APP_Step 里的一个整数：不碰 LVGL、不碰 SPI、不碰信号量。
  *       绘制发生在 Task_LVGL —— 它每 10 ms 读一次计数，值变了才写 subject，
- *       由 LVGL 的 observer 自动刷新中央大号数字与圆弧进度。
+ *       由 LVGL 的 observer 自动刷新三块界面上的数字与进度。
  *       因此本函数执行时间是常数，不会拖慢 8 格深的事件队列。
  *
  *       长按连续计数不在这里实现：命令表把同一个 handler 绑到
  *       DOWN / LONG / REPEAT 三个事件上，长按阈值与连发间隔来自
- *       Svc_Key_Logic 的配置表（dev_key_color 当前是 200 ms / 200 ms）。
+ *       Svc_Key_Logic 的配置表（当前 200 ms / 200 ms）。
  */
 static void Key_Step_Inc(void)
 {
     APP_Step_Add(1);
+}
+
+/**
+ * @brief B11：计数 -1
+ * @retval 无
+ * @note 与 Key_Step_Inc 完全对称，负增量由 APP_Step_Add 夹在 0 以上，
+ *       所以计数到 0 后再按不会变成负数。
+ */
+static void Key_Step_Dec(void)
+{
+    APP_Step_Add(-1);
 }
 
 /*==============================================================================
@@ -92,19 +120,25 @@ static void Key_Step_Inc(void)
 /**
  * @brief 键 × 事件 → 处理函数
  * @note 只列有意义的组合；没列的组合查表查不到，直接丢弃。
- *       表里剩下的两颗键都只在有意义的事件上动作：
- *       LED 键按下即翻转、长按松手熄灭；B10 在 DOWN / LONG / REPEAT 上连续计数，
- *       CLICK / LONG_UP 不产生动作。
+ *       B1 只绑 DOWN：切屏是"一次性"动作，绑 LONG/REPEAT 会在长按期间
+ *       连跳三屏，松手停在哪一屏不可预期；计数键相反，长按连发才有用。
+ *       LED 键按下即翻转、长按松手熄灭，CLICK / LONG_UP 之外的组合不动作。
  *       表的顺序不影响语义（各组合互不重复），按"一颗键一组"排列只是为了好读。
  *       导出符号名全大写，是为了让调用点一眼看出"这是配置数据，不是函数"。
  */
 const svc_key_cmd_entry_t APP_KEY_CMD_TABLE[] = {
-    { &dev_key_led,   KEY_EVENT_DOWN,    Key_Led_Toggle  },
-    { &dev_key_led,   KEY_EVENT_LONG_UP, Key_Led_Off     },
+    { &dev_key_screen, KEY_EVENT_DOWN,    Key_Screen_Next },
 
-    { &dev_key_color, KEY_EVENT_DOWN,    Key_Step_Inc    },
-    { &dev_key_color, KEY_EVENT_LONG,    Key_Step_Inc    },
-    { &dev_key_color, KEY_EVENT_REPEAT,  Key_Step_Inc    },
+    { &dev_key_plus,   KEY_EVENT_DOWN,    Key_Step_Inc    },
+    { &dev_key_plus,   KEY_EVENT_LONG,    Key_Step_Inc    },
+    { &dev_key_plus,   KEY_EVENT_REPEAT,  Key_Step_Inc    },
+
+    { &dev_key_minus,  KEY_EVENT_DOWN,    Key_Step_Dec    },
+    { &dev_key_minus,  KEY_EVENT_LONG,    Key_Step_Dec    },
+    { &dev_key_minus,  KEY_EVENT_REPEAT,  Key_Step_Dec    },
+
+    { &dev_key_led,    KEY_EVENT_DOWN,    Key_Led_Toggle  },
+    { &dev_key_led,    KEY_EVENT_LONG_UP, Key_Led_Off     },
 };
 
 /**
