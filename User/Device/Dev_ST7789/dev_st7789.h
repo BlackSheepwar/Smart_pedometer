@@ -79,6 +79,9 @@ extern const dev_st7789_t dev_st7789_0;
  *       与 OLED 同理，不能放进 MX_FREERTOS_Init()。
  *       结束后**不清屏**：面板显存上电为随机值，第一帧由应用层自己刷，
  *       设备层不替上层决定画什么。
+ *       句柄的 inv 决定发 INVON 还是 INVOFF：IPS 玻璃置 1，TN 玻璃置 0。
+ *       选错时的现象是整幅画面黑白（明暗）反转——布局、对比关系都对，
+ *       只是底和字换了位置，据此可与其他故障区分开。
  */
 int Dev_ST7789_Init(const dev_st7789_t *lcd, dev_st7789_delay_t delay_ms);
 

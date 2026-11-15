@@ -63,8 +63,10 @@
 #define DEV_ST7789_CMD_SWRESET      0x01u
 /** @brief 退出睡眠 */
 #define DEV_ST7789_CMD_SLPOUT       0x11u
-/** @brief 正片显示（IPS 面板常需要） */
+/** @brief 反显（IPS 面板常需要；发给 TN 面板会把白底黑字变成黑底白字） */
 #define DEV_ST7789_CMD_INVON        0x21u
+/** @brief 正显（TN 面板的默认极性） */
+#define DEV_ST7789_CMD_INVOFF       0x20u
 /** @brief 开显示 */
 #define DEV_ST7789_CMD_DISPON       0x29u
 /** @brief 列地址设置 */
@@ -99,6 +101,7 @@ struct dev_st7789 {
     uint16_t             width;     /* 面板原生宽度（未旋转） */
     uint16_t             height;    /* 面板原生高度（未旋转） */
     uint8_t              bgr;       /* 1: MADCTL 置 RGB/BGR 位，红蓝互换时用 */
+    uint8_t              inv;       /* 1: 发 INVON（IPS 面板）；0: 发 INVOFF（TN 面板） */
 };
 
 /*==============================================================================
@@ -110,6 +113,15 @@ struct dev_st7789 {
  *       x_offset = 34 来自"ST7789 的显存是 240 列、面板只取中间 172 列"这一
  *       常见接法；若实测画面左边（竖屏时）出现 34 像素黑边、右侧被切掉，
  *       说明模组从第 0 列开始映射，把 x_offset 改 0 即可。
+ *
+ *       当前硬件是 2.4 寸 240×320 TN 模组：面板本身显示全部 240 列，
+ *       这里的 172 宽 × 偏移 34 正好落在中间（左右各留 34 列黑边），
+ *       所以画面居中而两侧留边是这一组参数的必然结果，不是故障。
+ *       要铺满全屏需同时改四处：width 240、x_offset 0、Svc_LVGL 的
+ *       HOR_RES 240、界面按 240×320 重新导出，缺一处就会错位或初始化失败。
+ *
+ *       inv = 0：该模组是 TN 玻璃，不需要反显。1.47 寸 IPS 玻璃必须置 1，
+ *       否则白底黑字会整体变成黑底白字（0x21 与 0x20 的差别仅此一项）。
  */
 const dev_st7789_t dev_st7789_0 = {
     .dev      = &bsp_spi2_dev_lcd,
@@ -121,6 +133,7 @@ const dev_st7789_t dev_st7789_0 = {
     .width    = 172u,
     .height   = 320u,
     .bgr      = 0u,
+    .inv      = 0u,
 };
 
 /** @brief 当前逻辑宽度（随旋转变化），Init 之前为 0 */
@@ -339,8 +352,15 @@ int Dev_ST7789_Init(const dev_st7789_t *lcd, dev_st7789_delay_t delay_ms)
         return -2;
     }
 
-    /* ---------- 6. 显示相关开关：IPS 面板反显 → 正常模式 → 开显示 ---------- */
-    if (Dev_ST7789_Cmd(lcd, (uint8_t)DEV_ST7789_CMD_INVON, NULL, 0u) != 0) {
+    /* ---------- 6. 显示相关开关：面板极性 → 正常模式 → 开显示 ---------- */
+    /* 极性由面板玻璃决定，命令之外的初始化序列完全一样：
+       IPS（如 1.47 寸 172×320）为常黑型，必须 INVON 才正显；
+       TN（如 2.4 寸 240×320）为常白型，多发 INVON 会把整幅画面取反，
+       表现就是白底黑字变成黑底白字——不是配色写错，也不是字节序错。 */
+    if (Dev_ST7789_Cmd(lcd,
+                       (lcd->inv != 0u) ? (uint8_t)DEV_ST7789_CMD_INVON
+                                        : (uint8_t)DEV_ST7789_CMD_INVOFF,
+                       NULL, 0u) != 0) {
         return -2;
     }
     if (Dev_ST7789_Cmd(lcd, (uint8_t)DEV_ST7789_CMD_NORON, NULL, 0u) != 0) {
