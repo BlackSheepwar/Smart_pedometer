@@ -91,16 +91,24 @@ typedef struct bsp_spi {
     volatile uint8_t  initialized;     /* 1: 已完成初始化 */
     uint8_t           caps;            /* 方向能力位，见 BSP_SPI_CAP_* */
     uint8_t           dma_mask;        /* DMA 能力位，见 BSP_SPI_DMA_* */
+    uint32_t          presc_code;      /* 当前生效的预分频，HAL 的 BR 编码值 */
+    uint32_t          presc_init;      /* 回落基准：CubeMX 给的预分频 */
 } bsp_spi_t;
 
 /**
  * @brief SPI 设备对象
- * @note 只存总线、片选、极性；不存 SCK/MOSI，那些属于总线。const 进 .rodata。
+ * @note 只存总线、片选、极性、速率；不存 SCK/MOSI。const 进 .rodata。
+ *
+ *       sck_hz 是该器件能接受的 SCK 上限，同一条总线上各设备各写各的：
+ *       屏要 21 MHz、触摸芯片只要 2 MHz，就分别填在各自的句柄里，本层在
+ *       片选拉低之前切换，调用方完全无感。0 表示回到 CubeMX 里配的预分频，
+ *       已有设备可以继续写 0，不必逐个补这个字段。
  */
 struct bsp_spi_dev {
     bsp_spi_t        *bus;             /* 所属总线，不能为 NULL */
     const bsp_gpio_t *cs;              /* 片选引脚句柄，NULL 表示不用片选 */
     uint8_t           cs_active_level; /* 1: 高电平有效；0: 低电平有效 */
+    uint32_t          sck_hz;          /* SCK 上限（Hz），0 = 用默认配置 */
 };
 
 /**
@@ -128,13 +136,22 @@ static bsp_spi_t bsp_spi2 = {
     .initialized = 0U,
     .caps        = 0U,
     .dma_mask    = 0U,
+    .presc_code  = 0U,
+    .presc_init  = 0U,
 };
 
-/** @brief 挂在 SPI2 上的设备对象 */
+/**
+ * @brief 挂在 SPI2 上的设备对象（LCD）
+ * @note sck_hz 填 0：屏的速率由 CubeMX 里的预分频决定（APB1 42 MHz ÷ 2 =
+ *       21 MHz），每次 Select 都把总线恢复到这一档。将来同一总线上挂触摸
+ *       芯片时，新实例填 .sck_hz = 2000000U 即可，屏的这一份一个字不用改——
+ *       两次访问之间由本层自动来回切换，屏不会被触摸的低速拖着走。
+ */
 const bsp_spi_dev_t bsp_spi2_dev_lcd = {
     .bus             = &bsp_spi2,
     .cs              = &bsp_gpio_pa8,
     .cs_active_level = 0U,
+    .sck_hz          = 0U,
 };
 
 /** @brief 驱动管理的总线表；增加 SPI1 时只在这里追加实例，
@@ -217,6 +234,109 @@ static uint8_t BSP_SPI_DmaOfDir(uint8_t dir)
         return BSP_SPI_DMA_RX;
     }
     return (uint8_t)BSP_SPI_DMA_TXRX;
+}
+
+/**
+ * @brief 取总线 SCK 的时钟源频率
+ * @param hspi HAL SPI 句柄
+ * @retval 该外设所属 APB 总线的时钟频率（Hz）
+ * @note F4 上 SPI1 挂 APB2、SPI2/SPI3 挂 APB1，两条总线的分频可以不同，
+ *       所以不能统一取一个值。换系列必须按参考手册的时钟树重新核对这张表：
+ *       算错的后果是实际 SCK 与请求值成倍偏差，现象是"降速后仍然读不通"。
+ *       将来接 SPI4/5/6 要一并补进 APB2 分支，否则会被按 APB1 折算。
+ */
+static uint32_t BSP_SPI_Pclk_Hz(const SPI_HandleTypeDef *hspi)
+{
+    return (hspi->Instance == SPI1) ? HAL_RCC_GetPCLK2Freq()
+                                    : HAL_RCC_GetPCLK1Freq();
+}
+
+/**
+ * @brief 把分频倍数翻译成 HAL 的 BR 编码
+ * @param div 分频倍数，只能取 2/4/8/16/32/64/128/256
+ * @retval 可直接写进 SPI_CR1 的 BR 位，与 HAL 的 BaudRatePrescaler 同值
+ * @note 不认识的倍数一律落到 256：宁可慢，不可超速——超速是器件收错字节，
+ *       慢只是吞吐下降，二者的故障代价不对称。
+ */
+static uint32_t BSP_SPI_PrescalerCode(uint32_t div)
+{
+    switch (div) {
+    case 2U:
+        return SPI_BAUDRATEPRESCALER_2;
+    case 4U:
+        return SPI_BAUDRATEPRESCALER_4;
+    case 8U:
+        return SPI_BAUDRATEPRESCALER_8;
+    case 16U:
+        return SPI_BAUDRATEPRESCALER_16;
+    case 32U:
+        return SPI_BAUDRATEPRESCALER_32;
+    case 64U:
+        return SPI_BAUDRATEPRESCALER_64;
+    case 128U:
+        return SPI_BAUDRATEPRESCALER_128;
+    default:
+        return SPI_BAUDRATEPRESCALER_256;
+    }
+}
+
+/**
+ * @brief 求"不超过给定速率"的最小分频倍数
+ * @param pclk_hz 总线时钟频率（Hz）
+ * @param sck_hz  器件能接受的 SCK 上限（Hz），不能为 0
+ * @retval 2/4/8/16/32/64/128/256 之一，保证 pclk_hz / 返回值 <= sck_hz
+ * @note 取满足条件的最大值而不是随手挑一档：速率只影响帧率，不影响正确性，
+ *       多降一档就是白白少一半吞吐。上限高于总线能力时落到 2，低于
+ *       256 分频后的频率时落到 256。
+ */
+static uint32_t BSP_SPI_DivFor(uint32_t pclk_hz, uint32_t sck_hz)
+{
+    uint32_t div = 2U;
+
+    while ((div < 256U) && ((pclk_hz / div) > sck_hz)) {
+        div <<= 1;
+    }
+    return div;
+}
+
+/**
+ * @brief 按设备要求切换总线速率（帧开始前调用）
+ * @param bus 总线对象，调用者必须已持有总线锁
+ * @param dev 设备句柄
+ * @retval 0: 已生效（sck_hz 为 0 时是回落到默认值，不是空操作）
+ * @retval -1: HAL_SPI_Init 失败，外设可能停在 RESET，下一帧会在状态检查被挡住
+ * @note 只在算出的分频与当前值不同时才动外设：同速率连续传输零开销，
+ *       不会每帧都重配一次。改 BR 必须关掉 SPE，所以这件事只能发生在
+ *       片选拉低之前——此时帧还没开始、总线空闲，正是合法时机。
+ *       HAL_SPI_Init 只重写 CR1/CR2，不会重跑 MspInit（那只在 State 为
+ *       RESET 时发生），所以 GPIO 与 DMA 配置不受影响。
+ *       sck_hz 为 0 的设备回落到 presc_init（CubeMX 的配置），而不是"保持
+ *       当前值"：否则触摸把总线降到 1.31 MHz 之后，屏会继续用这个低速，
+ *       帧率掉一个数量级，而且从现象完全看不出是速率被动过。
+ */
+static int BSP_SPI_ApplyRate(bsp_spi_t *bus, const bsp_spi_dev_t *dev)
+{
+    SPI_HandleTypeDef *hspi = (SPI_HandleTypeDef *)bus->hal;
+    uint32_t           code;
+
+    if (dev->sck_hz == 0U) {
+        code = bus->presc_init;    /* 没有速率要求的设备：回到 CubeMX 配置 */
+    } else {
+        code = BSP_SPI_PrescalerCode(BSP_SPI_DivFor(BSP_SPI_Pclk_Hz(hspi),
+                                                    dev->sck_hz));
+    }
+
+    if (code == bus->presc_code) {
+        return 0;   /* 与当前一致，省掉一次关/开外设 */
+    }
+
+    hspi->Init.BaudRatePrescaler = code;
+    if (HAL_SPI_Init(hspi) != HAL_OK) {
+        return -1;
+    }
+
+    bus->presc_code = code;
+    return 0;
 }
 
 /**
@@ -471,6 +591,12 @@ bsp_spi_status_t BSP_SPI_Init(void)
             bus->dma_mask |= BSP_SPI_DMA_RX;
         }
 
+        /* 记下 CubeMX 给的预分频：它既是"当前值"的初值，也是 sck_hz 为 0
+           的设备要回落到的基准值。两者必须分开存——同一条总线上有设备改过
+           速率之后，当前值已经不是 CubeMX 给的那个了 */
+        bus->presc_code = hspi->Init.BaudRatePrescaler;
+        bus->presc_init = hspi->Init.BaudRatePrescaler;
+
         /* 清零上一轮可能残留的运行时状态，再标记本路可用 */
         bus->waiter = NULL;
         bus->frame_owner = NULL;
@@ -542,9 +668,14 @@ bsp_spi_status_t BSP_SPI_TransferLocked(const bsp_spi_dev_t *dev,
  * @retval BSP_SPI_ERR_PARAM: 句柄或总线为空
  * @retval BSP_SPI_ERR_STATE: 驱动未初始化、调度器未运行，或本任务已在帧中
  * @retval BSP_SPI_ERR_TIMEOUT: 等锁超时，片选没有被拉低
+ * @retval BSP_SPI_ERR_HAL: 速率切换失败，片选没有被拉低
  * @note 电平按 cs_active_level 换算。抢锁成功才拉片选，不存在"CS 已低、
  *       总线还在别人手里"的窗口。与 Deselect() 成对，帧内只能调
  *       TransferLocked()。失败后不要调 Deselect。会阻塞，不得在中断中调用。
+ *       本函数同时完成速率切换：句柄的 sck_hz 非 0 时按"不超过该值"算出
+ *       分频并写入外设，片选拉低之前生效。因此同一总线上的两个器件可以
+ *       各用各的速率，调用方不需要为此做任何事；sck_hz 为 0 则回落到
+ *       CubeMX 配的预分频。
  */
 bsp_spi_status_t BSP_SPI_Dev_Select(const bsp_spi_dev_t *dev,
                                     uint32_t timeout_ms)
@@ -566,16 +697,30 @@ bsp_spi_status_t BSP_SPI_Dev_Select(const bsp_spi_dev_t *dev,
     if (bus->frame_owner == xTaskGetCurrentTaskHandle()) {
         return BSP_SPI_ERR_STATE;
     }
-    /* 上一帧若 Abort 失败，外设可能停在 BUSY；在这里挡住比在传输中失败好查 */
-    if (HAL_SPI_GetState((SPI_HandleTypeDef *)bus->hal) != HAL_SPI_STATE_READY) {
-        return BSP_SPI_ERR_STATE;
-    }
 
     if (timeout_ms == 0U) {
         timeout_ms = BSP_SPI_DEFAULT_TIMEOUT_MS;
     }
     if (osMutexAcquire(*bus->lock, pdMS_TO_TICKS(timeout_ms)) != osOK) {
         return BSP_SPI_ERR_TIMEOUT;
+    }
+
+    /* 外设状态检查放在拿到锁之后：DMA 传输期间 State 是 BUSY_TX/BUSY_RX，
+       锁外的检查会把"别的任务正在合法传输"误判成"外设卡死"，第二个设备
+       直接拿到 ERR_STATE 而不是排队。持锁之后总线必然空闲，此时仍不是
+       READY，才是上一帧 Abort 失败的残留，值得挡住。 */
+    if (HAL_SPI_GetState((SPI_HandleTypeDef *)bus->hal)
+        != HAL_SPI_STATE_READY) {
+        (void)osMutexRelease(*bus->lock);
+        return BSP_SPI_ERR_STATE;
+    }
+
+    /* 速率按设备切换：同一总线上不同器件各要各的，切换点在片选拉低之前。
+       失败时片选还没动、帧也没登记，把锁还回去即可，不能走 Deselect——
+       那里会校验 frame_dev，此时它还是上一帧的残留值 */
+    if (BSP_SPI_ApplyRate(bus, dev) != 0) {
+        (void)osMutexRelease(*bus->lock);
+        return BSP_SPI_ERR_HAL;
     }
 
     /* 锁到手之后才登记所有权、拉片选，两步之间不会有别的任务插进来 */

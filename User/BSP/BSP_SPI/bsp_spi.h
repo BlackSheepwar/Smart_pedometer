@@ -19,6 +19,14 @@
  *       配了 DMA 走 DMA + 任务通知，没配自动退回 HAL 阻塞接口。
  *       方向能力由 CubeMX 的 Direction 决定，不支持的组合返回 ERR_MODE；
  *       本层只服务 Master，配成 Slave 会在 BSP_SPI_Init() 被拒。
+ *
+ *       速率按设备配置：设备句柄里的 sck_hz 是该器件能接受的 SCK 上限，
+ *       Select() 时按"不超过它"换算出分频，在片选拉低之前切换完成。
+ *       于是同一条总线上可以同时挂 21 MHz 的屏和 2 MHz 的触摸芯片——
+ *       两者引用同一个总线句柄、各写各的 sck_hz 即可，调用方完全无感。
+ *       sck_hz 填 0 表示回落到 CubeMX 里配的预分频——注意是"回落"而不是
+ *       "不改"：总线上只要有设备改过速率，填 0 的设备下一次 Select 就会把
+ *       外设恢复到 CubeMX 的档位，避免被上一个设备的低速拖着走。
  *       公共头文件不暴露 HAL 类型，HAL 句柄只存在于 .c。
  */
 
@@ -106,9 +114,14 @@ bsp_spi_status_t BSP_SPI_TransferLocked(const bsp_spi_dev_t *dev,
  * @retval BSP_SPI_ERR_PARAM: 句柄或总线为空
  * @retval BSP_SPI_ERR_STATE: 未初始化、调度器未运行，或本任务已经在帧中
  * @retval BSP_SPI_ERR_TIMEOUT: 等锁超时；此时片选没有被拉低
+ * @retval BSP_SPI_ERR_HAL: 速率切换失败；此时片选没有被拉低
  * @note 电平按 cs_active_level 换算。抢锁成功才拉片选，不存在"CS 已低、
  *       总线还在别人手里"的窗口。与 Deselect() 成对，帧内只能调
  *       TransferLocked()。失败后不要调 Deselect。会阻塞，不得在中断中调用。
+ *       本函数同时完成速率切换：句柄的 sck_hz 非 0 时按"不超过该值"算出
+ *       分频并写入外设，片选拉低之前生效。因此同一总线上的两个器件可以
+ *       各用各的速率，调用方不需要为此做任何事；sck_hz 为 0 则回落到
+ *       CubeMX 配的预分频。
  */
 bsp_spi_status_t BSP_SPI_Dev_Select(const bsp_spi_dev_t *dev,
                                     uint32_t timeout_ms);
