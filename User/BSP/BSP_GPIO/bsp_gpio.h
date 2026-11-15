@@ -54,9 +54,6 @@ typedef struct bsp_gpio bsp_gpio_t;
 // 单个LED灯
 extern const bsp_gpio_t bsp_gpio_pb2;
 // 按键
-extern const bsp_gpio_t bsp_gpio_pb1;
-extern const bsp_gpio_t bsp_gpio_pb10;
-extern const bsp_gpio_t bsp_gpio_pb11;
 extern const bsp_gpio_t bsp_gpio_pc13;
 // SPI2 片选（LCD）
 extern const bsp_gpio_t bsp_gpio_pa8;

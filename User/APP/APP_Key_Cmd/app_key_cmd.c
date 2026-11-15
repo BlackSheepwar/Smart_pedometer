@@ -66,6 +66,7 @@
 static void Key_Led_Toggle(void)
 {
     Dev_LED_Toggle(&dev_led_1);
+    APP_Screen_Toggle_Mode();
 }
 
 /**
@@ -75,38 +76,6 @@ static void Key_Led_Toggle(void)
 static void Key_Led_Off(void)
 {
     Dev_LED_Write(&dev_led_1, LED_OFF);
-}
-
-/**
- * @brief B1：在"速度 / 经纬度"两块面板之间切换
- * @retval 无
- * @note 只提请求，不碰界面。真正的 subject 写入在 Task_LVGL 的
- *       APP_Screen_Step() 里执行——LVGL 不是线程安全的，按键线程
- *       一行 lv_ 都不能碰。代价是换面板滞后一个节拍（10 ms）。
- */
-static void Key_Mode_Toggle(void)
-{
-    APP_Screen_Toggle_Mode();
-}
-
-/**
- * @brief B10：直达速度面板
- * @retval 无
- * @note 与 Key_Mode_Toggle 一样只写一个标志，区别是"就选这块"而不是
- *       "翻到另一块"——重复按 B10 不会有任何视觉变化，符合直达键的直觉。
- *       只绑 DOWN：重复按没有副作用，长按连发也就没有意义。
- */
-static void Key_Mode_Speed(void)
-{
-}
-
-/**
- * @brief B11：直达经纬度面板
- * @retval 无
- * @note 与 Key_Mode_Speed 完全对称。
- */
-static void Key_Mode_Pos(void)
-{
 }
 
 /*==============================================================================
@@ -122,12 +91,6 @@ static void Key_Mode_Pos(void)
  *       导出符号名全大写，是为了让调用点一眼看出"这是配置数据，不是函数"。
  */
 const svc_key_cmd_entry_t APP_KEY_CMD_TABLE[] = {
-    { &dev_key_screen, KEY_EVENT_DOWN,    Key_Mode_Toggle },
-
-    { &dev_key_plus,   KEY_EVENT_DOWN,    Key_Mode_Speed  },
-
-    { &dev_key_minus,  KEY_EVENT_DOWN,    Key_Mode_Pos    },
-
     { &dev_key_led,    KEY_EVENT_DOWN,    Key_Led_Toggle  },
     { &dev_key_led,    KEY_EVENT_LONG_UP, Key_Led_Off     },
 };

@@ -81,9 +81,6 @@ typedef struct {
  *       表里只有"物理事实 + 手感参数"，按键做什么由 APP 层的命令表决定。
  */
 static const svc_key_cfg_t s_key_cfg_table[] = {
-    { &dev_key_screen, 20u, 200u, 100u },
-    { &dev_key_plus,   20u, 200u, 100u },
-    { &dev_key_minus,  20u, 200u, 100u },
     { &dev_key_led,    20u, 200u, 100u },
 };
 

@@ -133,7 +133,7 @@ const dev_st7789_t dev_st7789_0 = {
     .width    = 172u,
     .height   = 320u,
     .bgr      = 0u,
-    .inv      = 0u,
+    .inv      = 1u,
 };
 
 /** @brief 当前逻辑宽度（随旋转变化），Init 之前为 0 */
