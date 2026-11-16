@@ -17,11 +17,12 @@
  *          非递归互斥量，等满 timeout 后 ERR_TIMEOUT、整帧作废；
  *          frame_owner + frame_dev 把这类误用变成 ERR_STATE。
  *
- *       OS 对象归属：SPI_LOCK 由 Smart_pedometer.ioc 配置、freertos.c 生成，
- *       本文件只 extern。BSP_SPI_Init() 必须放 USER CODE BEGIN RTOS_MUTEX，
- *       那里句柄才建好；HAL 回调是强符号，靠这次调用把本目标拉进镜像。
- *       移植：F1/F4 的 HAL_SPI_*_DMA 同名同语义；**SPI2 外设中断必须开**，
- *       TXE/RXNE 与 EOT 都靠 SPI2_IRQHandler 推进。
+ *       OS 对象归属：SPI1_LOCK / SPI2_LOCK 由 Smart_pedometer.ioc 配置、
+ *       freertos.c 生成，本文件只 extern。BSP_SPI_Init() 必须放
+ *       USER CODE BEGIN RTOS_MUTEX，那里句柄才建好；HAL 回调是强符号，
+ *       靠这次调用把本目标拉进镜像。
+ *       移植：F1/F4 的 HAL_SPI_*_DMA 同名同语义；**SPI1 / SPI2 外设中断
+ *       必须开**，TXE/RXNE 与 EOT 都靠 SPIx_IRQHandler 推进。
  */
 
 /*==============================================================================
@@ -41,8 +42,11 @@
 /*==============================================================================
  * 外部变量声明
  *============================================================================*/
-/** @brief CubeMX 生成的互斥量句柄（Smart_pedometer.ioc 里配置的 SPI_LOCK） */
-extern osMutexId_t SPI_LOCKHandle;
+/** @brief CubeMX 生成的互斥量句柄（Smart_pedometer.ioc 里配的 SPI1/SPI2_LOCK）
+ *  @note 一条总线一把锁：屏与触摸共用 SPI1，所以它们互相排队；SD 卡在 SPI2
+ *        上，写卡不会把刷新屏挡住。 */
+extern osMutexId_t SPI1_LOCKHandle;
+extern osMutexId_t SPI2_LOCKHandle;
 
 /*==============================================================================
  * 宏定义与常量
@@ -125,10 +129,25 @@ typedef struct {
 /*==============================================================================
  * 内部变量
  *============================================================================*/
-/** @brief SPI2 总线对象；hal/lock 都指向 CubeMX 生成的句柄，仅本文件可见 */
+/** @brief SPI1 总线对象：屏与触摸共用，一把锁串行化，仅本文件可见 */
+static bsp_spi_t bsp_spi1 = {
+    .hal         = &hspi1,
+    .lock        = &SPI1_LOCKHandle,
+    .waiter      = NULL,
+    .frame_owner = NULL,
+    .frame_dev   = NULL,
+    .result      = 0,
+    .initialized = 0U,
+    .caps        = 0U,
+    .dma_mask    = 0U,
+    .presc_code  = 0U,
+    .presc_init  = 0U,
+};
+
+/** @brief SPI2 总线对象：留给 SPI 模式的 SD 卡，本轮只初始化总线、无设备 */
 static bsp_spi_t bsp_spi2 = {
     .hal         = &hspi2,
-    .lock        = &SPI_LOCKHandle,
+    .lock        = &SPI2_LOCKHandle,
     .waiter      = NULL,
     .frame_owner = NULL,
     .frame_dev   = NULL,
@@ -141,22 +160,35 @@ static bsp_spi_t bsp_spi2 = {
 };
 
 /**
- * @brief 挂在 SPI2 上的设备对象（LCD）
- * @note sck_hz 填 0：屏的速率由 CubeMX 里的预分频决定（APB1 42 MHz ÷ 2 =
- *       21 MHz），每次 Select 都把总线恢复到这一档。将来同一总线上挂触摸
- *       芯片时，新实例填 .sck_hz = 2000000U 即可，屏的这一份一个字不用改——
- *       两次访问之间由本层自动来回切换，屏不会被触摸的低速拖着走。
+ * @brief 挂在 SPI1 上的 LCD 设备对象
+ * @note sck_hz 填 0：屏的速率由 CubeMX 里的预分频决定（APB2 84 MHz ÷ 4 =
+ *       21 MHz），每次 Select 都把总线恢复到这一档。
  */
-const bsp_spi_dev_t bsp_spi2_dev_lcd = {
-    .bus             = &bsp_spi2,
+const bsp_spi_dev_t bsp_spi1_dev_lcd = {
+    .bus             = &bsp_spi1,
     .cs              = &bsp_gpio_pa8,
     .cs_active_level = 0U,
-    .sck_hz          = 0U,
+    .sck_hz          = 42000000U,
 };
 
-/** @brief 驱动管理的总线表；增加 SPI1 时只在这里追加实例，
+/**
+ * @brief 挂在 SPI1 上的触摸设备对象
+ * @note HR2046（与 XPT2046 / TSC2046 / ADS7843 命令兼容）的 DCLK 上限是
+ *       2 MHz。APB2 84 MHz 下算出的分频是 64，实际 1.31 MHz——留足余量，
+ *       因为该芯片对命令与数据之间的间隔也敏感。
+ *       与屏共用 SCK/MOSI/MISO，只有片选不同：同一时刻只会有一根 CS 被拉低。
+ */
+const bsp_spi_dev_t bsp_spi1_dev_touch = {
+    .bus             = &bsp_spi1,
+    .cs              = &bsp_gpio_pa4,
+    .cs_active_level = 0U,
+    .sck_hz          = 2000000U,
+};
+
+/** @brief 驱动管理的总线表；增加 SPI 时只在这里追加实例，
  *         初始化和中断反查都会自动轮询到它 */
 static bsp_spi_t *const s_buses[] = {
+    &bsp_spi1,
     &bsp_spi2,
 };
 

@@ -14,17 +14,13 @@
  *       写成 PRIVATE，别人的类型不会顺着头文件传给 APP / TASK。
  *
  *       毫秒时基与毫秒延时都由调用方注入：Service 不读时钟、不提供延时
- *       手段，换 OS 只改 TASK 一处。本服务因此只剩一处 OS 依赖——
- *       界面动作请求信号量的 osSemaphoreRelease()，那是"怎么唤醒显示
- *       线程"的机制，属于 Service 的职责范围。
+ *       手段，换 OS 只改 TASK 一处。本服务因此不含任何 OS 调用
+ *       （既没有信号量，也没有互斥量）。
  *
- *       本服务提供"请求显示线程尽快执行一次界面动作"的**机制**
- *       （Svc_LVGL_Request_Update）：它只说"请跑一次"，不说"做什么"。
- *       谁有资格请求、请求之后切哪一屏、屏幕有几张，全部在 APP 层决定；
- *       本服务的**函数名与参数里没有任何界面语义**（无 screen / switch
- *       字样）。这是有意的：机制可以被任意界面动作复用，业务换了不用
- *       动这一层。
- *       信号量由 CubeMX 创建，本模块只 extern 句柄、不创建。
+ *       本服务只提供两个动作：Init（把面板、LVGL 内核与触摸接起来）与
+ *       Step（推进一次定时器与重绘）。**函数名与参数里没有任何界面语义**
+ *       （无 screen / switch 字样）：谁有资格换界面、换成哪一张，全部在
+ *       APP 层决定，机制与策略分开。
  */
 
 #ifndef __Svc_LVGL_H__
@@ -60,7 +56,8 @@ typedef void (*svc_lvgl_delay_ms_t)(uint32_t ms);
  * 函数声明
  *============================================================================*/
 /**
- * @brief 初始化 LVGL 显示服务：面板 → 内核 → 时基 → display → 缓冲 → flush
+ * @brief 初始化 LVGL 显示与输入服务：面板 → 内核 → 时基 → display → 缓冲
+ *        → flush → 触摸 indev
  * @param tick_ms  毫秒时基来源，不可为 NULL；转交给 lv_tick_set_cb()
  * @param delay_ms 毫秒延时来源，不可为 NULL；转交给面板的复位与上电时序
  * @retval 0: 初始化成功
@@ -68,10 +65,16 @@ typedef void (*svc_lvgl_delay_ms_t)(uint32_t ms);
  * @retval -2: lv_display_create() 返回 NULL（LVGL 堆不足）
  * @retval -3: 面板当前逻辑宽高与本服务的缓冲/显示常量不一致
  * @retval -4: tick_ms 或 delay_ms 为 NULL
+ * @retval -5: 触摸控制器初始化失败（句柄为空，或几何/量程参数矛盾）
+ * @retval -6: lv_indev_create() 返回 NULL（LVGL 堆不足）
  * @note 必须在**调度器启动之后的线程里**调用：面板初始化的复位时序靠
  *       delay_ms 等待，调度器没跑时延时会全部落空；毫秒时基也依赖内核
  *       已启动才能取到有效计数。
  *       本函数之后才能创建任何 LVGL 对象（APP_Screen_Init() 依赖它）。
+ *       触摸以 LVGL indev 的形式接入：读回调在 lv_timer_handler() 里被调用，
+ *       所以采样发生在调用 Step() 的那个线程，与刷屏同线程、不会撞总线。
+ *       本层只负责"把按下点喂给 LVGL"，不决定点击之后做什么——
+ *       那是 APP 层挂在界面对象上的事件回调。
  */
 int Svc_LVGL_Init(svc_lvgl_tick_ms_t tick_ms, svc_lvgl_delay_ms_t delay_ms);
 

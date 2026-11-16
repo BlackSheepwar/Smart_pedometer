@@ -80,10 +80,11 @@ void APP_Screen_Init(void);
 /**
  * @brief 请求在"速度 / 经纬度"之间切换
  * @retval 无
- * @note **只能由 Task_Key_Cmd 线程调用**（单写者约定，见文件头）。
- *       只翻一个 8 位标志，不碰 LVGL、不碰 SPI、不阻塞，
- *       可以在命令表的 handler 里直接调，不会拖慢 8 格深的事件队列。
- *       真正的换面板发生在下一个 APP_Screen_Step()。
+ * @note 两个触发源都走这里：Task_Key_Cmd（PC13）与 LVGL 线程里的触摸回调。
+ *       翻转用 __atomic 异或实现，所以"两条线程几乎同时各触发一次"也只会
+ *       翻两次，不会丢一次（早期单写者写法会丢）。
+ *       不碰 LVGL、不碰 SPI、不阻塞，可以在命令表的 handler 与 LVGL 事件
+ *       回调里直接调。真正的换面板发生在下一个 APP_Screen_Step()。
  */
 void APP_Screen_Toggle_Mode(void);
 

@@ -4,9 +4,11 @@
  * @author Ricardo
  * @date 2026-11-04
  *
- * @note 本文件不含引脚号：SCK/MOSI/CS 属于 SPI2 总线与设备句柄（BSP 层），
+ * @note 本文件不含引脚号：SCK/MOSI/CS 属于 SPI1 总线与设备句柄（BSP 层），
  *       DC/RST/BL 只是三个 bsp_gpio_t 指针。换引脚只改本文件末尾的
  *       句柄初始化器，以及 gpio.c 里的电气配置。
+ *       同一条 SPI1 上还挂着触摸芯片，两者只有片选不同：整帧期间本设备的
+ *       CS 保持低，触摸的 CS 保持高，所以按字节搬数据不会被它抢走。
  *
  *       一次写屏的时序：
  *         CS 低 → DC 低 → 发命令 → DC 高 → 发参数/像素 → CS 高
@@ -124,7 +126,7 @@ struct dev_st7789 {
  *       否则白底黑字会整体变成黑底白字（0x21 与 0x20 的差别仅此一项）。
  */
 const dev_st7789_t dev_st7789_0 = {
-    .dev      = &bsp_spi2_dev_lcd,
+    .dev      = &bsp_spi1_dev_lcd,
     .dc       = &bsp_gpio_pb0,
     .rst      = &bsp_gpio_pb12,
     .bl       = NULL,

@@ -59,8 +59,18 @@ typedef struct bsp_uart bsp_uart_t;
 /*==============================================================================
  * 外部变量
  *============================================================================*/
-/** @brief UART5：PC12=TX / PD2=RX，115200 8N1，收发均走 DMA */
-extern const bsp_uart_t bsp_uart5;
+/**
+ * @brief USART1：PA9=TX / PA10=RX，115200 8N1，收发均走 DMA
+ * @note 与 USART2 各自独立：两套缓冲、各一把锁，一口的发送排队不会挡住另一口。
+ *       两个口当前都还没有上层消费者，接收 FIFO 只进不出，超容量后按设计
+ *       丢弃并累加 rx_overflow——接口先留好、数据源后接的正常状态。
+ */
+extern const bsp_uart_t bsp_uart1;
+
+/**
+ * @brief USART2：PA2=TX / PA3=RX，115200 8N1，收发均走 DMA
+ */
+extern const bsp_uart_t bsp_uart2;
 
 /*==============================================================================
  * 函数声明
@@ -71,8 +81,9 @@ extern const bsp_uart_t bsp_uart5;
  * @retval BSP_UART_ERR_STATE: 缺 HAL 句柄、互斥量尚未创建、UART 不在 READY，
  *         或收发 DMA 通道未配置
  * @retval BSP_UART_ERR_HAL: 接收 DMA 启动失败
- * @note 必须等 freertos.c 建完 UART_LOCK 再调用（USER CODE BEGIN RTOS_MUTEX
- *       内），且 MX_UARTx_Init() 已执行过。不能在中断里调用。
+ * @note 必须等 freertos.c 建完 UART1_LOCK / UART2_LOCK 再调用
+ *       （USER CODE BEGIN RTOS_MUTEX 内），且 MX_USARTx_UART_Init() 已执行过。
+ *       不能在中断里调用。
  *       若 .ioc 把接收 DMA 配成 Normal，这里会改成 Circular 并重新
  *       HAL_DMA_Init()——乒乓模型依赖硬件循环写，Normal 模式只收一圈就停。
  */
@@ -149,7 +160,7 @@ uint16_t BSP_UART_Tx_Free(const bsp_uart_t *uart);
  * @param buf  待发送数据，不可为 NULL
  * @param len  请求发送的字节数，不能为 0
  * @retval 实际排入队列的字节数，小于 len 说明队列满了（剩余部分被丢弃）
- * @note 多任务可并发调用，内部用 UART_LOCK 排队，一次调用排入的 len 字节在
+ * @note 多任务可并发调用，内部用本口自己的 LOCK 排队，一次调用排入的 len 字节在
  *       队列里连续，不会与其他任务的数据交错——所以"一帧一次 Write"就是
  *       帧级原子的。会短暂阻塞等锁，不得在中断中调用。
  */

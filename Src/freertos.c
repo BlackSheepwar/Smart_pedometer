@@ -26,7 +26,6 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "svc_key_logic.h"
-#include "bsp_iic.h"
 #include "bsp_spi.h"
 #include "bsp_uart.h"
 /* USER CODE END Includes */
@@ -67,38 +66,23 @@ const osThreadAttr_t defaultTask_attributes = {
 };
 /* Definitions for KEY_T */
 osThreadId_t KEY_THandle;
-uint32_t KEY_TBuffer[ 128 ];
-osStaticThreadDef_t KEY_TControlBlock;
 const osThreadAttr_t KEY_T_attributes = {
   .name = "KEY_T",
-  .cb_mem = &KEY_TControlBlock,
-  .cb_size = sizeof(KEY_TControlBlock),
-  .stack_mem = &KEY_TBuffer[0],
-  .stack_size = sizeof(KEY_TBuffer),
+  .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityRealtime,
 };
 /* Definitions for KEY_CMD_T */
 osThreadId_t KEY_CMD_THandle;
-uint32_t KEY_CMD_TBuffer[ 256 ];
-osStaticThreadDef_t KEY_CMD_TControlBlock;
 const osThreadAttr_t KEY_CMD_T_attributes = {
   .name = "KEY_CMD_T",
-  .cb_mem = &KEY_CMD_TControlBlock,
-  .cb_size = sizeof(KEY_CMD_TControlBlock),
-  .stack_mem = &KEY_CMD_TBuffer[0],
-  .stack_size = sizeof(KEY_CMD_TBuffer),
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityHigh,
 };
 /* Definitions for LVGL_T */
 osThreadId_t LVGL_THandle;
-uint32_t LVGL_TBuffer[ 2048 ];
-osStaticThreadDef_t LVGL_TControlBlock;
 const osThreadAttr_t LVGL_T_attributes = {
   .name = "LVGL_T",
-  .cb_mem = &LVGL_TControlBlock,
-  .cb_size = sizeof(LVGL_TControlBlock),
-  .stack_mem = &LVGL_TBuffer[0],
-  .stack_size = sizeof(LVGL_TBuffer),
+  .stack_size = 2048 * 4,
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
 /* Definitions for KEY_EVT_Q */
@@ -112,29 +96,37 @@ const osMessageQueueAttr_t KEY_EVT_Q_attributes = {
   .mq_mem = &KEY_EVT_QBuffer,
   .mq_size = sizeof(KEY_EVT_QBuffer)
 };
-/* Definitions for IIC_LOCK */
-osMutexId_t IIC_LOCKHandle;
-osStaticMutexDef_t IIC_LOCKControlBlock;
-const osMutexAttr_t IIC_LOCK_attributes = {
-  .name = "IIC_LOCK",
-  .cb_mem = &IIC_LOCKControlBlock,
-  .cb_size = sizeof(IIC_LOCKControlBlock),
+/* Definitions for SPI1_LOCK */
+osMutexId_t SPI1_LOCKHandle;
+osStaticMutexDef_t SPI1_LOCKControlBlock;
+const osMutexAttr_t SPI1_LOCK_attributes = {
+  .name = "SPI1_LOCK",
+  .cb_mem = &SPI1_LOCKControlBlock,
+  .cb_size = sizeof(SPI1_LOCKControlBlock),
 };
-/* Definitions for SPI_LOCK */
-osMutexId_t SPI_LOCKHandle;
-osStaticMutexDef_t SPI_LOCKControlBlock;
-const osMutexAttr_t SPI_LOCK_attributes = {
-  .name = "SPI_LOCK",
-  .cb_mem = &SPI_LOCKControlBlock,
-  .cb_size = sizeof(SPI_LOCKControlBlock),
+/* Definitions for SPI2_LOCK */
+osMutexId_t SPI2_LOCKHandle;
+osStaticMutexDef_t SPI2_LOCKControlBlock;
+const osMutexAttr_t SPI2_LOCK_attributes = {
+  .name = "SPI2_LOCK",
+  .cb_mem = &SPI2_LOCKControlBlock,
+  .cb_size = sizeof(SPI2_LOCKControlBlock),
 };
-/* Definitions for UART_LOCK */
-osMutexId_t UART_LOCKHandle;
-osStaticMutexDef_t UART_LOCKControlBlock;
-const osMutexAttr_t UART_LOCK_attributes = {
-  .name = "UART_LOCK",
-  .cb_mem = &UART_LOCKControlBlock,
-  .cb_size = sizeof(UART_LOCKControlBlock),
+/* Definitions for UART1_LOCK */
+osMutexId_t UART1_LOCKHandle;
+osStaticMutexDef_t UART1_LOCKControlBlock;
+const osMutexAttr_t UART1_LOCK_attributes = {
+  .name = "UART1_LOCK",
+  .cb_mem = &UART1_LOCKControlBlock,
+  .cb_size = sizeof(UART1_LOCKControlBlock),
+};
+/* Definitions for UART2_LOCK */
+osMutexId_t UART2_LOCKHandle;
+osStaticMutexDef_t UART2_LOCKControlBlock;
+const osMutexAttr_t UART2_LOCK_attributes = {
+  .name = "UART2_LOCK",
+  .cb_mem = &UART2_LOCKControlBlock,
+  .cb_size = sizeof(UART2_LOCKControlBlock),
 };
 
 /* Private function prototypes -----------------------------------------------*/
@@ -159,19 +151,22 @@ void MX_FREERTOS_Init(void) {
   Svc_Key_Logic_Init();   /* 以当前键电平作为"已确认"初态，避免上电误报 DOWN */
   /* USER CODE END Init */
   /* Create the mutex(es) */
-  /* creation of IIC_LOCK */
-  IIC_LOCKHandle = osMutexNew(&IIC_LOCK_attributes);
+  /* creation of SPI1_LOCK */
+  SPI1_LOCKHandle = osMutexNew(&SPI1_LOCK_attributes);
 
-  /* creation of SPI_LOCK */
-  SPI_LOCKHandle = osMutexNew(&SPI_LOCK_attributes);
+  /* creation of SPI2_LOCK */
+  SPI2_LOCKHandle = osMutexNew(&SPI2_LOCK_attributes);
 
-  /* creation of UART_LOCK */
-  UART_LOCKHandle = osMutexNew(&UART_LOCK_attributes);
+  /* creation of UART1_LOCK */
+  UART1_LOCKHandle = osMutexNew(&UART1_LOCK_attributes);
+
+  /* creation of UART2_LOCK */
+  UART2_LOCKHandle = osMutexNew(&UART2_LOCK_attributes);
 
   /* USER CODE BEGIN RTOS_MUTEX */
-  /* 要互斥量的 BSP 初始化必须在这里：CubeMX 刚把两把锁建出来，
-   早一段（Init）句柄还是 NULL，会被 BSP_xxx_Init() 判成 ERR_STATE。 */
-  BSP_IIC_Init();
+  /* 要互斥量的 BSP 初始化必须在这里：CubeMX 刚把四把锁建出来，
+   早一段（Init）句柄还是 NULL，会被 BSP_xxx_Init() 判成 ERR_STATE。
+   I2C1 已从 .ioc 移除，对应的 BSP_IIC_Init() 一并删除。 */
   BSP_SPI_Init();
   BSP_UART_Init();
   /* USER CODE END RTOS_MUTEX */

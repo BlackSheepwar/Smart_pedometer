@@ -155,7 +155,7 @@ int Dev_ST7789_SetWindow(const dev_st7789_t *lcd, uint16_t x0, uint16_t y0,
  *       要用小块图案填满大面积，改用 Dev_ST7789_WritePattern()。
  *       调用前必须先用 Dev_ST7789_SetWindow() 指定区域。
  *       内部按 4 KB 分块发送，整屏 172×320 共 110 080 字节，分 27 块。
- *       整帧独占 SPI2：帧首抢总线并拉 CS，帧尾放 CS 之后才放锁，所以
+ *       整帧独占 SPI1：帧首抢总线并拉 CS，帧尾放 CS 之后才放锁，所以
  *       分块之间不会被其它 SPI 设备插进来，CS 也不会中途抬起。
  */
 int Dev_ST7789_WritePixels(const dev_st7789_t *lcd, const uint8_t *data,

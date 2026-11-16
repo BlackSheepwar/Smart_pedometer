@@ -5,7 +5,7 @@
  * @date 2026-11-10
  *
  * @note 接收链路（三级，每级只做一件事）：
- *         UART5 RX ──DMA Circular──> s_rx_dma[256]（半区 A / 半区 B）
+ *         USARTx RX ──DMA Circular──> s_rx_dma[256]（半区 A / 半区 B）
  *                                        │
  *                     HT / TC / IDLE 中断 │ 只做"把稳定段拷进 FIFO"
  *                                        ▼
@@ -23,20 +23,26 @@
  *       HAL 的 HT 回调传 Size/2、TC 传 Size、IDLE 传 Size - NDTR，三者含义
  *       不一致；统一换算成"当前写指针位置"后再发布，只有一套边界逻辑。
  *
- *       OS 对象归属：UART_LOCK 由 Smart_pedometer.ioc 配置、freertos.c 生成，
- *       本文件只 extern。BSP_UART_Init() 必须放 USER CODE BEGIN RTOS_MUTEX，
- *       那里句柄才建好；HAL 回调是强符号，靠这次调用把本目标拉进镜像。
+ *       OS 对象归属：UART1_LOCK / UART2_LOCK 由 Smart_pedometer.ioc 配置、
+ *       freertos.c 生成，本文件只 extern。BSP_UART_Init() 必须放
+ *       USER CODE BEGIN RTOS_MUTEX，那里句柄才建好；HAL 回调是强符号，
+ *       靠这次调用把本目标拉进镜像。
  *
  *       并发契约：
  *         接收  单生产者（DMA/ISR 写 head）单消费者（一个任务写 tail），无锁；
- *         发送  多生产者（任意任务写 head，UART_LOCK 排队）单消费者（ISR 写
- *               tail），"检查 busy + 启动 DMA"用 PRIMASK 临界区保护。
- *       RX DMA 流与 UART 中断必须同优先级（当前都是 5）：IDLE 走 UART5_IRQn，
- *       HT/TC 走 DMA1_Stream0_IRQn，同级才不会互相打断发布位置的计算。
+ *         发送  多生产者（任意任务写 head，本口自己的 LOCK 排队）单消费者
+ *               （ISR 写 tail），"检查 busy + 启动 DMA"用 PRIMASK 临界区保护。
+ *       RX DMA 流与 UART 中断必须同优先级（当前都是 5）：IDLE 走 USARTx_IRQn，
+ *       HT/TC 走 DMA 流中断，同级才不会互相打断发布位置的计算。
  *
- *       所有权：huart5 / hdma_uart5_rx / hdma_uart5_tx 由本模块独占，上层不要
+ *       所有权：huart1/huart2 与各自的两条 DMA 句柄由本模块独占，上层不要
  *       再直接调 HAL_UART_Transmit_DMA() 之类的接口，否则 tx_busy 与实际状态
  *       脱节，后续 Write 会一直判定"正在发送"。
+ *
+ *       实例：USART1(PA9/PA10) 与 USART2(PA2/PA3) 两口都已在 CubeMX 配好
+ *       DMA，两套缓冲各自独立、各持一把锁。当前没有任何上层消费者，
+ *       接收 FIFO 只进不出，超容量后按设计丢弃并累加 rx_overflow——
+ *       这是"接口先留好、数据源后接"的正常状态，不是故障。
  */
 
 /*==============================================================================
@@ -56,8 +62,10 @@
 /*==============================================================================
  * 外部变量声明
  *============================================================================*/
-/** @brief CubeMX 生成的互斥量句柄（Smart_pedometer.ioc 里配置的 UART_LOCK） */
-extern osMutexId_t UART_LOCKHandle;
+/** @brief CubeMX 生成的互斥量句柄（.ioc 里配的 UART1_LOCK / UART2_LOCK）
+ *  @note 一个口一把锁：USART1 的发送排队不会挡住 USART2。 */
+extern osMutexId_t UART1_LOCKHandle;
+extern osMutexId_t UART2_LOCKHandle;
 
 /*==============================================================================
  * 宏定义与常量
@@ -68,18 +76,27 @@ extern osMutexId_t UART_LOCKHandle;
 /** @brief Flush 的默认超时（ms），调用者传 0 时使用 */
 #define BSP_UART_FLUSH_TIMEOUT_MS   100U
 
-/** @brief UART5 接收 DMA 乒乓缓冲：整块被 DMA 循环写，两个半区各 128 字节
+/** @brief USART1 接收 DMA 乒乓缓冲：整块被 DMA 循环写，两个半区各 128 字节
  *  @note 115200 下一个半区约 11 ms；数值必须是 2 的倍数，且不小于 16。 */
-#define BSP_UART5_RX_DMA_SIZE       256U
+#define BSP_UART1_RX_DMA_SIZE       256U
 
-/** @brief UART5 接收 FIFO 容量：必须是 2 的幂，可用字节数为容量减一
+/** @brief USART1 接收 FIFO 容量：必须是 2 的幂，可用字节数为容量减一
  *  @note 512 字节可吸收 115200 下约 44 ms 的突发。 */
-#define BSP_UART5_RX_FIFO_SIZE      512U
+#define BSP_UART1_RX_FIFO_SIZE      512U
 
-/** @brief UART5 发送 FIFO 容量：必须是 2 的幂，可用字节数为容量减一 */
-#define BSP_UART5_TX_FIFO_SIZE      512U
+/** @brief USART1 发送 FIFO 容量：必须是 2 的幂，可用字节数为容量减一 */
+#define BSP_UART1_TX_FIFO_SIZE      512U
 
-/** @brief 实例表长度，加第二路 UART 时只需在 s_handles[] 追加一行 */
+/** @brief USART2 接收 DMA 乒乓缓冲，规格与 USART1 相同 */
+#define BSP_UART2_RX_DMA_SIZE       256U
+
+/** @brief USART2 接收 FIFO 容量 */
+#define BSP_UART2_RX_FIFO_SIZE      512U
+
+/** @brief USART2 发送 FIFO 容量 */
+#define BSP_UART2_TX_FIFO_SIZE      512U
+
+/** @brief 实例表长度，加第三路 UART 时只需在 s_handles[] 追加一行 */
 #define BSP_UART_COUNT              (sizeof(s_handles) / sizeof(s_handles[0]))
 
 /*==============================================================================
@@ -123,31 +140,53 @@ typedef struct {
 /*==============================================================================
  * 内部变量
  *============================================================================*/
-/** @brief UART5 接收 DMA 乒乓缓冲，4 字节对齐便于 DMA 突发访问 */
-static uint8_t s_uart5_rx_dma[BSP_UART5_RX_DMA_SIZE] __attribute__((aligned(4)));
+/** @brief USART1 接收 DMA 乒乓缓冲，4 字节对齐便于 DMA 突发访问 */
+static uint8_t s_uart1_rx_dma[BSP_UART1_RX_DMA_SIZE] __attribute__((aligned(4)));
 
-/** @brief UART5 接收环形 FIFO，容量 512，可用 511 字节 */
-static uint8_t s_uart5_rx_fifo[BSP_UART5_RX_FIFO_SIZE];
+/** @brief USART1 接收环形 FIFO，容量 512，可用 511 字节 */
+static uint8_t s_uart1_rx_fifo[BSP_UART1_RX_FIFO_SIZE];
 
-/** @brief UART5 发送环形 FIFO，容量 512，可用 511 字节 */
-static uint8_t s_uart5_tx_fifo[BSP_UART5_TX_FIFO_SIZE];
+/** @brief USART1 发送环形 FIFO，容量 512，可用 511 字节 */
+static uint8_t s_uart1_tx_fifo[BSP_UART1_TX_FIFO_SIZE];
 
-/** @brief UART5 配置句柄；hal / lock 都指向 CubeMX 生成的句柄 */
-const bsp_uart_t bsp_uart5 = {
-    .hal          = &huart5,
-    .lock         = &UART_LOCKHandle,
-    .rx_dma       = s_uart5_rx_dma,
-    .rx_fifo      = s_uart5_rx_fifo,
-    .tx_fifo      = s_uart5_tx_fifo,
-    .rx_dma_size  = BSP_UART5_RX_DMA_SIZE,
-    .rx_fifo_size = BSP_UART5_RX_FIFO_SIZE,
-    .tx_fifo_size = BSP_UART5_TX_FIFO_SIZE,
+/** @brief USART2 接收 DMA 乒乓缓冲 */
+static uint8_t s_uart2_rx_dma[BSP_UART2_RX_DMA_SIZE] __attribute__((aligned(4)));
+
+/** @brief USART2 接收环形 FIFO */
+static uint8_t s_uart2_rx_fifo[BSP_UART2_RX_FIFO_SIZE];
+
+/** @brief USART2 发送环形 FIFO */
+static uint8_t s_uart2_tx_fifo[BSP_UART2_TX_FIFO_SIZE];
+
+/** @brief USART1 配置句柄；hal / lock 都指向 CubeMX 生成的句柄 */
+const bsp_uart_t bsp_uart1 = {
+    .hal          = &huart1,
+    .lock         = &UART1_LOCKHandle,
+    .rx_dma       = s_uart1_rx_dma,
+    .rx_fifo      = s_uart1_rx_fifo,
+    .tx_fifo      = s_uart1_tx_fifo,
+    .rx_dma_size  = BSP_UART1_RX_DMA_SIZE,
+    .rx_fifo_size = BSP_UART1_RX_FIFO_SIZE,
+    .tx_fifo_size = BSP_UART1_TX_FIFO_SIZE,
 };
 
-/** @brief 驱动管理的句柄表；增加 UART4 时只在这里追加，Init 与中断反查
- *         都会自动轮询到它（新增实例还要配一套缓冲，见文件末尾"扩展"注释） */
+/** @brief USART2 配置句柄；与 USART1 各持一把锁，两口互不排队 */
+const bsp_uart_t bsp_uart2 = {
+    .hal          = &huart2,
+    .lock         = &UART2_LOCKHandle,
+    .rx_dma       = s_uart2_rx_dma,
+    .rx_fifo      = s_uart2_rx_fifo,
+    .tx_fifo      = s_uart2_tx_fifo,
+    .rx_dma_size  = BSP_UART2_RX_DMA_SIZE,
+    .rx_fifo_size = BSP_UART2_RX_FIFO_SIZE,
+    .tx_fifo_size = BSP_UART2_TX_FIFO_SIZE,
+};
+
+/** @brief 驱动管理的句柄表；增加一路 UART 时只在这里追加，
+ *         Init 与中断反查都会自动轮询到它（新增实例还要配一套缓冲） */
 static const bsp_uart_t *const s_handles[] = {
-    &bsp_uart5,
+    &bsp_uart1,
+    &bsp_uart2,
 };
 
 /** @brief 运行时状态表，下标与 s_handles[] 严格一一对应 */
@@ -390,8 +429,9 @@ static uint16_t BSP_UART_Copy_Out(bsp_uart_rt_t *rt, uint8_t *buf,
  * @retval BSP_UART_ERR_STATE: 缺 HAL 句柄、互斥量尚未创建、UART 不在 READY，
  *         或收发 DMA 通道未配置
  * @retval BSP_UART_ERR_HAL: 接收 DMA 启动失败
- * @note 必须等 freertos.c 建完 UART_LOCK 再调用（USER CODE BEGIN RTOS_MUTEX
- *       内），且 MX_UARTx_Init() 已执行过。不能在中断里调用。
+ * @note 必须等 freertos.c 建完 UART1_LOCK / UART2_LOCK 再调用
+ *       （USER CODE BEGIN RTOS_MUTEX 内），且 MX_USARTx_UART_Init() 已执行过。
+ *       不能在中断里调用。
  *       若 .ioc 把接收 DMA 配成 Normal，这里会改成 Circular 并重新
  *       HAL_DMA_Init()——乒乓模型依赖硬件循环写，Normal 模式只收一圈就停。
  */
@@ -411,7 +451,7 @@ bsp_uart_status_t BSP_UART_Init(void)
             return BSP_UART_ERR_STATE;
         }
         if (*cfg->lock == NULL) {
-            return BSP_UART_ERR_STATE;   /* UART_LOCK 还没被 osMutexNew 建出来 */
+            return BSP_UART_ERR_STATE;   /* 本口的 LOCK 还没被 osMutexNew 建出来 */
         }
 
         hal = (UART_HandleTypeDef *)cfg->hal;
@@ -586,7 +626,7 @@ uint16_t BSP_UART_Tx_Free(const bsp_uart_t *uart)
  * @param buf  待发送数据，不可为 NULL
  * @param len  请求发送的字节数，不能为 0
  * @retval 实际排入队列的字节数，小于 len 说明队列满了（剩余部分被丢弃）
- * @note 多任务可并发调用，内部用 UART_LOCK 排队，一次调用排入的 len 字节在
+ * @note 多任务可并发调用，内部用本口自己的 LOCK 排队，一次调用排入的 len 字节在
  *       队列里连续，不会与其他任务的数据交错——所以"一帧一次 Write"就是
  *       帧级原子的。会短暂阻塞等锁，不得在中断中调用。
  */
@@ -681,7 +721,7 @@ bsp_uart_status_t BSP_UART_Flush(const bsp_uart_t *uart, uint32_t timeout_ms)
  *
  * 接收用 HAL_UARTEx_ReceiveToIdle_DMA() 启动，HAL 把 HT / TC / IDLE 三种事件
  * 统一送到 HAL_UARTEx_RxEventCallback()，事件类型放在 huart->RxEventType。
- * 这里覆盖的是 HAL 的 __weak 回调，不是 UART5_IRQHandler / DMA1_Stream0_IRQHandler
+ * 这里覆盖的是 HAL 的 __weak 回调，不是 USART1/2_IRQHandler 或 DMA 流中断
  * 本身；中断向量仍由 Src/stm32f4xx_it.c 分发。
  *============================================================================*/
 /**

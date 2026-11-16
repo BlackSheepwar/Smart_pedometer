@@ -54,6 +54,10 @@ _Static_assert((uint8_t)APP_UI_MODE_SPEED == APP_SCREEN_MODE_SPEED,
                "APP_SCREEN_MODE_SPEED 与 APP_UI_MODE_SPEED 必须同值");
 _Static_assert((uint8_t)APP_UI_MODE_POS == APP_SCREEN_MODE_POS,
                "APP_SCREEN_MODE_POS 与 APP_UI_MODE_POS 必须同值");
+/* Toggle 用"异或 1"翻转，前提是两个模式恰好是相邻的 0 与 1。
+   将来加第三块面板时这里会先编译失败，逼着把 Toggle 改成显式取值。 */
+_Static_assert(APP_SCREEN_MODE_POS == (APP_SCREEN_MODE_SPEED + 1u),
+               "Toggle 依赖 SPEED/POS 相邻（0/1），改取值必须重写翻转逻辑");
 
 /*==============================================================================
  * 静态变量：数据源写入区（每项单写者、显示线程只读）
@@ -87,8 +91,9 @@ static volatile int32_t s_lon_e6 = (int32_t)APP_SCREEN_UNSET_U32;
 static volatile uint8_t s_sat = APP_SCREEN_UNSET_U8;
 
 /**
- * @brief 待显示的模式（按键线程写）
+ * @brief 待显示的模式（按键线程与触摸回调都会写）
  * @note 初值 = 速度面板。volatile 理由见文件头。
+ *       两个写者，翻转走 __atomic_fetch_xor，不能再写成读-改-写。
  */
 static volatile uint8_t s_pending_mode = APP_SCREEN_MODE_SPEED;
 
@@ -136,20 +141,23 @@ void APP_Screen_Init(void)
 
     App_UI_Init();
     App_UI_Set_Mode(APP_SCREEN_MODE_SPEED);
+
+    /* 触摸入口在界面建好之后才能注册：它落在那层全屏透明点击层上 */
+    App_UI_Set_Tap_Cb(APP_Screen_Toggle_Mode);
 }
 
 /**
  * @brief 请求在"速度 / 经纬度"之间切换
  * @retval 无
- * @note 只翻 s_pending_mode，不碰 LVGL。单写者，所以"读-改-写"之间
- *       不会被打断；将来若出现第二个写入者（例如另一颗键），必须改成
- *       临界区，否则两次按键可能只翻一次。
+ * @note 两个触发源：按键线程（PC13）与显示线程里的触摸回调。
+ *       多写者之后"读-改-写"不再天然安全：两次几乎同时的触发可能只翻一次，
+ *       表现为"点了一下没反应"。所以翻转用 __atomic_fetch_xor：
+ *       取值只有 0/1，异或 1 就是翻转，Cortex-M4 上是 LDREXB/STREXB 循环，
+ *       无锁、不关中断，APP 层也不因此需要引入 FreeRTOS.h。
  */
 void APP_Screen_Toggle_Mode(void)
 {
-    s_pending_mode = (s_pending_mode == APP_SCREEN_MODE_SPEED)
-                     ? APP_SCREEN_MODE_POS
-                     : APP_SCREEN_MODE_SPEED;
+    (void)__atomic_fetch_xor(&s_pending_mode, 1u, __ATOMIC_RELAXED);
 }
 
 /**

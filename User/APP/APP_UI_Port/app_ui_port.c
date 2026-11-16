@@ -40,9 +40,35 @@
  */
 static bool s_ready = false;
 
+/**
+ * @brief 屏幕点击的处理函数，由 APP 层注册
+ * @note 只在 LVGL 线程里被读、被调用：写入发生在初始化阶段（同一线程），
+ *       所以不需要保护。为 NULL 时点击被静默丢弃。
+ */
+static app_ui_tap_cb_t s_tap_cb = NULL;
+
 /*==============================================================================
  * 内部函数
  *============================================================================*/
+/**
+ * @brief 全屏透明点击层的事件处理：转交给 APP 注册的回调
+ * @param event LVGL 事件对象，本函数不使用
+ * @retval 无
+ * @note 挂的是 LV_EVENT_SHORT_CLICKED，不是 LV_EVENT_CLICKED：
+ *       后者只要"按下与抬起在同一对象、且没触发滚动"就发，
+ *       **长按之后松手也会发**——手指搭在屏上超过 400 ms 再抬起同样会切面板；
+ *       前者额外要求按压时长短于 long_press_time（默认 400 ms），
+ *       正好挡住这类误动作。
+ */
+static void App_UI_Tap_Event(lv_event_t *event)
+{
+    (void)event;
+
+    if (s_tap_cb != NULL) {
+        s_tap_cb();
+    }
+}
+
 /**
  * @brief 把一个带符号的微度值格式化成 "39.9042N" 这种形式
  * @param buf    输出缓冲，至少 12 字节
@@ -75,16 +101,47 @@ static void App_UI_Format_Coord(char *buf, size_t size, int32_t value_e6,
  * @retval 无
  * @note 顺序不能换：先 init（建 subject、建常驻屏 screen_hud），再 load。
  *       反过来会加载一个 NULL 屏幕。
+ *       最后盖一层全屏透明点击层，它是触摸唯一的落点，见文件头的说明。
  *       这里不清空 subject：导出代码带的是设计稿演示值，留着它正好让人
  *       在数据源接上之前核对排版，第一个 Set_* 调用就会覆盖对应字段。
  */
 void App_UI_Init(void)
 {
+    lv_obj_t *tap;
+
     lvgl_ui_project_init(NULL);
 
     lv_screen_load(screen_hud);
 
+    /* ---------- 全屏透明点击层：盖在最上层，只负责接"点了一下" ---------- */
+    /* 不绑到具体控件上：导出代码会把控件整体重建，绑过的事件全丢；
+       这层只依赖"屏幕被点了"，重新导出后依然成立。
+       样式全部清零是为了让它真正看不见——LVGL 默认的 obj 自带底色与圆角。 */
+    tap = lv_obj_create(lv_screen_active());
+    if (tap != NULL) {
+        lv_obj_set_pos(tap, 0, 0);
+        lv_obj_set_size(tap, (int32_t)LV_PCT(100), (int32_t)LV_PCT(100));
+        lv_obj_set_style_bg_opa(tap, (lv_opa_t)LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(tap, 0, 0);
+        lv_obj_set_style_outline_width(tap, 0, 0);
+        lv_obj_set_style_shadow_width(tap, 0, 0);
+        lv_obj_set_style_pad_all(tap, 0, 0);
+        lv_obj_set_clickable(tap, true);   /* LVGL 9.6：add_flag 已弃用 */
+        lv_obj_add_event_cb(tap, App_UI_Tap_Event, LV_EVENT_SHORT_CLICKED, NULL);
+    }
+
     s_ready = true;
+}
+
+/**
+ * @brief 注册"屏幕被点了一下"的处理函数
+ * @param cb 回调，NULL 表示不处理
+ * @retval 无
+ * @note 只存指针，不立刻调用；真正的调用点在 App_UI_Tap_Event()。
+ */
+void App_UI_Set_Tap_Cb(app_ui_tap_cb_t cb)
+{
+    s_tap_cb = cb;
 }
 
 /**

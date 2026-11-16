@@ -1,27 +1,29 @@
 /**
  * @file svc_lvgl.c
- * @brief 服务层实现：把 LVGL 的显示服务绑定到 ST7789 设备
+ * @brief 服务层实现：把 LVGL 的显示与触摸绑定到 ST7789 + TSC2046
  * @author Ricardo
  * @date 2026-11-07
  *
  * @note 本文件是 LVGL 这个第三方库在本工程里的唯一适配器，放在 Service：
  *         - 时基与延时：都由调用方注入（svc_lvgl_tick_ms_t /
  *           svc_lvgl_delay_ms_t），本层不读时钟、不提供延时手段，
- *           换 OS 只改 TASK 一处。本文件仅剩 osSemaphoreRelease() 一处
- *           OS 依赖，那是"怎么唤醒显示线程"的机制，属于 Service 本职；
+ *           换 OS 只改 TASK 一处。本文件因此不含任何 OS 调用；
  *         - 刷屏：flush 回调 → Dev_ST7789_SetWindow() + WritePixels()。
  *           BSP 的 SPI 传输是"抢互斥量 + DMA + 任务通知"的阻塞式完成，
  *           像素写完即可直接 lv_display_flush_ready()，不需要额外的
  *           DMA 完成中断回调，也不需要第二块"传输中"缓冲；
- *         - 输入：按键走既有"消抖服务 → 事件队列 → APP"链路，不注册
- *           lv_indev；B10 的切屏是业务通知，不是 LVGL 的输入事件。
+ *         - 输入：两路并存。按键仍走既有"消抖服务 → 事件队列 → APP"链路，
+ *           不经过 LVGL；触摸走标准 LVGL indev——read_cb 每帧被
+ *           lv_timer_handler() 调一次，采到点就填进 data，LVGL 自己负责
+ *           点击/长按的时序判定。所以"点一下切面板"不需要本层写任何
+ *           消抖或计时逻辑，也不需要额外的中断。
  *
  *       缓冲策略：部分缓冲单块 172×40 行（13 760 B）。整屏 172×320×2 =
  *       110 080 B，128 KB RAM 放不下，LVGL 按行分片渲染并逐片 flush，
  *       代价是同一区域可能被刷多次，换来 RAM 占用下降一个数量级。
  *
- *       单实例：display 指针与 draw buffer 都是模块级 static，只服务
- *       dev_st7789_0 这一块屏，与 dev_st7789.c 的单实例约定一致。
+ *       单实例：display / indev 指针与 draw buffer 都是模块级 static，只服务
+ *       dev_st7789_0 与 dev_tsc2046_0，与两个设备层的单实例约定一致。
  */
 
 /*==============================================================================
@@ -31,9 +33,8 @@
 #include <stddef.h>
 #include "svc_lvgl.h"
 // 功能包含
-#include "FreeRTOS.h"
-#include "cmsis_os2.h"
 #include "dev_st7789.h"
+#include "dev_tsc2046.h"
 #include "lvgl.h"
 
 /*==============================================================================
@@ -49,18 +50,6 @@
 #define SVC_LVGL_BUF_BYTES          (SVC_LVGL_HOR_RES * SVC_LVGL_BUF_LINES * 2u)
 
 /*==============================================================================
- * 外部声明
- *============================================================================*/
-/**
- * @brief 界面动作请求二值信号量：由 CubeMX 按 .ioc 的 BinarySemaphores01 创建
- * @note 创建点在 Src/freertos.c 的 MX_FREERTOS_Init()，本服务只使用不创建。
- *       生产者是 Svc_LVGL_Request_Update()（任意线程，当前是按键命令线程），
- *       消费者是 Task_LVGL；两边都不拥有对象本身。
- *       名字沿用创建时的叫法；本服务的头文件里已不出现"切屏"语义。
- */
-extern osSemaphoreId_t LVGL_SW_SEMHandle;
-
-/*==============================================================================
  * 内部变量
  *============================================================================*/
 /**
@@ -72,6 +61,9 @@ static uint8_t s_draw_buf[SVC_LVGL_BUF_BYTES] __attribute__((aligned(4)));
 
 /** @brief 本端口的 display 对象，Init 成功后非 NULL */
 static lv_display_t *s_disp;
+
+/** @brief 本端口的触摸 indev 对象，Init 成功后非 NULL */
+static lv_indev_t *s_indev;
 
 /*==============================================================================
  * 内部函数
@@ -125,11 +117,39 @@ static void Svc_LVGL_Flush(lv_display_t *disp, const lv_area_t *area,
     lv_display_flush_ready(disp);
 }
 
+/**
+ * @brief 读一次触摸状态喂给 LVGL
+ * @param indev 由 LVGL 回传的输入设备对象，本函数不使用
+ * @param data  输出：按下状态与坐标
+ * @retval 无
+ * @note 每个渲染周期被调用一次（当前 10 ms），不能在里面做重活：
+ *       按下判定只读一个 GPIO，取坐标才动一次 SPI。
+ *       读失败一律报"未按下"——报按下却带着上一次的旧坐标，会让界面
+ *       在手指已经离开之后误触发一次点击。
+ */
+static void Svc_LVGL_Touch_Read(lv_indev_t *indev, lv_indev_data_t *data)
+{
+    uint16_t x;
+    uint16_t y;
+
+    (void)indev;
+
+    if ((Dev_TSC2046_Is_Pressed(&dev_tsc2046_0) != 0u) &&
+        (Dev_TSC2046_Read_Pixel(&dev_tsc2046_0, &x, &y) == 0)) {
+        data->point.x = (int32_t)x;
+        data->point.y = (int32_t)y;
+        data->state   = LV_INDEV_STATE_PRESSED;
+    } else {
+        data->state   = LV_INDEV_STATE_RELEASED;
+    }
+}
+
 /*==============================================================================
  * 接口实现
  *============================================================================*/
 /**
- * @brief 初始化 LVGL 显示服务：面板 → 内核 → 时基 → display → 缓冲 → flush
+ * @brief 初始化 LVGL 显示与输入服务：面板 → 内核 → 时基 → display → 缓冲
+ *        → flush → 触摸 indev
  * @param tick_ms  毫秒时基来源，不可为 NULL；转交给 lv_tick_set_cb()
  * @param delay_ms 毫秒延时来源，不可为 NULL；转交给面板的复位与上电时序
  * @retval 0: 初始化成功
@@ -137,6 +157,8 @@ static void Svc_LVGL_Flush(lv_display_t *disp, const lv_area_t *area,
  * @retval -2: lv_display_create() 返回 NULL（LVGL 堆不足）
  * @retval -3: 面板当前逻辑宽高与本服务的缓冲/显示常量不一致
  * @retval -4: tick_ms 或 delay_ms 为 NULL
+ * @retval -5: 触摸控制器初始化失败（句柄为空，或几何/量程参数矛盾）
+ * @retval -6: lv_indev_create() 返回 NULL（LVGL 堆不足）
  * @note 必须在**调度器启动之后的线程里**调用：面板初始化的复位时序靠
  *       delay_ms 等待（TASK 注入的通常是 osDelay），调度器没跑时延时会
  *       全部落空；毫秒时基也依赖内核已启动才能取到有效计数。
@@ -185,6 +207,21 @@ int Svc_LVGL_Init(svc_lvgl_tick_ms_t tick_ms, svc_lvgl_delay_ms_t delay_ms)
     lv_display_set_buffers(s_disp, s_draw_buf, NULL, sizeof(s_draw_buf),
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_display_set_flush_cb(s_disp, Svc_LVGL_Flush);
+
+    /* ---------- 5. 触摸：设备自检在前，再由 LVGL 建指针型 indev ---------- */
+    /* 触摸是当前唯一的交互入口，所以初始化失败按整体失败处理：
+       与其给出一块"能画但点不动"的界面让人去猜是驱动坏了还是界面没响应，
+       不如让 TASK 直接停住并把 -5 暴露出来。 */
+    if (Dev_TSC2046_Init(&dev_tsc2046_0) != 0) {
+        return -5;
+    }
+
+    s_indev = lv_indev_create();
+    if (s_indev == NULL) {
+        return -6;
+    }
+    lv_indev_set_type(s_indev, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_read_cb(s_indev, Svc_LVGL_Touch_Read);
 
     return 0;
 }

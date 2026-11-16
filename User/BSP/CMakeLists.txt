@@ -20,22 +20,9 @@ target_link_libraries(bsp_gpio
 target_compile_options(bsp_gpio PRIVATE ${USER_WARN_FLAGS})
 
 # -----------------------------------------------------------------------------
-# bsp_iic：IIC 模块（总线互斥量排队 + 完成中断唤醒，依赖 FreeRTOS）
-# -----------------------------------------------------------------------------
-add_library(bsp_iic STATIC
-    BSP_IIC/bsp_iic.c
-)
-target_include_directories(bsp_iic
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/BSP_IIC
-)
-target_link_libraries(bsp_iic
-    PRIVATE stm32cubemx
-)
-target_compile_options(bsp_iic PRIVATE ${USER_WARN_FLAGS})
-
-# -----------------------------------------------------------------------------
 # bsp_spi：SPI 模块（总线/设备两级句柄 + 互斥量排队 + DMA 完成唤醒）
 #   片选由设备句柄持有，所以要链接 bsp_gpio；PUBLIC 只暴露 bsp_spi.h。
+#   一条总线一个总线对象、各持一把锁：SPI1 跑屏与触摸，SPI2 留给 SD 卡。
 # -----------------------------------------------------------------------------
 add_library(bsp_spi STATIC
     BSP_SPI/bsp_spi.c

@@ -64,7 +64,14 @@ typedef struct bsp_spi_dev bsp_spi_dev_t;
 /*==============================================================================
  * 外部变量
  *============================================================================*/
-extern const bsp_spi_dev_t bsp_spi2_dev_lcd;
+/**
+ * @brief SPI1 上的两块器件：LCD 与触摸（各占一根片选，共用 SCK/MOSI/MISO）
+ * @note 屏的 sck_hz 填 0，回落到 CubeMX 配置的 21 MHz；触摸填 2 MHz 上限，
+ *       实际落到 1.31 MHz（APB2 84 MHz ÷ 64）。两者之间由本层在片选拉低
+ *       之前自动换挡，调用方不需要关心当前总线上一次跑的是谁。
+ */
+extern const bsp_spi_dev_t bsp_spi1_dev_lcd;
+extern const bsp_spi_dev_t bsp_spi1_dev_touch;
 
 /*==============================================================================
  * 函数声明
@@ -74,8 +81,8 @@ extern const bsp_spi_dev_t bsp_spi2_dev_lcd;
  * @retval BSP_SPI_OK: 初始化成功（已初始化的总线会被跳过）
  * @retval BSP_SPI_ERR_STATE: 缺 HAL 句柄或互斥量、外设非 READY、Mode 不是
  *         Master，或数据宽度不是 8 bit
- * @note 必须等 freertos.c 建完 SPI_LOCK 再调用（USER CODE BEGIN RTOS_MUTEX
- *       内），且 MX_SPIx_Init() 已执行过。不能在中断里调用。
+ * @note 必须等 freertos.c 建完 SPI1_LOCK / SPI2_LOCK 再调用（USER CODE
+ *       BEGIN RTOS_MUTEX 内），且 MX_SPIx_Init() 已执行过。不能在中断里调用。
  *       新增一路 SPI 只在 s_buses[] 追加实例，本函数不用改。
  */
 bsp_spi_status_t BSP_SPI_Init(void);
