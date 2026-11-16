@@ -10,11 +10,6 @@
  *
  *       头文件里端口是不透明的 void *，真正的 GPIO_TypeDef * 只在
  *       本文件还原，HAL 因此不会泄漏到上层。
- *
- *       移植说明：本文件从 frame（STM32F103，Cortex-M3）搬到本工程
- *       （STM32F405，Cortex-M4F）只换了一行 HAL 头文件。GPIO_TypeDef、
- *       GPIO_PIN_x 与 HAL_GPIO_* 在 F1 / F4 上同名同语义，引脚句柄表
- *       一个字不用改。
  */
 
 /*==============================================================================
@@ -42,18 +37,14 @@ struct bsp_gpio {
 /*==============================================================================
  * 句柄实例：端口、引脚号、方向只出现在这里
  *============================================================================*/
-// 单个LED灯
-const bsp_gpio_t bsp_gpio_pb2 = { .port = GPIOB, .pin = GPIO_PIN_2, .dir = BSP_GPIO_DIR_OUT };
-// 按键
-const bsp_gpio_t bsp_gpio_pc13 = { .port = GPIOC, .pin = GPIO_PIN_13, .dir = BSP_GPIO_DIR_IN };
-// SPI1 片选：LCD 用 PA8，触摸用 PA4
-const bsp_gpio_t bsp_gpio_pa8  = { .port = GPIOA, .pin = GPIO_PIN_8, .dir = BSP_GPIO_DIR_OUT };
-const bsp_gpio_t bsp_gpio_pa4  = { .port = GPIOA, .pin = GPIO_PIN_4, .dir = BSP_GPIO_DIR_OUT };
-// 触摸笔中断 PENIRQ（输入，不驱动）
-const bsp_gpio_t bsp_gpio_pc4  = { .port = GPIOC, .pin = GPIO_PIN_4, .dir = BSP_GPIO_DIR_IN };
-// LCD 控制脚：数据/命令选择（DC）、硬复位（RST）
-const bsp_gpio_t bsp_gpio_pb11 = { .port = GPIOB, .pin = GPIO_PIN_11, .dir = BSP_GPIO_DIR_OUT };
-const bsp_gpio_t bsp_gpio_pb12 = { .port = GPIOB, .pin = GPIO_PIN_12, .dir = BSP_GPIO_DIR_OUT };
+/* 引脚句柄表：一行一个引脚，行尾是它在本板的用途。 */
+const bsp_gpio_t bsp_gpio_pb2  = { .port = GPIOB, .pin = GPIO_PIN_2,  .dir = BSP_GPIO_DIR_OUT }; /* LED */
+const bsp_gpio_t bsp_gpio_pc13 = { .port = GPIOC, .pin = GPIO_PIN_13, .dir = BSP_GPIO_DIR_IN };  /* 按键 */
+const bsp_gpio_t bsp_gpio_pa8  = { .port = GPIOA, .pin = GPIO_PIN_8,  .dir = BSP_GPIO_DIR_OUT }; /* 显示片选 */
+const bsp_gpio_t bsp_gpio_pa4  = { .port = GPIOA, .pin = GPIO_PIN_4,  .dir = BSP_GPIO_DIR_OUT }; /* 触摸片选 */
+const bsp_gpio_t bsp_gpio_pc4  = { .port = GPIOC, .pin = GPIO_PIN_4,  .dir = BSP_GPIO_DIR_IN };  /* 触摸中断 */
+const bsp_gpio_t bsp_gpio_pb11 = { .port = GPIOB, .pin = GPIO_PIN_11, .dir = BSP_GPIO_DIR_OUT }; /* 显示 DC */
+const bsp_gpio_t bsp_gpio_pb12 = { .port = GPIOB, .pin = GPIO_PIN_12, .dir = BSP_GPIO_DIR_OUT }; /* 显示 RST */
 
 /*==============================================================================
  * 接口实现

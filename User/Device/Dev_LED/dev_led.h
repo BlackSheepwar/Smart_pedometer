@@ -36,11 +36,11 @@ typedef enum {
 typedef struct dev_led dev_led_t;
 
 /*==============================================================================
- * 外部声明：本板只有一个 LED
+ * 外部声明
  *============================================================================*/
 /**
- * @brief 板载 LED 实例（PC13，低电平点亮）
- * @note const 句柄编译期进 .rodata，不占 RAM。
+ * @brief LED 实例：高电平点亮（polarity = 1）
+ * @note const 句柄编译期进 .rodata，不占 RAM；引脚见本实例引用的 BSP 句柄。
  */
 extern const dev_led_t dev_led_1;
 

@@ -2,8 +2,8 @@
 # User 顶层：按层收集子目录
 #
 #   Third_Party 第 0 层  第三方只读区  LVGL 源码
-#   BSP     第 1 层  硬件驱动层    GPIO 句柄与读写、SPI 总线/设备、UART（引脚与
-#                                时钟由 CubeMX 负责；I2C1 已移除）
+#   BSP     第 1 层  硬件驱动层    GPIO 句柄与读写、SPI 总线/设备、UART
+#                                （引脚与时钟由 CubeMX 负责）
 #   Device  第 2 层  设备抽象层    按键、单灯、ST7789 屏、TSC2046 触摸（不含 GUI 概念）
 #   Service 第 3 层  服务层        消抖/长按/连发、命令表分发、LVGL 显示与输入绑定
 #   APP     第 4 层  应用层        界面生命周期、模式面板与数据同步
@@ -17,10 +17,8 @@
 # 线程由 CubeMX 的 .ioc 生成（osThreadNew 在 Src/freertos.c），
 # User/ 这边只写线程体和业务，不手写 osThreadNew。
 #
-# 移植来源：本目录整体来自 frame 工程（STM32F103，Cortex-M3），
-#   搬到本工程（STM32F405，Cortex-M4F）。HAL 系列不同，但 User/ 这一层
-#   只在 BSP 的 .c 里见过 HAL，所以除 bsp_gpio.c 换了一行头文件外，
-#   五层的源码与链接关系与 frame 一致。
+# 换 MCU 只改 BSP 的 .c 与 HAL 头：Device 及以上不认识 HAL 类型，
+# 这是"上层源码与芯片型号解耦"的可移植性判据，不在注释里留移植记录。
 # =============================================================================
 
 # 统一编译选项：警告即错误（子目录里直接引用这个变量）
@@ -45,7 +43,7 @@ add_subdirectory(TASK)
 target_link_libraries(${CMAKE_PROJECT_NAME}
     # TASK 层
     task_objects
-    # BSP 层（I2C1 已移除，bsp_iic 随之删除）
+    # BSP 层
     bsp_spi
     bsp_uart
     # Service 层

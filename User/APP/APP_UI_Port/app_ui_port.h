@@ -2,7 +2,7 @@
  * @file app_ui_port.h
  * @brief 应用层：LVGL Pro 导出界面的本地适配层（240×320 双面板仪表）
  * @author Ricardo
- * @date 2026-11-10（2026-11-16 改 240×320 版式、触摸由点按扩为滑动手势）
+ * @date 2026-11-10
  *
  * @note 目录分工（这是本模块存在的理由）：
  *         User/APP/UI_Export/      LVGL Pro 的导出物，纯生成，勿手改；
@@ -27,8 +27,8 @@
  *       ★换页的三个触发源★
  *         1. PC13 按键 → APP_Screen_Toggle_Mode()（翻到另一页）
  *         2. 手指左右滑 → 本层判定方向后上报，APP 层按"上一页/下一页"落地
- *         3. 点按屏幕   → 与按键同义（翻到另一页），留着是因为单点触控下
- *                        点按比滑动更快，也是旧版唯一的手势
+ *         3. 点按屏幕   → 与按键同义（翻到另一页）：单点触控下点按比滑动
+ *                        更快，两条路径并存互不冲突
  *       本层不知道"有几页、下一页是谁"：它只报告"往哪个方向划了"。
  *       页数是界面语义，归 APP_Screen 管（见那边的 On_Gesture）。
  *
@@ -83,11 +83,10 @@
  *       extern 与赋值，所以 UI_Export/fonts/ 下的 .c 必须与导出一致地全量
  *       放进 CMake（见 User/APP/CMakeLists.txt 的说明）。
  *
- *       本次改版顺带改掉的工程参数（界面与硬件必须同尺寸）：
- *         Dev_ST7789 的 width/x_offset → 240/0
- *         Dev_TSC2046 的 width/x_offset → 240/0
- *         Svc_LVGL 的 SVC_LVGL_HOR_RES → 240
- *       四处缺一不可，原因见各文件里的说明。
+ *       尺寸一致性：UI 导出尺寸、Dev_ST7789 的 width/x_offset、
+ *       Dev_TSC2046 的 width/x_offset、SVC_LVGL_HOR_RES 必须相同。
+ *       对不上时 Svc_LVGL_Init() 返回 -3 停在故障态，不会给出"看起来能跑
+ *       但错位"的界面。
  *
  *       线程约束：全部函数都只能在本工程的 LVGL 线程（Task_LVGL）里调用。
  *       LV_USE_OS 是 LV_OS_NONE，LVGL 内部没有任何锁；本层不做线程安全

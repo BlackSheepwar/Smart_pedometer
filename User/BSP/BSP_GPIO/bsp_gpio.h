@@ -9,8 +9,8 @@
  *       本层只负责"把句柄翻译成 GPIOx + Pin"，不重复配置硬件。
  *
  *       句柄里带一个 dir 字段，是给"方向不能靠配置、只能靠代码说明"的
- *       芯片（比如需要运行时切输入/输出的 ESP32）留的位置；
- *       STM32 上方向由 CubeMX 固定，这个字段只作为描述与写入保护用。
+ *       芯片留的位置（需要运行时切输入/输出的 MCU）；方向由 CubeMX 固定的
+ *       平台上，这个字段只作为自描述与写入保护用。
  *
  *       端口字段故意用 void * 而不是 GPIO_TypeDef *：
  *       HAL 的 GPIO_TypeDef 是匿名 struct 的 typedef，没法前置声明，
@@ -33,9 +33,8 @@
  *============================================================================*/
 /**
  * @brief 引脚方向
- * @note STM32 的方向在 MX_GPIO_Init() 里定死，只会有 IN 或 OUT 两种；
- *       IN_OUT 是给可运行时换向的 MCU 留的（ESP32 的 GPIO 可以随时改成双向），
- *       在这块板子上不会用到。
+ * @note 方向由 CubeMX 在 MX_GPIO_Init() 里定死时只会用到 IN 或 OUT；
+ *       IN_OUT 是给可运行时换向的 MCU 留的扩展位，当前平台不使用。
  */
 typedef enum {
     BSP_GPIO_DIR_IN     = 0,            /* 输入：只读，写它会被忽略 */
@@ -51,18 +50,14 @@ typedef struct bsp_gpio bsp_gpio_t;
 /*==============================================================================
  * 外部声明：每个用到的引脚一份句柄
  *============================================================================*/
-// 单个LED灯
-extern const bsp_gpio_t bsp_gpio_pb2;
-// 按键
-extern const bsp_gpio_t bsp_gpio_pc13;
-// SPI1 片选：LCD（PA8）与触摸（PA4），都按低电平有效使用
-extern const bsp_gpio_t bsp_gpio_pa8;
-extern const bsp_gpio_t bsp_gpio_pa4;
-// 触摸笔中断 PENIRQ：低电平表示有按下，上拉由模组上的 10K 提供
-extern const bsp_gpio_t bsp_gpio_pc4;
-// LCD 控制脚：数据/命令选择（DC，PB11）、硬复位（RST，PB12）
-extern const bsp_gpio_t bsp_gpio_pb11;
-extern const bsp_gpio_t bsp_gpio_pb12;
+/* 与 bsp_gpio.c 的实例表一一对应；行尾是引脚在本板的用途。 */
+extern const bsp_gpio_t bsp_gpio_pb2;   /* LED */
+extern const bsp_gpio_t bsp_gpio_pc13;  /* 按键 */
+extern const bsp_gpio_t bsp_gpio_pa8;   /* 显示片选 */
+extern const bsp_gpio_t bsp_gpio_pa4;   /* 触摸片选 */
+extern const bsp_gpio_t bsp_gpio_pc4;   /* 触摸中断 */
+extern const bsp_gpio_t bsp_gpio_pb11;  /* 显示 DC */
+extern const bsp_gpio_t bsp_gpio_pb12;  /* 显示 RST */
 
 /*==============================================================================
  * 函数声明

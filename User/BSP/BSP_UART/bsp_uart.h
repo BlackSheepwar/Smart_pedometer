@@ -22,8 +22,7 @@
  *       本层不做帧解析、不注册上层回调、不建线程：帧边界属于 Service，
  *       调度节奏属于 TASK。
  *
- *       移植：换 UART 实例只在 bsp_uart.c 的 s_handles[] 追加句柄；
- *       F1/F4 的 HAL_UARTEx_ReceiveToIdle_DMA 同名同语义。
+ *       句柄表驱动：本层代码与 UART 路数无关，每路各有一套缓冲与锁。
  */
 
 #ifndef __BSP_UART_H__
@@ -60,15 +59,15 @@ typedef struct bsp_uart bsp_uart_t;
  * 外部变量
  *============================================================================*/
 /**
- * @brief USART1：PA9=TX / PA10=RX，115200 8N1，收发均走 DMA
+ * @brief USART1：收发均走 DMA，帧格式与波特率由 CubeMX 决定
  * @note 与 USART2 各自独立：两套缓冲、各一把锁，一口的发送排队不会挡住另一口。
- *       两个口当前都还没有上层消费者，接收 FIFO 只进不出，超容量后按设计
- *       丢弃并累加 rx_overflow——接口先留好、数据源后接的正常状态。
+ *       上层不取数据时接收 FIFO 只进不出，超容量后按设计丢弃并累加
+ *       rx_overflow——这是"接口先留好、数据源后接"的正常状态，不是故障。
  */
 extern const bsp_uart_t bsp_uart1;
 
 /**
- * @brief USART2：PA2=TX / PA3=RX，115200 8N1，收发均走 DMA
+ * @brief USART2：收发均走 DMA，帧格式与波特率由 CubeMX 决定
  */
 extern const bsp_uart_t bsp_uart2;
 

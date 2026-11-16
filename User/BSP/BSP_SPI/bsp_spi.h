@@ -12,8 +12,8 @@
  *       两种用法，按事务长度选：
  *         单段  BSP_SPI_Dev_Transfer()，一次调用走完 Select→写→Deselect；
  *         多段  Select() + TransferLocked() × N + Deselect()，锁与片选同生命
- *               周期，整帧独占总线。ST7789 这类要求 CS 整帧不抬起的设备必须
- *               用这种，否则别的设备能在帧中间插进来，字节会被本设备误收。
+ *               周期，整帧独占总线。命令与参数不能跨帧的器件必须用这种，
+ *               否则别的设备能在帧中间插进来，字节会被本设备误收。
  *
  *       一次事务同步完成：抢互斥量排队 → 启动传输 → 等完成唤醒 → 返回。
  *       配了 DMA 走 DMA + 任务通知，没配自动退回 HAL 阻塞接口。
@@ -22,7 +22,7 @@
  *
  *       速率按设备配置：设备句柄里的 sck_hz 是该器件能接受的 SCK 上限，
  *       Select() 时按"不超过它"换算出分频，在片选拉低之前切换完成。
- *       于是同一条总线上可以同时挂 21 MHz 的屏和 2 MHz 的触摸芯片——
+ *       于是同一条总线上可以同时挂两种速率不同的器件——
  *       两者引用同一个总线句柄、各写各的 sck_hz 即可，调用方完全无感。
  *       sck_hz 填 0 表示回落到 CubeMX 里配的预分频——注意是"回落"而不是
  *       "不改"：总线上只要有设备改过速率，填 0 的设备下一次 Select 就会把
@@ -65,10 +65,9 @@ typedef struct bsp_spi_dev bsp_spi_dev_t;
  * 外部变量
  *============================================================================*/
 /**
- * @brief SPI1 上的两块器件：LCD 与触摸（各占一根片选，共用 SCK/MOSI/MISO）
- * @note 屏的 sck_hz 填 0，回落到 CubeMX 配置的 21 MHz；触摸填 2 MHz 上限，
- *       实际落到 1.31 MHz（APB2 84 MHz ÷ 64）。两者之间由本层在片选拉低
- *       之前自动换挡，调用方不需要关心当前总线上一次跑的是谁。
+ * @brief SPI1 上的两个设备：各持一根片选、共用 SCK/MOSI/MISO
+ * @note 每个设备各写各的 sck_hz，本层在片选拉低之前自动换挡，
+ *       调用方不需要关心上一条总线上一次跑的是哪台。
  */
 extern const bsp_spi_dev_t bsp_spi1_dev_lcd;
 extern const bsp_spi_dev_t bsp_spi1_dev_touch;
@@ -83,7 +82,6 @@ extern const bsp_spi_dev_t bsp_spi1_dev_touch;
  *         Master，或数据宽度不是 8 bit
  * @note 必须等 freertos.c 建完 SPI1_LOCK / SPI2_LOCK 再调用（USER CODE
  *       BEGIN RTOS_MUTEX 内），且 MX_SPIx_Init() 已执行过。不能在中断里调用。
- *       新增一路 SPI 只在 s_buses[] 追加实例，本函数不用改。
  */
 bsp_spi_status_t BSP_SPI_Init(void);
 

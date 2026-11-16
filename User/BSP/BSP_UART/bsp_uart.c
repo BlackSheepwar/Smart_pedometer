@@ -23,26 +23,24 @@
  *       HAL 的 HT 回调传 Size/2、TC 传 Size、IDLE 传 Size - NDTR，三者含义
  *       不一致；统一换算成"当前写指针位置"后再发布，只有一套边界逻辑。
  *
- *       OS 对象归属：UART1_LOCK / UART2_LOCK 由 Smart_pedometer.ioc 配置、
- *       freertos.c 生成，本文件只 extern。BSP_UART_Init() 必须放
- *       USER CODE BEGIN RTOS_MUTEX，那里句柄才建好；HAL 回调是强符号，
- *       靠这次调用把本目标拉进镜像。
+ *       OS 对象归属：每口一把互斥量，由 .ioc 配置、freertos.c 生成，
+ *       本文件只 extern。BSP_UART_Init() 必须放 USER CODE BEGIN RTOS_MUTEX，
+ *       那里句柄才建好；HAL 回调是强符号，靠这次调用把本目标拉进镜像。
  *
  *       并发契约：
  *         接收  单生产者（DMA/ISR 写 head）单消费者（一个任务写 tail），无锁；
  *         发送  多生产者（任意任务写 head，本口自己的 LOCK 排队）单消费者
  *               （ISR 写 tail），"检查 busy + 启动 DMA"用 PRIMASK 临界区保护。
- *       RX DMA 流与 UART 中断必须同优先级（当前都是 5）：IDLE 走 USARTx_IRQn，
+ *       RX DMA 流与 UART 中断必须同优先级：IDLE 走 USARTx_IRQn，
  *       HT/TC 走 DMA 流中断，同级才不会互相打断发布位置的计算。
  *
- *       所有权：huart1/huart2 与各自的两条 DMA 句柄由本模块独占，上层不要
- *       再直接调 HAL_UART_Transmit_DMA() 之类的接口，否则 tx_busy 与实际状态
- *       脱节，后续 Write 会一直判定"正在发送"。
+ *       所有权：各口 HAL 句柄与两条 DMA 句柄由本模块独占，上层不要再直接调
+ *       HAL_UART_Transmit_DMA() 之类的接口，否则 tx_busy 与实际状态脱节，
+ *       后续 Write 会一直判定"正在发送"。
  *
- *       实例：USART1(PA9/PA10) 与 USART2(PA2/PA3) 两口都已在 CubeMX 配好
- *       DMA，两套缓冲各自独立、各持一把锁。当前没有任何上层消费者，
- *       接收 FIFO 只进不出，超容量后按设计丢弃并累加 rx_overflow——
- *       这是"接口先留好、数据源后接"的正常状态，不是故障。
+ *       实例：每路一套缓冲、一把锁，互不排队。上层不取数据时接收 FIFO
+ *       只进不出，超容量后按设计丢弃并累加 rx_overflow——这是"接口先留好、
+ *       数据源后接"的正常状态，不是故障。
  */
 
 /*==============================================================================
@@ -62,8 +60,8 @@
 /*==============================================================================
  * 外部变量声明
  *============================================================================*/
-/** @brief CubeMX 生成的互斥量句柄（.ioc 里配的 UART1_LOCK / UART2_LOCK）
- *  @note 一个口一把锁：USART1 的发送排队不会挡住 USART2。 */
+/** @brief 每口一把互斥量，用于发送队列的生产者排队
+ *  @note 由 .ioc 生成、freertos.c 定义；一个口的发送排队不会挡住另一个口。 */
 extern osMutexId_t UART1_LOCKHandle;
 extern osMutexId_t UART2_LOCKHandle;
 
@@ -96,7 +94,7 @@ extern osMutexId_t UART2_LOCKHandle;
 /** @brief USART2 发送 FIFO 容量 */
 #define BSP_UART2_TX_FIFO_SIZE      512U
 
-/** @brief 实例表长度，加第三路 UART 时只需在 s_handles[] 追加一行 */
+/** @brief 实例表长度，由 s_handles[] 的行数决定 */
 #define BSP_UART_COUNT              (sizeof(s_handles) / sizeof(s_handles[0]))
 
 /*==============================================================================
@@ -182,8 +180,7 @@ const bsp_uart_t bsp_uart2 = {
     .tx_fifo_size = BSP_UART2_TX_FIFO_SIZE,
 };
 
-/** @brief 驱动管理的句柄表；增加一路 UART 时只在这里追加，
- *         Init 与中断反查都会自动轮询到它（新增实例还要配一套缓冲） */
+/** @brief 驱动管理的句柄表：Init 与中断反查都按它轮询 */
 static const bsp_uart_t *const s_handles[] = {
     &bsp_uart1,
     &bsp_uart2,

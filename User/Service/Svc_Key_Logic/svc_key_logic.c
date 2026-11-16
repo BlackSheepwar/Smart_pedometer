@@ -14,11 +14,11 @@
  *       时间由调用方按毫秒喂进来（扫描任务用 osDelayUntil 固定 10 ms 节拍），
  *       所以阈值改毫秒就行，不需要换算成采样次数。
  *
- *       按键数量与手感参数在下面的"配置表"分区里调：
- *       加一个键 = 表里加一行 + Device 层定义它的句柄。
+ *       按键数量与手感参数由下面的配置表决定：一行一颗键，
+ *       扫描循环不感知个数。
  *
- *       投递出口只有一个：Svc_Key_Logic_SendEvent()。它投的是 CubeMX 生成的消息队列
- *       KEY_EVT_Q（Smart_pedometer.ioc 的 Queues01：深度 8、元素 key_event_msg_t、静态分配）。
+ *       投递出口只有一个：Svc_Key_Logic_SendEvent()。它投的是 CubeMX 生成的
+ *       消息队列（.ioc 里配：元素 key_event_msg_t、静态分配，深度以 .ioc 为准）。
  *       想换投递方式，只改这个函数的函数体，本层其余代码不需要知道事件去了哪。
  */
 
@@ -36,8 +36,8 @@
  * 外部声明
  *============================================================================*/
 /**
- * @brief 事件队列句柄：由 CubeMX 按 Smart_pedometer.ioc 的 Queues01 在 Src/freertos.c 里创建
- * @note 深度 8、元素 key_event_msg_t、静态分配；本文件只负责投递，取出由消费者自己做。
+ * @brief 事件队列句柄：由 CubeMX 按 .ioc 的队列配置在 freertos.c 里创建
+ * @note 元素类型 key_event_msg_t、静态分配；本文件只负责投递，取出由消费者自己做。
  */
 extern osMessageQueueId_t KEY_EVT_QHandle;
 
@@ -75,9 +75,9 @@ typedef struct {
 } svc_key_cfg_t;
 
 /**
- * @brief 表里只剩一颗键：灯键 PC13（B1/B10/B11 三路按键已裁掉）
+ * @brief 按键参数表：一行一颗键
  * @note 只在本文件里用，所以是 static：整张表进 .rodata，不占 RAM。
- *       加一个键 = 表里加一行 + Device 层定义它的句柄，本文件其余代码不用动。
+ *       按键数量只由这张表决定，扫描循环不感知个数。
  *       表里只有"物理事实 + 手感参数"，按键做什么由 APP 层的命令表决定。
  */
 static const svc_key_cfg_t s_key_cfg_table[] = {
@@ -135,8 +135,7 @@ static void Svc_Key_Logic_SendEvent(const dev_key_t *key, key_event_t event)
     msg.key   = key;
     msg.event = event;
 
-    // 这里使用了FreeRTOS的队列，投递事件给下游消费者
-    // 如果是裸机可以给本服务增加一个FIFO附属文件，再这里投递事件到FIFO中进行事件管理
+    /* 投递出口：换成裸机 FIFO 或回调只改这一处 */
     if (osMessageQueuePut(KEY_EVT_QHandle, &msg, 0u, 0u) != osOK) {
         s_key_drop_count++;
     }

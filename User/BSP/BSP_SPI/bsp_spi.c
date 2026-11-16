@@ -17,12 +17,11 @@
  *          非递归互斥量，等满 timeout 后 ERR_TIMEOUT、整帧作废；
  *          frame_owner + frame_dev 把这类误用变成 ERR_STATE。
  *
- *       OS 对象归属：SPI1_LOCK / SPI2_LOCK 由 Smart_pedometer.ioc 配置、
- *       freertos.c 生成，本文件只 extern。BSP_SPI_Init() 必须放
- *       USER CODE BEGIN RTOS_MUTEX，那里句柄才建好；HAL 回调是强符号，
- *       靠这次调用把本目标拉进镜像。
- *       移植：F1/F4 的 HAL_SPI_*_DMA 同名同语义；**SPI1 / SPI2 外设中断
- *       必须开**，TXE/RXNE 与 EOT 都靠 SPIx_IRQHandler 推进。
+ *       OS 对象归属：总线互斥量由 .ioc 配置、freertos.c 生成，本文件只 extern。
+ *       BSP_SPI_Init() 必须放 USER CODE BEGIN RTOS_MUTEX，那里句柄才建好；
+ *       HAL 回调是强符号，靠这次调用把本目标拉进镜像。
+ *       外设的 SPI 中断必须开：TXE/RXNE 与 EOT 都靠 SPIx_IRQHandler 推进，
+ *       关掉之后 DMA 完成的最后一拍永远等不到。
  */
 
 /*==============================================================================
@@ -42,9 +41,8 @@
 /*==============================================================================
  * 外部变量声明
  *============================================================================*/
-/** @brief CubeMX 生成的互斥量句柄（Smart_pedometer.ioc 里配的 SPI1/SPI2_LOCK）
- *  @note 一条总线一把锁：屏与触摸共用 SPI1，所以它们互相排队；SD 卡在 SPI2
- *        上，写卡不会把刷新屏挡住。 */
+/** @brief 每条总线一把互斥量，用于总线所有权排队
+ *  @note 由 .ioc 生成、freertos.c 定义；同总线上的设备互相排队，不同总线互不影响。 */
 extern osMutexId_t SPI1_LOCKHandle;
 extern osMutexId_t SPI2_LOCKHandle;
 
@@ -129,7 +127,7 @@ typedef struct {
 /*==============================================================================
  * 内部变量
  *============================================================================*/
-/** @brief SPI1 总线对象：屏与触摸共用，一把锁串行化，仅本文件可见 */
+/** @brief SPI1 总线对象，仅本文件可见 */
 static bsp_spi_t bsp_spi1 = {
     .hal         = &hspi1,
     .lock        = &SPI1_LOCKHandle,
@@ -144,7 +142,7 @@ static bsp_spi_t bsp_spi1 = {
     .presc_init  = 0U,
 };
 
-/** @brief SPI2 总线对象：留给 SPI 模式的 SD 卡，本轮只初始化总线、无设备 */
+/** @brief SPI2 总线对象；本板未挂设备，只登记总线与互斥量 */
 static bsp_spi_t bsp_spi2 = {
     .hal         = &hspi2,
     .lock        = &SPI2_LOCKHandle,
@@ -160,13 +158,9 @@ static bsp_spi_t bsp_spi2 = {
 };
 
 /**
- * @brief 挂在 SPI1 上的 LCD 设备对象
- * @note sck_hz = 10.5 MHz（APB2 84 MHz ÷ 8）。这个上限**不是**随手取的保守值：
- *       ST7789 手册的串行时钟周期最小值约 66 ns，折合上限 15 MHz 上下，
- *       原先把 sck_hz 填成 42 MHz 已经超出器件规格；面包板飞线（十几厘米
- *       杜邦线 + 排针）在 42 MHz 下几乎必然传坏，现象是屏干脆不初始化、
- *       全黑或满屏花点，而且从代码上完全看不出来——只会怀疑 DC/RST 接错。
- *       调通后再往上加（21 MHz / 42 MHz 各试一次），每次只改这一个数。
+ * @brief 显示设备对象：SPI1 + 低有效片选
+ * @note sck_hz 填器件手册给出的 SCK 上限，不是"板子能跑多快"的经验值：
+ *       超速的典型现象是初始化失败、全黑或满屏花点，从代码上完全看不出原因。
  */
 const bsp_spi_dev_t bsp_spi1_dev_lcd = {
     .bus             = &bsp_spi1,
@@ -176,11 +170,11 @@ const bsp_spi_dev_t bsp_spi1_dev_lcd = {
 };
 
 /**
- * @brief 挂在 SPI1 上的触摸设备对象
- * @note HR2046（与 XPT2046 / TSC2046 / ADS7843 命令兼容）的 DCLK 上限是
- *       2 MHz。APB2 84 MHz 下算出的分频是 64，实际 1.31 MHz——留足余量，
- *       因为该芯片对命令与数据之间的间隔也敏感。
- *       与屏共用 SCK/MOSI/MISO，只有片选不同：同一时刻只会有一根 CS 被拉低。
+ * @brief 触摸设备对象：与显示设备共用同一条 SPI
+ * @note 命令与 XPT2046 / TSC2046 / ADS7843 兼容，DCLK 上限 2 MHz；
+ *       sck_hz 按手册上限填，分频由本层算到不超过它。
+ *       同总线多设备的典型接法：SCK/MOSI/MISO 共用、各持一根片选，
+ *       同一时刻只有一根 CS 有效。
  */
 const bsp_spi_dev_t bsp_spi1_dev_touch = {
     .bus             = &bsp_spi1,
@@ -189,8 +183,7 @@ const bsp_spi_dev_t bsp_spi1_dev_touch = {
     .sck_hz          = 2000000U,
 };
 
-/** @brief 驱动管理的总线表；增加 SPI 时只在这里追加实例，
- *         初始化和中断反查都会自动轮询到它 */
+/** @brief 驱动管理的总线表：初始化和中断反查都按它轮询 */
 static bsp_spi_t *const s_buses[] = {
     &bsp_spi1,
     &bsp_spi2,
@@ -586,7 +579,6 @@ static void BSP_SPI_CompleteFromISR(bsp_spi_t *bus, bsp_spi_status_t result)
  *         Master，或数据宽度不是 8 bit
  * @note 必须等 freertos.c 建完 SPI_LOCK 再调用（USER CODE BEGIN RTOS_MUTEX
  *       内），且 MX_SPIx_Init() 已执行过。不能在中断里调用。
- *       新增一路 SPI 只在 s_buses[] 追加实例，本函数不用改。
  */
 bsp_spi_status_t BSP_SPI_Init(void)
 {
