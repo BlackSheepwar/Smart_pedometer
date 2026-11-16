@@ -50,7 +50,7 @@ typedef struct bsp_gpio bsp_gpio_t;
 /*==============================================================================
  * 外部声明：每个用到的引脚一份句柄
  *============================================================================*/
-/* 与 bsp_gpio.c 的实例表一一对应；行尾是引脚在本板的用途。 */
+/* 与 bsp_gpio.c 的实例表一一对应；行尾是这颗引脚接什么。 */
 extern const bsp_gpio_t bsp_gpio_pb2;   /* LED */
 extern const bsp_gpio_t bsp_gpio_pc13;  /* 按键 */
 extern const bsp_gpio_t bsp_gpio_pa8;   /* 显示片选 */

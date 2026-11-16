@@ -13,8 +13,8 @@
  *          只留一级都不行：只有乒乓则上层必须在一个半区时间内消费完，
  *          只有 FIFO 则中断里要逐字节搬运，短帧还得靠轮询发现结尾。
  *       3. IDLE 中断补齐尾巴：短帧（常见 6~16 字节）填不满半区，靠 IDLE
- *          把"半区内已收到的那一段"提前发布，延迟从半个半区（115200 下
- *          约 11 ms）降到 1 个字符时间。
+ *          把"半区内已收到的那一段"提前发布，延迟从半个半区降到
+ *          1 个字符时间。
  *       4. 发送侧是 FIFO + 分段 DMA：环形 buffer 回卷处物理不连续，一次
  *          DMA 只能发一段，发送完成中断接着发下一段。BSP_UART_Write() 只
  *          做 memcpy 入队，从不等待硬件。
@@ -80,9 +80,8 @@ extern const bsp_uart_t bsp_uart2;
  * @retval BSP_UART_ERR_STATE: 缺 HAL 句柄、互斥量尚未创建、UART 不在 READY，
  *         或收发 DMA 通道未配置
  * @retval BSP_UART_ERR_HAL: 接收 DMA 启动失败
- * @note 必须等 freertos.c 建完 UART1_LOCK / UART2_LOCK 再调用
- *       （USER CODE BEGIN RTOS_MUTEX 内），且 MX_USARTx_UART_Init() 已执行过。
- *       不能在中断里调用。
+ * @note 必须在 USER CODE BEGIN RTOS_MUTEX 内调用（CubeMX 刚建完各口互斥量），
+ *       且 MX_USARTx_UART_Init() 已执行过。不能在中断里调用。
  *       若 .ioc 把接收 DMA 配成 Normal，这里会改成 Circular 并重新
  *       HAL_DMA_Init()——乒乓模型依赖硬件循环写，Normal 模式只收一圈就停。
  */

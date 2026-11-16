@@ -40,8 +40,8 @@
  *============================================================================*/
 /** @brief 单次 SPI 传输的最大字节数：len 是 uint16_t，且 DMA 计数器上限 65535 */
 #define DEV_ST7789_CHUNK            4096u
-/** @brief 一帧等总线的预算（ms）：整屏 110 080 B 在 10.5 Mbit/s 下约 85 ms，
- *         再给排队与分块留余量，取 300 ms */
+/** @brief 一帧等总线的预算（ms）：按整屏字节数 ÷ 实际 SCK 估算，
+ *         再给排队与分块留余量 */
 #define DEV_ST7789_FRAME_TIMEOUT_MS 300u
 /** @brief ST7789 内部显存列数，窗口起点 + 宽度不能超过它 */
 #define DEV_ST7789_RAM_WIDTH        240u
@@ -595,8 +595,8 @@ int Dev_ST7789_WritePixels(const dev_st7789_t *lcd, const uint8_t *data,
  *       整帧只发一次 RAMWR，图案靠"继续送数据"重复，写指针不会复位。
  *       这正是不该用"循环调用 WritePixels"代替它的原因：每次 WritePixels
  *       都会重发 RAMWR，写指针被拉回窗口起点，只有最后一块会留下。
- *       图案越短，帧内 DMA 启动次数越多：512 B 图案刷 110 080 B 要启动
- *       215 次，换 4096 B 图案只要 27 次。图案大小是"RAM 换时间"的旋钮。
+ *       图案越短，帧内 DMA 启动次数越多：启动次数 ≈ 总字节数 / 图案字节数，
+ *       图案翻倍则次数减半。图案大小是"RAM 换时间"的旋钮。
  */
 int Dev_ST7789_WritePattern(const dev_st7789_t *lcd, const uint8_t *pattern,
                             uint32_t pat_len, uint32_t total_len)

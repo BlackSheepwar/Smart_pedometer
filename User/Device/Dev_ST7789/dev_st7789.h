@@ -153,7 +153,7 @@ int Dev_ST7789_SetWindow(const dev_st7789_t *lcd, uint16_t x0, uint16_t y0,
  * @note 把缓冲区里的 len 个字节原样写进当前窗口，语义里没有"重复"；
  *       要用小块图案填满大面积，改用 Dev_ST7789_WritePattern()。
  *       调用前必须先用 Dev_ST7789_SetWindow() 指定区域。
- *       内部按 4 KB 分块发送，整屏 240×320 共 153 600 字节，分 38 块。
+ *       内部按 4 KB 分块发送，块数 = 整屏字节数 ÷ 4 KB 向上取整。
  *       整帧独占 SPI1：帧首抢总线并拉 CS，帧尾放 CS 之后才放锁，所以
  *       分块之间不会被其它 SPI 设备插进来，CS 也不会中途抬起。
  */
@@ -175,8 +175,8 @@ int Dev_ST7789_WritePixels(const dev_st7789_t *lcd, const uint8_t *data,
  *       RAMWR，写指针被拉回窗口起点，只有最后一块会留下。
  *       典型用途：整屏刷背景色（pattern 传 256 像素的颜色块，
  *       total_len 传 宽×高×2）、图标或网格平铺。
- *       图案越短，帧内 DMA 启动次数越多：512 B 图案刷 110 080 B 要启动
- *       215 次，换 4096 B 图案只要 27 次。图案越大越快，代价是 RAM。
+ *       图案越短，帧内 DMA 启动次数越多：启动次数 ≈ 总字节数 / 图案字节数，
+ *       图案翻倍则次数减半。图案越大越快，代价是 RAM。
  */
 int Dev_ST7789_WritePattern(const dev_st7789_t *lcd, const uint8_t *pattern,
                             uint32_t pat_len, uint32_t total_len);

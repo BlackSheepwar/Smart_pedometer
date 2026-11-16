@@ -2,7 +2,7 @@
  * @file app_ui_port.c
  * @brief 应用层：LVGL Pro 导出界面的本地适配层实现（240×320 双面板仪表）
  * @author Ricardo
- * @date 2026-11-10（2026-11-16 改 240×320 版式、触摸由点按扩为滑动手势）
+ * @date 2026-11-10
  *
  * @note 本文件是本工程唯一直接引用生成代码符号的地方（screen_hud、
  *       subject_*、lvgl_ui_project_init）。生成代码在 ../UI_Export/，

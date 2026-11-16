@@ -66,10 +66,9 @@ typedef struct {
 /**
  * @brief 初始化：以上电电平作为初始稳定态
  * @note 必须早于 Svc_Key_Logic_Tick() 调用。
- *       由 Src/freertos.c 的 MX_FREERTOS_Init() 在调度器启动前调用：
- *       本函数只读 GPIO 与清零静态量，不碰调度器，启动前调用安全；
+ *       必须在调度器启动前调用：本函数只读 GPIO 与清零静态量，不碰调度器；
  *       放启动前而不是扫描线程里，是为了让"上电初始状态"在第一个线程
- *       运行前就已成立，而不是由 Task_Key_Scan 何时被调度决定。
+ *       运行前就已成立，而不是由扫描线程何时被调度决定。
  */
 void Svc_Key_Logic_Init(void);
 

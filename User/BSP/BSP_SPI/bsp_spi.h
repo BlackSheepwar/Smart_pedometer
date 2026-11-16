@@ -80,8 +80,8 @@ extern const bsp_spi_dev_t bsp_spi1_dev_touch;
  * @retval BSP_SPI_OK: 初始化成功（已初始化的总线会被跳过）
  * @retval BSP_SPI_ERR_STATE: 缺 HAL 句柄或互斥量、外设非 READY、Mode 不是
  *         Master，或数据宽度不是 8 bit
- * @note 必须等 freertos.c 建完 SPI1_LOCK / SPI2_LOCK 再调用（USER CODE
- *       BEGIN RTOS_MUTEX 内），且 MX_SPIx_Init() 已执行过。不能在中断里调用。
+ * @note 必须在 USER CODE BEGIN RTOS_MUTEX 内调用（CubeMX 刚建完总线互斥量），
+ *       且 MX_SPIx_Init() 已执行过。不能在中断里调用。
  */
 bsp_spi_status_t BSP_SPI_Init(void);
 

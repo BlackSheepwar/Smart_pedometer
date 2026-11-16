@@ -20,11 +20,11 @@
  *           同样不在本层（在 APP 的全屏手势层里），本层只负责
  *           把按下点如实喂进去。
  *
- *       缓冲策略：部分缓冲单块 240×40 行（19 200 B）。整屏 240×320×2 =
- *       153 600 B，SRAM 为 128 KB 的型号放不下，LVGL 按行分片渲染并逐片
- *       flush，代价是同一区域可能被刷多次，换来 RAM 占用下降一个数量级。
- *       行数取 40 是折中：再少则整屏被切成更多片、SPI 开窗次数上升；
- *       再多则 .bss 里的缓冲与 LV_MEM_SIZE（32 KB）合计逼近 128 KB。
+ *       缓冲策略：部分缓冲（按行分片渲染、逐片 flush），不用整屏缓冲。
+ *       整屏缓冲的字节数是"宽 × 高 × 每像素字节"，多数 MCU 的 SRAM
+ *       放不下；分片的代价是同一区域可能被刷多次，换来 RAM 占用
+ *       下降一个数量级。片高由 SVC_LVGL_BUF_LINES 决定，与分辨率无关：
+ *       片越小开窗次数越多，片越大占用 SRAM 越多。
  *
  *       单实例：display / indev 指针与 draw buffer 都是模块级 static，只服务
  *       dev_st7789_0 与 dev_tsc2046_0，与两个设备层的单实例约定一致。
@@ -44,11 +44,15 @@
 /*==============================================================================
  * 宏定义与常量
  *============================================================================*/
-/** @brief 面板逻辑宽度（像素），与 dev_st7789_0 的 width 一致 */
+/** @brief 面板逻辑宽度（像素）：必须与 Dev_ST7789 的 width 相同 */
 #define SVC_LVGL_HOR_RES            240u
-/** @brief 面板逻辑高度（像素），与 dev_st7789_0 的 height 一致 */
+/** @brief 面板逻辑高度（像素）：必须与 Dev_ST7789 的 height 相同 */
 #define SVC_LVGL_VER_RES            320u
-/** @brief 部分缓冲的行数：40 行 = 19 200 B，是 RAM 与重绘次数的折中 */
+/**
+ * @brief 部分缓冲的高度（行数）
+ * @note 缓冲字节数 = 宽 × 本值 × 2（RGB565）。只影响刷新粒度，不影响
+ *       分辨率：行数越多开窗次数越少，占用的 SRAM 越多。
+ */
 #define SVC_LVGL_BUF_LINES          40u
 /** @brief 缓冲字节数：RGB565 每像素 2 字节 */
 #define SVC_LVGL_BUF_BYTES          (SVC_LVGL_HOR_RES * SVC_LVGL_BUF_LINES * 2u)
@@ -58,8 +62,8 @@
  *============================================================================*/
 /**
  * @brief LVGL 渲染缓冲（部分模式）
- * @note 4 字节对齐：软件渲染按 uint32_t 访问，未对齐会在 Cortex-M4 上
- *       触发 UNALIGNED 用法故障。缓冲放 .bss 不占 LVGL 堆，也不占任务栈。
+ * @note 4 字节对齐：软件渲染按 uint32_t 访问，未对齐访问会触发 UsageFault。
+ *       缓冲放 .bss 不占 LVGL 堆，也不占任务栈。
  */
 static uint8_t s_draw_buf[SVC_LVGL_BUF_BYTES] __attribute__((aligned(4)));
 
@@ -126,7 +130,7 @@ static void Svc_LVGL_Flush(lv_display_t *disp, const lv_area_t *area,
  * @param indev 由 LVGL 回传的输入设备对象，本函数不使用
  * @param data  输出：按下状态与坐标
  * @retval 无
- * @note 每个渲染周期被调用一次（当前 10 ms），不能在里面做重活：
+ * @note 每个渲染周期被调用一次（周期由调用方决定），不能在里面做重活：
  *       按下判定只读一个 GPIO，取坐标才动一次 SPI。
  *       读失败一律报"未按下"——报按下却带着上一次的旧坐标，会让界面
  *       在手指已经离开之后误触发一次点击。
@@ -174,7 +178,7 @@ static void Svc_LVGL_Touch_Read(lv_indev_t *indev, lv_indev_data_t *data)
  *
  *       尺寸校验不是多余：面板旋转由 Dev_ST7789_SetRotation() 动态改变，
  *       而这里的分辨率与缓冲行宽是编译期常量。一旦有人把方向调到 90°，
- *       不校验就会按 240 宽去开窗、drv 却按 320 宽做越界判断，表现为
+ *       不校验就会按竖屏宽去开窗、驱动却按横屏宽做越界判断，表现为
  *       "整屏只刷出左半边"，从现象很难反推到这一行。
  */
 int Svc_LVGL_Init(svc_lvgl_tick_ms_t tick_ms, svc_lvgl_delay_ms_t delay_ms)
@@ -236,7 +240,7 @@ int Svc_LVGL_Init(svc_lvgl_tick_ms_t tick_ms, svc_lvgl_delay_ms_t delay_ms)
  * @note 必须在创建本端口的那一个线程里周期调用（建议 5~10 ms 一次）：
  *       LVGL 不是线程安全的，所有 LVGL 调用（含界面切换）都必须与
  *       本函数处于同一线程上下文。
- *       lv_timer_handler() 返回"下次该被调用的间隔"，本工程用固定周期
+ *       lv_timer_handler() 返回"下次该被调用的间隔"，调用方用固定周期
  *       轮询，返回值丢弃；需要省电时由 TASK 层拿它改成动态延时。
  */
 void Svc_LVGL_Step(void)

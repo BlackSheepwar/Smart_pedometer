@@ -101,10 +101,9 @@ typedef struct bsp_spi {
  * @brief SPI 设备对象
  * @note 只存总线、片选、极性、速率；不存 SCK/MOSI。const 进 .rodata。
  *
- *       sck_hz 是该器件能接受的 SCK 上限，同一条总线上各设备各写各的：
- *       屏要 21 MHz、触摸芯片只要 2 MHz，就分别填在各自的句柄里，本层在
- *       片选拉低之前切换，调用方完全无感。0 表示回到 CubeMX 里配的预分频，
- *       已有设备可以继续写 0，不必逐个补这个字段。
+ *       sck_hz 是该器件能接受的 SCK 上限，同一条总线上各设备各写各的；
+ *       本层在片选拉低之前换挡，调用方完全无感。0 表示回到 CubeMX 里配的
+ *       预分频，不必给每个设备都补这个字段。
  */
 struct bsp_spi_dev {
     bsp_spi_t        *bus;             /* 所属总线，不能为 NULL */
@@ -142,7 +141,7 @@ static bsp_spi_t bsp_spi1 = {
     .presc_init  = 0U,
 };
 
-/** @brief SPI2 总线对象；本板未挂设备，只登记总线与互斥量 */
+/** @brief SPI2 总线对象；当前未挂设备，只登记总线与互斥量 */
 static bsp_spi_t bsp_spi2 = {
     .hal         = &hspi2,
     .lock        = &SPI2_LOCKHandle,
@@ -171,8 +170,8 @@ const bsp_spi_dev_t bsp_spi1_dev_lcd = {
 
 /**
  * @brief 触摸设备对象：与显示设备共用同一条 SPI
- * @note 命令与 XPT2046 / TSC2046 / ADS7843 兼容，DCLK 上限 2 MHz；
- *       sck_hz 按手册上限填，分频由本层算到不超过它。
+ * @note sck_hz 填该器件手册的 DCLK 上限，分频由本层算到不超过它；
+ *       器件型号与命令格式属于 Device 层，本层不关心。
  *       同总线多设备的典型接法：SCK/MOSI/MISO 共用、各持一根片选，
  *       同一时刻只有一根 CS 有效。
  */
@@ -269,7 +268,7 @@ static uint8_t BSP_SPI_DmaOfDir(uint8_t dir)
  * @brief 取总线 SCK 的时钟源频率
  * @param hspi HAL SPI 句柄
  * @retval 该外设所属 APB 总线的时钟频率（Hz）
- * @note F4 上 SPI1 挂 APB2、SPI2/SPI3 挂 APB1，两条总线的分频可以不同，
+ * @note 本系列 SPI1 挂 APB2、SPI2/SPI3 挂 APB1，两条总线的分频可以不同，
  *       所以不能统一取一个值。换系列必须按参考手册的时钟树重新核对这张表：
  *       算错的后果是实际 SCK 与请求值成倍偏差，现象是"降速后仍然读不通"。
  *       将来接 SPI4/5/6 要一并补进 APB2 分支，否则会被按 APB1 折算。
@@ -340,8 +339,8 @@ static uint32_t BSP_SPI_DivFor(uint32_t pclk_hz, uint32_t sck_hz)
  *       HAL_SPI_Init 只重写 CR1/CR2，不会重跑 MspInit（那只在 State 为
  *       RESET 时发生），所以 GPIO 与 DMA 配置不受影响。
  *       sck_hz 为 0 的设备回落到 presc_init（CubeMX 的配置），而不是"保持
- *       当前值"：否则触摸把总线降到 1.31 MHz 之后，屏会继续用这个低速，
- *       帧率掉一个数量级，而且从现象完全看不出是速率被动过。
+ *       当前值"：否则某个低速设备改过速率之后，没有速率要求的设备会继续
+ *       用这个低速，帧率掉一个数量级，而且从现象看不出是速率被动过。
  */
 static int BSP_SPI_ApplyRate(bsp_spi_t *bus, const bsp_spi_dev_t *dev)
 {
@@ -577,8 +576,8 @@ static void BSP_SPI_CompleteFromISR(bsp_spi_t *bus, bsp_spi_status_t result)
  * @retval BSP_SPI_OK: 初始化成功（已初始化的总线会被跳过）
  * @retval BSP_SPI_ERR_STATE: 缺 HAL 句柄或互斥量、外设非 READY、Mode 不是
  *         Master，或数据宽度不是 8 bit
- * @note 必须等 freertos.c 建完 SPI_LOCK 再调用（USER CODE BEGIN RTOS_MUTEX
- *       内），且 MX_SPIx_Init() 已执行过。不能在中断里调用。
+ * @note 必须在 USER CODE BEGIN RTOS_MUTEX 内调用（CubeMX 刚建完总线互斥量），
+ *       且 MX_SPIx_Init() 已执行过。不能在中断里调用。
  */
 bsp_spi_status_t BSP_SPI_Init(void)
 {

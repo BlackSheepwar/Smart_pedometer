@@ -4,7 +4,7 @@
  * @author Ricardo
  * @date 2026-11-10
  *
- * @note 本文件只有一百多行，看起来"薄"，但它承担的是界面语义的所有权：
+ * @note 本模块看起来"薄"，但它承担的是界面语义的所有权：
  *       谁建屏、当前显示哪块面板、什么时候刷、刷什么值。
  *       把这些散到 Task_LVGL 里会让线程体同时知道 UI 和业务；
  *       散到 app_ui_port 里又会让"适配层"变成"业务层"。
@@ -74,7 +74,7 @@ static volatile uint16_t s_hhmm = APP_SCREEN_UNSET_U16;
 
 /**
  * @brief 日期，打包成 yy×10000 + month×100 + day
- * @note 同 s_hhmm，一次 32 位写入。0xFFFFFFFF 表示未设置。
+ * @note 同 s_hhmm，一次 32 位写入。0x7FFFFFFF 表示未设置（见 UNSET_U32 的说明）。
  */
 static volatile uint32_t s_date = APP_SCREEN_UNSET_U32;
 
@@ -84,7 +84,7 @@ static volatile uint8_t s_batt = APP_SCREEN_UNSET_U8;
 /** @brief 速度 × 10（0.1 km/h），0xFFFF 表示未设置 */
 static volatile uint16_t s_speed_d10 = APP_SCREEN_UNSET_U16;
 
-/** @brief 纬度 × 1e6，0xFFFFFFFF 表示未设置 */
+/** @brief 纬度 × 1e6，0x7FFFFFFF 表示未设置 */
 static volatile int32_t s_lat_e6 = (int32_t)APP_SCREEN_UNSET_U32;
 
 /** @brief 经度 × 1e6，与 s_lat_e6 成对写入 */
@@ -287,8 +287,10 @@ void APP_Screen_Set_Speed(uint16_t speed_d10)
  * @param lat_e6 纬度 × 1e6，北正南负
  * @param lon_e6 经度 × 1e6，东正西负
  * @retval 无
- * @note 先写经度再写纬度：Step() 以纬度为"这一对已经写完"的判据，
- *       反过来的话会有一帧「新纬度 + 旧经度」。
+ * @note 顺序是"纬度先置未设置 → 写经度 → 写纬度"：Step() 只在纬度有效时
+ *       提交这一对，所以写者中途被抢占时读侧会跳过这一拍。
+ *       残留窗口是 Step 读完纬度之后写者才更新经度，此时会推一帧
+ *       「旧纬度 + 新经度」——只影响一帧显示，不会产生非法坐标。
  */
 void APP_Screen_Set_Position(int32_t lat_e6, int32_t lon_e6)
 {

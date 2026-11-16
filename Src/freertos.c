@@ -180,8 +180,7 @@ void MX_FREERTOS_Init(void) {
 
   /* USER CODE BEGIN RTOS_MUTEX */
   /* 要互斥量的 BSP 初始化必须在这里：CubeMX 刚把四把锁建出来，
-   早一段（Init）句柄还是 NULL，会被 BSP_xxx_Init() 判成 ERR_STATE。
-   I2C1 已从 .ioc 移除，对应的 BSP_IIC_Init() 一并删除。 */
+   早一段（Init）句柄还是 NULL，会被 BSP_xxx_Init() 判成 ERR_STATE。 */
   BSP_SPI_Init();
   BSP_UART_Init();
   /* USER CODE END RTOS_MUTEX */

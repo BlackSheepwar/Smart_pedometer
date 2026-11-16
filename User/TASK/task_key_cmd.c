@@ -43,8 +43,8 @@
  * 外部声明
  *============================================================================*/
 /**
- * @brief 事件队列句柄：由 CubeMX 按 Smart_pedometer.ioc 的 Queues01 在 Src/freertos.c 里创建
- * @note 深度 8、元素 key_event_msg_t、静态分配；生产者是按键服务，消费者是本线程。
+ * @brief 事件队列句柄：由 CubeMX 在 freertos.c 里创建
+ * @note 元素 key_event_msg_t、深度 8、静态分配；生产者是按键服务，消费者是本线程。
  */
 extern osMessageQueueId_t KEY_EVT_QHandle;
 

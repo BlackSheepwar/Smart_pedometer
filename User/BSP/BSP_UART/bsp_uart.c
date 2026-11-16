@@ -17,7 +17,7 @@
  *
  *       为什么不是"零拷贝直接读 DMA 缓冲"：DMA 会在半区边界回卷覆写，上层
  *       读的速度一旦慢于到达速度就会读到撕裂数据，且无法察觉。多一次 memcpy
- *       （半区 128 字节，Cortex-M4 @168 MHz 约 2 µs）换来确定性。
+ *       （每次只搬半个半区，微秒级）换来确定性。
  *
  *       为什么发布位置用"绝对位置 + 回卷判断"而不是回调给的 Size 参数：
  *       HAL 的 HT 回调传 Size/2、TC 传 Size、IDLE 传 Size - NDTR，三者含义
@@ -74,12 +74,12 @@ extern osMutexId_t UART2_LOCKHandle;
 /** @brief Flush 的默认超时（ms），调用者传 0 时使用 */
 #define BSP_UART_FLUSH_TIMEOUT_MS   100U
 
-/** @brief USART1 接收 DMA 乒乓缓冲：整块被 DMA 循环写，两个半区各 128 字节
- *  @note 115200 下一个半区约 11 ms；数值必须是 2 的倍数，且不小于 16。 */
+/** @brief USART1 接收 DMA 乒乓缓冲：整块被 DMA 循环写，两个半区各半
+ *  @note 半区时间 = 半区字节数 × 10 / 波特率；数值必须是 2 的倍数、不小于 16。 */
 #define BSP_UART1_RX_DMA_SIZE       256U
 
 /** @brief USART1 接收 FIFO 容量：必须是 2 的幂，可用字节数为容量减一
- *  @note 512 字节可吸收 115200 下约 44 ms 的突发。 */
+ *  @note 可吸收的突发时长 = 可用字节数 × 10 / 波特率。 */
 #define BSP_UART1_RX_FIFO_SIZE      512U
 
 /** @brief USART1 发送 FIFO 容量：必须是 2 的幂，可用字节数为容量减一 */
@@ -426,9 +426,8 @@ static uint16_t BSP_UART_Copy_Out(bsp_uart_rt_t *rt, uint8_t *buf,
  * @retval BSP_UART_ERR_STATE: 缺 HAL 句柄、互斥量尚未创建、UART 不在 READY，
  *         或收发 DMA 通道未配置
  * @retval BSP_UART_ERR_HAL: 接收 DMA 启动失败
- * @note 必须等 freertos.c 建完 UART1_LOCK / UART2_LOCK 再调用
- *       （USER CODE BEGIN RTOS_MUTEX 内），且 MX_USARTx_UART_Init() 已执行过。
- *       不能在中断里调用。
+ * @note 必须在 USER CODE BEGIN RTOS_MUTEX 内调用（CubeMX 刚建完各口互斥量），
+ *       且 MX_USARTx_UART_Init() 已执行过。不能在中断里调用。
  *       若 .ioc 把接收 DMA 配成 Normal，这里会改成 Circular 并重新
  *       HAL_DMA_Init()——乒乓模型依赖硬件循环写，Normal 模式只收一圈就停。
  */
@@ -642,7 +641,7 @@ uint16_t BSP_UART_Write(const bsp_uart_t *uart, const uint8_t *buf, uint16_t len
     }
 
     /* ---------- 1. 抢发送锁：生产者之间排队，防止 head 被并发改写 ---------- */
-    if (osMutexAcquire(*uart->lock, BSP_UART_LOCK_TIMEOUT_MS) != osOK) {
+    if (osMutexAcquire(*uart->lock, pdMS_TO_TICKS(BSP_UART_LOCK_TIMEOUT_MS)) != osOK) {
         return 0U;
     }
 
