@@ -52,10 +52,8 @@ const bsp_gpio_t bsp_gpio_pa4  = { .port = GPIOA, .pin = GPIO_PIN_4, .dir = BSP_
 // 触摸笔中断 PENIRQ（输入，不驱动）
 const bsp_gpio_t bsp_gpio_pc4  = { .port = GPIOC, .pin = GPIO_PIN_4, .dir = BSP_GPIO_DIR_IN };
 // LCD 控制脚：数据/命令选择（DC）、硬复位（RST）
-const bsp_gpio_t bsp_gpio_pb0  = { .port = GPIOB, .pin = GPIO_PIN_0,  .dir = BSP_GPIO_DIR_OUT };
+const bsp_gpio_t bsp_gpio_pb11 = { .port = GPIOB, .pin = GPIO_PIN_11, .dir = BSP_GPIO_DIR_OUT };
 const bsp_gpio_t bsp_gpio_pb12 = { .port = GPIOB, .pin = GPIO_PIN_12, .dir = BSP_GPIO_DIR_OUT };
-// SPI 模式 SD 卡片选（PB9）
-const bsp_gpio_t bsp_gpio_pb9  = { .port = GPIOB, .pin = GPIO_PIN_9,  .dir = BSP_GPIO_DIR_OUT };
 
 /*==============================================================================
  * 接口实现

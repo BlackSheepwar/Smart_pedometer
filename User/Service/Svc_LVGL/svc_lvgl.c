@@ -16,11 +16,15 @@
  *           不经过 LVGL；触摸走标准 LVGL indev——read_cb 每帧被
  *           lv_timer_handler() 调一次，采到点就填进 data，LVGL 自己负责
  *           点击/长按的时序判定。所以"点一下切面板"不需要本层写任何
- *           消抖或计时逻辑，也不需要额外的中断。
+ *           消抖或计时逻辑，也不需要额外的中断；"左右滑翻页"的位移判定
+ *           同样不在本层（在 APP_UI_Port 的全屏手势层里），本层只负责
+ *           把按下点如实喂进去。
  *
- *       缓冲策略：部分缓冲单块 172×40 行（13 760 B）。整屏 172×320×2 =
- *       110 080 B，128 KB RAM 放不下，LVGL 按行分片渲染并逐片 flush，
+ *       缓冲策略：部分缓冲单块 240×40 行（19 200 B）。整屏 240×320×2 =
+ *       153 600 B，128 KB RAM 放不下，LVGL 按行分片渲染并逐片 flush，
  *       代价是同一区域可能被刷多次，换来 RAM 占用下降一个数量级。
+ *       行数取 40 是折中：再少则整屏被切成更多片、SPI 开窗次数上升；
+ *       再多则 .bss 里的缓冲与 LV_MEM_SIZE（32 KB）合计逼近 128 KB。
  *
  *       单实例：display / indev 指针与 draw buffer 都是模块级 static，只服务
  *       dev_st7789_0 与 dev_tsc2046_0，与两个设备层的单实例约定一致。
@@ -41,10 +45,10 @@
  * 宏定义与常量
  *============================================================================*/
 /** @brief 面板逻辑宽度（像素），与 dev_st7789_0 的 width 一致 */
-#define SVC_LVGL_HOR_RES            172u
+#define SVC_LVGL_HOR_RES            240u
 /** @brief 面板逻辑高度（像素），与 dev_st7789_0 的 height 一致 */
 #define SVC_LVGL_VER_RES            320u
-/** @brief 部分缓冲的行数：40 行 = 13 760 B，是 RAM 与重绘次数的折中 */
+/** @brief 部分缓冲的行数：40 行 = 19 200 B，是 RAM 与重绘次数的折中 */
 #define SVC_LVGL_BUF_LINES          40u
 /** @brief 缓冲字节数：RGB565 每像素 2 字节 */
 #define SVC_LVGL_BUF_BYTES          (SVC_LVGL_HOR_RES * SVC_LVGL_BUF_LINES * 2u)
@@ -170,7 +174,7 @@ static void Svc_LVGL_Touch_Read(lv_indev_t *indev, lv_indev_data_t *data)
  *
  *       尺寸校验不是多余：面板旋转由 Dev_ST7789_SetRotation() 动态改变，
  *       而这里的分辨率与缓冲行宽是编译期常量。一旦有人把方向调到 90°，
- *       不校验就会按 172 宽去开窗、drv 却按 320 宽做越界判断，表现为
+ *       不校验就会按 240 宽去开窗、drv 却按 320 宽做越界判断，表现为
  *       "整屏只刷出左半边"，从现象很难反推到这一行。
  */
 int Svc_LVGL_Init(svc_lvgl_tick_ms_t tick_ms, svc_lvgl_delay_ms_t delay_ms)

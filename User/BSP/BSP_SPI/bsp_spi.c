@@ -161,14 +161,18 @@ static bsp_spi_t bsp_spi2 = {
 
 /**
  * @brief 挂在 SPI1 上的 LCD 设备对象
- * @note sck_hz 填 0：屏的速率由 CubeMX 里的预分频决定（APB2 84 MHz ÷ 4 =
- *       21 MHz），每次 Select 都把总线恢复到这一档。
+ * @note sck_hz = 10.5 MHz（APB2 84 MHz ÷ 8）。这个上限**不是**随手取的保守值：
+ *       ST7789 手册的串行时钟周期最小值约 66 ns，折合上限 15 MHz 上下，
+ *       原先把 sck_hz 填成 42 MHz 已经超出器件规格；面包板飞线（十几厘米
+ *       杜邦线 + 排针）在 42 MHz 下几乎必然传坏，现象是屏干脆不初始化、
+ *       全黑或满屏花点，而且从代码上完全看不出来——只会怀疑 DC/RST 接错。
+ *       调通后再往上加（21 MHz / 42 MHz 各试一次），每次只改这一个数。
  */
 const bsp_spi_dev_t bsp_spi1_dev_lcd = {
     .bus             = &bsp_spi1,
     .cs              = &bsp_gpio_pa8,
     .cs_active_level = 0U,
-    .sck_hz          = 42000000U,
+    .sck_hz          = 21000000U,
 };
 
 /**

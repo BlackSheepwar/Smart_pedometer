@@ -61,7 +61,7 @@
 /* #define HAL_RTC_MODULE_ENABLED */
 /* #define HAL_SAI_MODULE_ENABLED */
 /* #define HAL_SD_MODULE_ENABLED */
-#define HAL_MMC_MODULE_ENABLED
+/* #define HAL_MMC_MODULE_ENABLED */
 #define HAL_SPI_MODULE_ENABLED
 #define HAL_TIM_MODULE_ENABLED
 #define HAL_UART_MODULE_ENABLED
@@ -466,10 +466,6 @@
 #ifdef HAL_LPTIM_MODULE_ENABLED
  #include "stm32f4xx_hal_lptim.h"
 #endif /* HAL_LPTIM_MODULE_ENABLED */
-
-#ifdef HAL_MMC_MODULE_ENABLED
- #include "stm32f4xx_hal_mmc.h"
-#endif /* HAL_MMC_MODULE_ENABLED */
 
 /* Exported macro ------------------------------------------------------------*/
 #ifdef  USE_FULL_ASSERT

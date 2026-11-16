@@ -21,7 +21,6 @@
 #include "cmsis_os.h"
 #include "crc.h"
 #include "dma.h"
-#include "sdio.h"
 #include "spi.h"
 #include "usart.h"
 #include "usb_otg.h"
@@ -98,7 +97,6 @@ int main(void)
   MX_CRC_Init();
   MX_SPI1_Init();
   MX_SPI2_Init();
-  MX_SDIO_MMC_Init();
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
   MX_USB_OTG_FS_PCD_Init();

@@ -60,11 +60,9 @@ extern const bsp_gpio_t bsp_gpio_pa8;
 extern const bsp_gpio_t bsp_gpio_pa4;
 // 触摸笔中断 PENIRQ：低电平表示有按下，上拉由模组上的 10K 提供
 extern const bsp_gpio_t bsp_gpio_pc4;
-// LCD 控制脚：数据/命令选择、硬复位
-extern const bsp_gpio_t bsp_gpio_pb0;
+// LCD 控制脚：数据/命令选择（DC，PB11）、硬复位（RST，PB12）
+extern const bsp_gpio_t bsp_gpio_pb11;
 extern const bsp_gpio_t bsp_gpio_pb12;
-// SPI 模式 SD 卡片选（PB9）：本轮只占位，驱动落地时使用
-extern const bsp_gpio_t bsp_gpio_pb9;
 
 /*==============================================================================
  * 函数声明

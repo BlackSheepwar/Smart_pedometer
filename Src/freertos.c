@@ -66,23 +66,38 @@ const osThreadAttr_t defaultTask_attributes = {
 };
 /* Definitions for KEY_T */
 osThreadId_t KEY_THandle;
+uint32_t KEY_TBuffer[ 128 ];
+osStaticThreadDef_t KEY_TControlBlock;
 const osThreadAttr_t KEY_T_attributes = {
   .name = "KEY_T",
-  .stack_size = 128 * 4,
+  .cb_mem = &KEY_TControlBlock,
+  .cb_size = sizeof(KEY_TControlBlock),
+  .stack_mem = &KEY_TBuffer[0],
+  .stack_size = sizeof(KEY_TBuffer),
   .priority = (osPriority_t) osPriorityRealtime,
 };
 /* Definitions for KEY_CMD_T */
 osThreadId_t KEY_CMD_THandle;
+uint32_t KEY_CMD_TBuffer[ 256 ];
+osStaticThreadDef_t KEY_CMD_TControlBlock;
 const osThreadAttr_t KEY_CMD_T_attributes = {
   .name = "KEY_CMD_T",
-  .stack_size = 256 * 4,
+  .cb_mem = &KEY_CMD_TControlBlock,
+  .cb_size = sizeof(KEY_CMD_TControlBlock),
+  .stack_mem = &KEY_CMD_TBuffer[0],
+  .stack_size = sizeof(KEY_CMD_TBuffer),
   .priority = (osPriority_t) osPriorityHigh,
 };
 /* Definitions for LVGL_T */
 osThreadId_t LVGL_THandle;
+uint32_t LVGL_TBuffer[ 2048 ];
+osStaticThreadDef_t LVGL_TControlBlock;
 const osThreadAttr_t LVGL_T_attributes = {
   .name = "LVGL_T",
-  .stack_size = 2048 * 4,
+  .cb_mem = &LVGL_TControlBlock,
+  .cb_size = sizeof(LVGL_TControlBlock),
+  .stack_mem = &LVGL_TBuffer[0],
+  .stack_size = sizeof(LVGL_TBuffer),
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
 /* Definitions for KEY_EVT_Q */

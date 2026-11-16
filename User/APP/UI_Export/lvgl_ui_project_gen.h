@@ -82,6 +82,12 @@ bool lvgl_ui_project_check_target(uint32_t target);
 #define COLOR_ICE_HI (lv_color_hex(0x14B8CC))
 #define COLOR_ICE_WARN (lv_color_hex(0xD9611F))
 #define COLOR_ICE_FRAME (lv_color_hex(0xA8C2D0))
+#define COLOR_METER_BG (lv_color_hex(0xF6F3EC))
+#define COLOR_METER_INK (lv_color_hex(0x181614))
+#define COLOR_METER_MUTED (lv_color_hex(0x6E6659))
+#define COLOR_METER_HAIR (lv_color_hex(0xD9D2C3))
+#define COLOR_METER_TRACK (lv_color_hex(0xE7E1D3))
+#define COLOR_METER_SIG (lv_color_hex(0xBE3A16))
 
 
 #ifndef LV_XML_EVAL_STRING_BUF_SIZE
@@ -135,6 +141,17 @@ extern lv_style_t style_ice_block_on;
 extern lv_style_t style_ice_block_hi;
 extern lv_style_t style_ice_warn_text;
 extern lv_style_t style_ice_pane;
+extern lv_style_t style_meter_screen;
+extern lv_style_t style_meter_rule;
+extern lv_style_t style_meter_pane;
+extern lv_style_t style_meter_pane_next;
+extern lv_style_t style_meter_tab_idle;
+extern lv_style_t style_meter_tab_on;
+extern lv_style_t style_meter_underline;
+extern lv_style_t style_meter_seg_off;
+extern lv_style_t style_meter_seg_on;
+extern lv_style_t style_meter_seg_low;
+extern lv_style_t style_meter_warn;
 
 /*----------------
  * Fonts
@@ -148,6 +165,11 @@ extern lv_font_t * font_num_36;
 extern lv_font_t * font_num_44;
 extern lv_font_t * font_num_28;
 extern lv_font_t * font_cjk_16;
+extern lv_font_t * font_num_68;
+extern lv_font_t * font_num_30;
+extern lv_font_t * font_num_20;
+extern lv_font_t * font_cjk_22;
+extern lv_font_t * font_cjk_18;
 
 
 /*----------------

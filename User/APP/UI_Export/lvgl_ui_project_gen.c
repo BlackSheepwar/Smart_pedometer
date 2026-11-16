@@ -41,7 +41,7 @@ static uint32_t lvgl_ui_project_target = LVGL_UI_PROJECT_COMPILE_TARGET;
  * 保留它就必须在 lv_conf.h 打开 LV_USE_TRANSLATION，代价是多编译一个
  * 模块、多一份 pack 的 RAM/FLASH 开销。本工程无多语言需求，整段删除。
  *
- * 同时删掉的还有 lvgl_ui_project_init_gen() 末尾的
+ * 同时删掉的还有 lvgl_ui_project_init_gen() 里
  * lv_translation_add_static() / lv_translation_set_language() 两行调用。 */
 
 /**********************
@@ -72,6 +72,16 @@ lv_font_t * font_num_28;
 extern lv_font_t font_num_28_data;
 lv_font_t * font_cjk_16;
 extern lv_font_t font_cjk_16_data;
+lv_font_t * font_num_68;
+extern lv_font_t font_num_68_data;
+lv_font_t * font_num_30;
+extern lv_font_t font_num_30_data;
+lv_font_t * font_num_20;
+extern lv_font_t font_num_20_data;
+lv_font_t * font_cjk_22;
+extern lv_font_t font_cjk_22_data;
+lv_font_t * font_cjk_18;
+extern lv_font_t font_cjk_18_data;
 
 /*----------------
  * Images
@@ -97,6 +107,17 @@ lv_style_t style_ice_block_on;
 lv_style_t style_ice_block_hi;
 lv_style_t style_ice_warn_text;
 lv_style_t style_ice_pane;
+lv_style_t style_meter_screen;
+lv_style_t style_meter_rule;
+lv_style_t style_meter_pane;
+lv_style_t style_meter_pane_next;
+lv_style_t style_meter_tab_idle;
+lv_style_t style_meter_tab_on;
+lv_style_t style_meter_underline;
+lv_style_t style_meter_seg_off;
+lv_style_t style_meter_seg_on;
+lv_style_t style_meter_seg_low;
+lv_style_t style_meter_warn;
 
 /*----------------
  * Subjects
@@ -180,6 +201,36 @@ void lvgl_ui_project_init_gen(const char * asset_path)
             font_cjk_16 = &font_cjk_16_data;
 
         }
+        if (!font_num_68) {
+            /* font_num_68 */
+            /* get font 'font_num_68' from a C array */
+            font_num_68 = &font_num_68_data;
+
+        }
+        if (!font_num_30) {
+            /* font_num_30 */
+            /* get font 'font_num_30' from a C array */
+            font_num_30 = &font_num_30_data;
+
+        }
+        if (!font_num_20) {
+            /* font_num_20 */
+            /* get font 'font_num_20' from a C array */
+            font_num_20 = &font_num_20_data;
+
+        }
+        if (!font_cjk_22) {
+            /* font_cjk_22 */
+            /* get font 'font_cjk_22' from a C array */
+            font_cjk_22 = &font_cjk_22_data;
+
+        }
+        if (!font_cjk_18) {
+            /* font_cjk_18 */
+            /* get font 'font_cjk_18' from a C array */
+            font_cjk_18 = &font_cjk_18_data;
+
+        }
     }
     #endif
 
@@ -196,6 +247,10 @@ void lvgl_ui_project_init_gen(const char * asset_path)
     static bool style_inited = false;
 
     if (!style_inited) {
+        static const lv_style_prop_t style_meter_pane_trans_props[] = {LV_STYLE_TRANSLATE_X, 0};
+        static lv_style_transition_dsc_t style_meter_pane_trans_dsc;
+
+
         /*Init all styles*/
         lv_style_init(&style_screen);
         lv_style_init(&style_screen_paper);
@@ -211,6 +266,17 @@ void lvgl_ui_project_init_gen(const char * asset_path)
         lv_style_init(&style_ice_block_hi);
         lv_style_init(&style_ice_warn_text);
         lv_style_init(&style_ice_pane);
+        lv_style_init(&style_meter_screen);
+        lv_style_init(&style_meter_rule);
+        lv_style_init(&style_meter_pane);
+        lv_style_init(&style_meter_pane_next);
+        lv_style_init(&style_meter_tab_idle);
+        lv_style_init(&style_meter_tab_on);
+        lv_style_init(&style_meter_underline);
+        lv_style_init(&style_meter_seg_off);
+        lv_style_init(&style_meter_seg_on);
+        lv_style_init(&style_meter_seg_low);
+        lv_style_init(&style_meter_warn);
 
         lv_style_set_bg_color(&style_screen, COLOR_BG);
         lv_style_set_bg_opa(&style_screen, (255 * 100 / 100));
@@ -263,6 +329,42 @@ void lvgl_ui_project_init_gen(const char * asset_path)
         lv_style_set_border_width(&style_ice_pane, 0);
         lv_style_set_radius(&style_ice_pane, 0);
         lv_style_set_pad_all(&style_ice_pane, 0);
+        lv_style_set_bg_color(&style_meter_screen, COLOR_METER_BG);
+        lv_style_set_bg_opa(&style_meter_screen, (255 * 100 / 100));
+        lv_style_set_text_color(&style_meter_screen, COLOR_METER_INK);
+        lv_style_set_text_font(&style_meter_screen, font_16);
+        lv_style_set_pad_all(&style_meter_screen, 0);
+        lv_style_set_border_width(&style_meter_screen, 0);
+        lv_style_set_radius(&style_meter_screen, 0);
+        lv_style_set_bg_color(&style_meter_rule, COLOR_METER_HAIR);
+        lv_style_set_bg_opa(&style_meter_rule, (255 * 100 / 100));
+        lv_style_set_radius(&style_meter_rule, 0);
+        lv_style_set_border_width(&style_meter_rule, 0);
+        lv_style_set_bg_opa(&style_meter_pane, 0);
+        lv_style_set_border_width(&style_meter_pane, 0);
+        lv_style_set_radius(&style_meter_pane, 0);
+        lv_style_set_pad_all(&style_meter_pane, 0);
+        lv_style_set_translate_x(&style_meter_pane, 0);
+        lv_style_transition_dsc_init(&style_meter_pane_trans_dsc, style_meter_pane_trans_props, lv_anim_path_ease_out, 320, 0, NULL);
+        lv_style_set_transition(&style_meter_pane, &style_meter_pane_trans_dsc);
+        lv_style_set_translate_x(&style_meter_pane_next, -240);
+        lv_style_set_text_color(&style_meter_tab_idle, COLOR_METER_MUTED);
+        lv_style_set_text_color(&style_meter_tab_on, COLOR_METER_INK);
+        lv_style_set_bg_color(&style_meter_underline, COLOR_METER_SIG);
+        lv_style_set_bg_opa(&style_meter_underline, (255 * 100 / 100));
+        lv_style_set_radius(&style_meter_underline, 0);
+        lv_style_set_border_width(&style_meter_underline, 0);
+        lv_style_set_bg_color(&style_meter_seg_off, COLOR_METER_TRACK);
+        lv_style_set_bg_opa(&style_meter_seg_off, (255 * 100 / 100));
+        lv_style_set_radius(&style_meter_seg_off, 2);
+        lv_style_set_border_width(&style_meter_seg_off, 0);
+        lv_style_set_bg_color(&style_meter_seg_on, COLOR_METER_INK);
+        lv_style_set_bg_opa(&style_meter_seg_on, (255 * 100 / 100));
+        lv_style_set_radius(&style_meter_seg_on, 2);
+        lv_style_set_border_width(&style_meter_seg_on, 0);
+        lv_style_set_bg_color(&style_meter_seg_low, COLOR_METER_SIG);
+        lv_style_set_bg_opa(&style_meter_seg_low, (255 * 100 / 100));
+        lv_style_set_text_color(&style_meter_warn, COLOR_METER_SIG);
 
         style_inited = true;
     }
@@ -344,8 +446,7 @@ void lvgl_ui_project_init_gen(const char * asset_path)
      * Translations
      *----------------*/
 
-    #ifndef LV_EDITOR_PREVIEW
-    #endif
+    /* 本地改动：两行 lv_translation_* 调用已删除，理由见文件上方的说明。 */
 
 #if defined(LV_USE_XML) && LV_USE_XML
     /* Register widgets */
@@ -359,6 +460,11 @@ void lvgl_ui_project_init_gen(const char * asset_path)
     check_font(&font_num_44, "font_num_44");
     check_font(&font_num_28, "font_num_28");
     check_font(&font_cjk_16, "font_cjk_16");
+    check_font(&font_num_68, "font_num_68");
+    check_font(&font_num_30, "font_num_30");
+    check_font(&font_num_20, "font_num_20");
+    check_font(&font_cjk_22, "font_cjk_22");
+    check_font(&font_cjk_18, "font_cjk_18");
 
     /* Register fonts */
     lv_xml_register_font(NULL, "font_12", font_12);
@@ -368,6 +474,11 @@ void lvgl_ui_project_init_gen(const char * asset_path)
     lv_xml_register_font(NULL, "font_num_44", font_num_44);
     lv_xml_register_font(NULL, "font_num_28", font_num_28);
     lv_xml_register_font(NULL, "font_cjk_16", font_cjk_16);
+    lv_xml_register_font(NULL, "font_num_68", font_num_68);
+    lv_xml_register_font(NULL, "font_num_30", font_num_30);
+    lv_xml_register_font(NULL, "font_num_20", font_num_20);
+    lv_xml_register_font(NULL, "font_cjk_22", font_cjk_22);
+    lv_xml_register_font(NULL, "font_cjk_18", font_cjk_18);
 
     /* Register subjects */
     lv_xml_register_subject(NULL, "subject_steps", subject_steps);

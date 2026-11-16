@@ -48,27 +48,33 @@
 #   为什么不用 CONFIGURE_DEPENDS 的 GLOB：
 #     这些文件是导出产物的固定集合，重新导出时文件名不变；
 #     显式列出来反而能在一份文件被删时立刻报错，而不是悄悄少编一个。
-#     （中文字模那一项是唯一的例外，见下面的 if(EXISTS)：它要等界面
-#      导出过一版带中文标签的 XML 之后才会出现。）
+#
+#   字模为什么全部列出来（含界面已不引用的 num_28/num_36/cjk_16）：
+#     lvgl_ui_project_gen.c 会为"项目里定义过的每一套字体"生成 extern 声明
+#     与 font_xxx = &font_xxx_data 赋值，缺一个 .c 就是一条 undefined
+#     reference。要清掉它们得改 gen.c（重新导出会回来），因此宁可让
+#     几十 KB 的 .rodata 留在 FLASH 里——1 MB 装得下，也不影响 RAM。
 # -----------------------------------------------------------------------------
 set(UI_EXPORT_SOURCES
     UI_Export/lvgl_ui_project.c
     UI_Export/lvgl_ui_project_gen.c
     UI_Export/screens/screen_hud_gen.c
+    # 数字字模：12/14/16 通用，20 日期·刻度·颗数，28/36/44 旧档，30 经纬度，
+    # 68 速度主读数（2.4 寸 167 PPI 下的最小可读字号）
     UI_Export/fonts/font_12_data.c
     UI_Export/fonts/font_14_data.c
     UI_Export/fonts/font_16_data.c
+    UI_Export/fonts/font_num_20_data.c
     UI_Export/fonts/font_num_28_data.c
+    UI_Export/fonts/font_num_30_data.c
     UI_Export/fonts/font_num_36_data.c
     UI_Export/fonts/font_num_44_data.c
+    UI_Export/fonts/font_num_68_data.c
+    # 汉字字模：16/18/22 各有独立字库，只含界面用到的那几十个字
+    UI_Export/fonts/font_cjk_16_data.c
+    UI_Export/fonts/font_cjk_18_data.c
+    UI_Export/fonts/font_cjk_22_data.c
 )
-# 中文字模（font_cjk_16）是"界面中文标签"那次导出的产物。用存在性判断
-# 而不是直接列出来，是为了让两种导出状态都能直接编：
-#   旧导出 → gen.c 不引用 font_cjk_16，文件不存在，跳过；
-#   新导出 → 文件必然在，自动纳入（改完记得重跑一次 cmake 配置）。
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/UI_Export/fonts/font_cjk_16_data.c)
-    list(APPEND UI_EXPORT_SOURCES UI_Export/fonts/font_cjk_16_data.c)
-endif()
 
 add_library(ui_export STATIC ${UI_EXPORT_SOURCES})
 # PUBLIC 是给 app_ui_port 用的：它要 include lvgl_ui_project.h。

@@ -56,18 +56,36 @@
 
 #if LV_USE_STDLIB_MALLOC == LV_STDLIB_BUILTIN
 /** Size of the pool `lv_malloc()` allocates from. Needs to be at least 2kB (2048). */
-/* 本工程改动：24576 -> 32768。界面从单屏（14 个对象）扩到三屏
- * （21 个对象 + 7 个 subject + 11 个 observer），三屏常驻不销毁。
- * 按对象尺寸估算新增占用约 1.5~2 KB，24 KB 本来仍有余量，但余量无法在
- * 编译期验证：一旦耗尽，LVGL 会直接断言（LV_ASSERT_MALLOC），表现为
- * 上电黑屏或某块屏建不出来，属于"最难查"的那类故障。
- * 本工程 RAM 只用了六成，多给 8 KB 换确定性是划算的。 */
-#define LV_MEM_SIZE 32768
+/* 本工程改动（两次）：
+ *   1) 24576 -> 32768：三屏版界面时加的（对象数与 observer 数都涨了）。
+ *   2) 现在改成 60 KB，并把池子从 .bss 挪到 CCM RAM（见下面的 LV_MEM_ADR）。
+ *
+ * ★为什么必须再加大★
+ *   METER 版界面（240×320、48 个对象、40 个 observer、16 个 subject）
+ *   实测：建屏就要 33 KB，第一次渲染的 draw task 再加 3 KB，峰值 36 KB。
+ *   而 32 KB 的池实际可用 27 328 B，建完控件只剩 40 B ——
+ *   lv_draw_add_task() 里的 lv_malloc 返回 NULL，下一行 new_task->area
+ *   直接解引用，在 Cortex-M4 上就是 HardFault：屏不亮，而且所有任务
+ *   （包括按键扫描）一起停，表现为"整机卡死"。这条链从代码上完全看不出
+ *   是堆不够，所以把余量给足。
+ *
+ * ★为什么放 CCM 而不是继续吃 SRAM★
+ *   SRAM 只有 128 KB，改版后已用 89.9 KB；池子加到 48 KB 就只剩 24 KB
+ *   给主栈，太紧。CCM（64 KB，0x10000000）在本工程一直空着，而 LVGL 堆里
+ *   只有对象/样式/draw task，**没有任何 DMA 缓冲**（刷屏缓冲 s_draw_buf
+ *   留在 SRAM，DMA 必须能访问它），所以放 CCM 是安全的，还顺带快一点
+ *   （CCM 无等待周期）。
+ *
+ * ★注意★
+ *   用了 LV_MEM_ADR 之后，链接脚本的 CCMRAM 区域不能再被别的 .ccmram 段
+ *   占用。本工程目前没有这样的段；将来要加时，记得给 LVGL 留够 60 KB。
+ */
+#define LV_MEM_SIZE (60 * 1024)
 
 /** Place the pool at a fixed address instead of allocating it as a normal array.
  *  0: unused.
  */
-#define LV_MEM_ADR 0x0
+#define LV_MEM_ADR 0x10000000
 
 #endif /*LV_USE_STDLIB_MALLOC == LV_STDLIB_BUILTIN*/
 

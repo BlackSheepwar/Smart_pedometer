@@ -8,7 +8,7 @@
  *         - Svc_LVGL      管"怎么把 LVGL 画到 ST7789 上、怎么读触摸"；
  *         - APP_Screen    管"界面什么时候建、当前显示哪块面板、每拍刷什么值"；
  *         - 本文件        只回答"多久跑一次、按什么顺序跑"。
- *       业务判断（PC13 与触摸都只触发"翻面板"）在 APP_Key_Cmd / APP_Screen，
+ *       业务判断（PC13 与触摸手势都只触发"换面板"）在 APP_Key_Cmd / APP_Screen，
  *       界面形态在 UI_Export（LVGL Pro 导出），
  *       数据同步与换面板落地在 APP_Screen；本线程只做
  *       "按节拍驱动"这一件事。

@@ -75,7 +75,7 @@ typedef struct {
 } svc_key_cfg_t;
 
 /**
- * @brief 板上四个按键：切屏 B1(PB1)、加 B10(PB10)、减 B11(PB11)、灯键 PC13
+ * @brief 表里只剩一颗键：灯键 PC13（B1/B10/B11 三路按键已裁掉）
  * @note 只在本文件里用，所以是 static：整张表进 .rodata，不占 RAM。
  *       加一个键 = 表里加一行 + Device 层定义它的句柄，本文件其余代码不用动。
  *       表里只有"物理事实 + 手感参数"，按键做什么由 APP 层的命令表决定。
