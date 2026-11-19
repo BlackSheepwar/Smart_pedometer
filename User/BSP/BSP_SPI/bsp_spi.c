@@ -168,25 +168,14 @@ const bsp_spi_dev_t bsp_spi1_dev_lcd = {
     .sck_hz          = 21000000U,
 };
 
-/**
- * @brief 触摸设备对象：与显示设备共用同一条 SPI
- * @note sck_hz 填该器件手册的 DCLK 上限，分频由本层算到不超过它；
- *       器件型号与命令格式属于 Device 层，本层不关心。
- *       同总线多设备的典型接法：SCK/MOSI/MISO 共用、各持一根片选，
- *       同一时刻只有一根 CS 有效。
- */
-const bsp_spi_dev_t bsp_spi1_dev_touch = {
-    .bus             = &bsp_spi1,
-    .cs              = &bsp_gpio_pa4,
-    .cs_active_level = 0U,
-    .sck_hz          = 2000000U,
-};
-
 /** @brief 驱动管理的总线表：初始化和中断反查都按它轮询 */
 static bsp_spi_t *const s_buses[] = {
     &bsp_spi1,
     &bsp_spi2,
 };
+
+/** @brief 总线表长度：由表的行数算出 */
+static const size_t s_bus_count = sizeof(s_buses) / sizeof(s_buses[0]);
 
 /*==============================================================================
  * 内部函数
@@ -205,7 +194,7 @@ static bsp_spi_t *BSP_SPI_FindBus(SPI_HandleTypeDef *hspi)
         return NULL;
     }
 
-    for (i = 0U; i < sizeof(s_buses) / sizeof(s_buses[0]); i++) {
+    for (i = 0U; i < s_bus_count; i++) {
         if (s_buses[i]->hal == (void *)hspi) {
             return s_buses[i];
         }
@@ -584,7 +573,7 @@ bsp_spi_status_t BSP_SPI_Init(void)
     size_t i;
 
     /* ---------- 1. 逐路登记：句柄、互斥量、外设状态 ---------- */
-    for (i = 0U; i < sizeof(s_buses) / sizeof(s_buses[0]); i++) {
+    for (i = 0U; i < s_bus_count; i++) {
         bsp_spi_t        *bus = s_buses[i];
         SPI_HandleTypeDef *hspi;
 
@@ -834,7 +823,7 @@ bsp_spi_status_t BSP_SPI_Dev_Transfer(const bsp_spi_dev_t *dev,
  *
  * HAL 只为 Transmit_DMA 调 TxCplt、只为 Receive_DMA 调 RxCplt、只为
  * TransmitReceive_DMA 调 TxRxCplt，三个完成点不能互相替代。
- * 这里覆盖的是 HAL 的 __weak 完成回调，不是 SPI2_IRQHandler 本身；
+ * 这里覆盖的是 HAL 的 __weak 完成回调，不是 SPI 中断入口本身；
  * IRQ 向量仍由 Src/stm32f4xx_it.c 的 HAL_SPI_IRQHandler() 分发。
  *============================================================================*/
 /**

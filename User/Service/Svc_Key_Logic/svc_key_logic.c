@@ -99,6 +99,9 @@ static const svc_key_cfg_t s_key_cfg_table[] = {
  */
 static key_state_t s_key_state[SVC_KEY_CFG_COUNT];
 
+/** @brief 表里的键数，供循环比较 */
+static const uint8_t s_key_count = (uint8_t)SVC_KEY_CFG_COUNT;
+
 /**
  * @brief 队列满导致丢弃的次数
  * @note 只用于排查：队列长期满说明消费线程卡住了。
@@ -258,7 +261,7 @@ void Svc_Key_Logic_Init(void)
 {
     uint8_t index;
 
-    for (index = 0u; index < (uint8_t)SVC_KEY_CFG_COUNT; ++index) {
+    for (index = 0u; index < s_key_count; ++index) {
         key_state_t *state   = &s_key_state[index];
         uint8_t      reading = Dev_Key_Read(s_key_cfg_table[index].key);
 
@@ -283,7 +286,7 @@ void Svc_Key_Logic_Tick(uint16_t elapsed_ms)
         elapsed_ms = 1u;
     }
 
-    for (index = 0u; index < (uint8_t)SVC_KEY_CFG_COUNT; ++index) {
+    for (index = 0u; index < s_key_count; ++index) {
         Svc_Key_Logic_Step(&s_key_state[index], &s_key_cfg_table[index], elapsed_ms);
     }
 }

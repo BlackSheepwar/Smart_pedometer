@@ -22,7 +22,7 @@
 /**
  * @brief 按键设备句柄（一台按键一份，可多个并存）
  */
-struct dev_key{
+struct dev_key {
     const bsp_gpio_t *gpio;             /* 引脚句柄（BSP 层资源） */
     uint8_t           polarity;         /* 0: 低电平表示按下，1: 高电平表示按下 */
 };

@@ -189,6 +189,9 @@ static const bsp_uart_t *const s_handles[] = {
 /** @brief 运行时状态表，下标与 s_handles[] 严格一一对应 */
 static bsp_uart_rt_t s_rt[BSP_UART_COUNT];
 
+/** @brief 表里的 UART 路数，供循环比较 */
+static const uint32_t s_uart_count = (uint32_t)BSP_UART_COUNT;
+
 /*==============================================================================
  * 内部函数
  *============================================================================*/
@@ -205,7 +208,7 @@ static bsp_uart_rt_t *BSP_UART_Find(const bsp_uart_t *uart)
     if (uart == NULL) {
         return NULL;
     }
-    for (i = 0U; i < BSP_UART_COUNT; i++) {
+    for (i = 0U; i < s_uart_count; i++) {
         if (s_handles[i] == uart) {
             return &s_rt[i];
         }
@@ -223,7 +226,7 @@ static bsp_uart_rt_t *BSP_UART_Find_By_Hal(const void *hal)
 {
     uint32_t i;
 
-    for (i = 0U; i < BSP_UART_COUNT; i++) {
+    for (i = 0U; i < s_uart_count; i++) {
         if ((s_rt[i].cfg != NULL) && (s_rt[i].cfg->hal == hal)) {
             return &s_rt[i];
         }
@@ -435,7 +438,7 @@ bsp_uart_status_t BSP_UART_Init(void)
 {
     uint32_t i;
 
-    for (i = 0U; i < BSP_UART_COUNT; i++) {
+    for (i = 0U; i < s_uart_count; i++) {
         const bsp_uart_t *cfg = s_handles[i];
         bsp_uart_rt_t *rt = &s_rt[i];
         UART_HandleTypeDef *hal;
@@ -717,8 +720,8 @@ bsp_uart_status_t BSP_UART_Flush(const bsp_uart_t *uart, uint32_t timeout_ms)
  *
  * 接收用 HAL_UARTEx_ReceiveToIdle_DMA() 启动，HAL 把 HT / TC / IDLE 三种事件
  * 统一送到 HAL_UARTEx_RxEventCallback()，事件类型放在 huart->RxEventType。
- * 这里覆盖的是 HAL 的 __weak 回调，不是 USART1/2_IRQHandler 或 DMA 流中断
- * 本身；中断向量仍由 Src/stm32f4xx_it.c 分发。
+ * 这里覆盖的是 HAL 的 __weak 回调，不是 USARTx_IRQHandler / DMAx_StreamY_IRQHandler
+ * 本身；中断向量仍由工程的中断文件分发。
  *============================================================================*/
 /**
  * @brief 接收事件回调：把 HT / TC / IDLE 换算成同一个"写指针位置"再发布

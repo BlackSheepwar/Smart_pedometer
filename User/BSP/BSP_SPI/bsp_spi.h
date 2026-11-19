@@ -70,7 +70,6 @@ typedef struct bsp_spi_dev bsp_spi_dev_t;
  *       调用方不需要关心上一条总线上一次跑的是哪台。
  */
 extern const bsp_spi_dev_t bsp_spi1_dev_lcd;
-extern const bsp_spi_dev_t bsp_spi1_dev_touch;
 
 /*==============================================================================
  * 函数声明

@@ -22,7 +22,7 @@
 /**
  * @brief LED 设备句柄（一个 LED 一份，可多个并存）
  */
-struct dev_led{
+struct dev_led {
     const bsp_gpio_t *gpio;           /* 引脚句柄（BSP 层资源） */
     uint8_t           polarity;       /* 点亮电平：0=低电平点亮，1=高电平点亮 */
 };

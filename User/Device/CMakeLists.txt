@@ -53,20 +53,3 @@ target_link_libraries(dev_st7789
     PRIVATE bsp_gpio
 )
 target_compile_options(dev_st7789 PRIVATE ${USER_WARN_FLAGS})
-
-# -----------------------------------------------------------------------------
-# dev_tsc2046：四线电阻触摸控制器（HR2046 / TSC2046 / XPT2046 兼容）
-#   与 dev_st7789 共用 SPI1，只有片选不同；头文件同样不暴露 bsp_spi_t /
-#   bsp_gpio_t，所以两个 BSP 依赖都写 PRIVATE。
-# -----------------------------------------------------------------------------
-add_library(dev_tsc2046 STATIC
-    Dev_TSC2046/dev_tsc2046.c
-)
-target_include_directories(dev_tsc2046
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/Dev_TSC2046
-)
-target_link_libraries(dev_tsc2046
-    PRIVATE bsp_spi
-    PRIVATE bsp_gpio
-)
-target_compile_options(dev_tsc2046 PRIVATE ${USER_WARN_FLAGS})
