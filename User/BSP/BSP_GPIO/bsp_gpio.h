@@ -54,8 +54,6 @@ typedef struct bsp_gpio bsp_gpio_t;
 extern const bsp_gpio_t bsp_gpio_pb2;   /* LED */
 extern const bsp_gpio_t bsp_gpio_pc13;  /* 按键 */
 extern const bsp_gpio_t bsp_gpio_pa8;   /* 显示片选 */
-extern const bsp_gpio_t bsp_gpio_pa4;   /* 触摸片选 */
-extern const bsp_gpio_t bsp_gpio_pc4;   /* 触摸中断 */
 extern const bsp_gpio_t bsp_gpio_pb11;  /* 显示 DC */
 extern const bsp_gpio_t bsp_gpio_pb12;  /* 显示 RST */
 

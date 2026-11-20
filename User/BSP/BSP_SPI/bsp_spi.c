@@ -44,7 +44,6 @@
 /** @brief 每条总线一把互斥量，用于总线所有权排队
  *  @note 由 .ioc 生成、freertos.c 定义；同总线上的设备互相排队，不同总线互不影响。 */
 extern osMutexId_t SPI1_LOCKHandle;
-extern osMutexId_t SPI2_LOCKHandle;
 
 /*==============================================================================
  * 宏定义与常量
@@ -141,21 +140,6 @@ static bsp_spi_t bsp_spi1 = {
     .presc_init  = 0U,
 };
 
-/** @brief SPI2 总线对象；当前未挂设备，只登记总线与互斥量 */
-static bsp_spi_t bsp_spi2 = {
-    .hal         = &hspi2,
-    .lock        = &SPI2_LOCKHandle,
-    .waiter      = NULL,
-    .frame_owner = NULL,
-    .frame_dev   = NULL,
-    .result      = 0,
-    .initialized = 0U,
-    .caps        = 0U,
-    .dma_mask    = 0U,
-    .presc_code  = 0U,
-    .presc_init  = 0U,
-};
-
 /**
  * @brief 显示设备对象：SPI1 + 低有效片选
  * @note sck_hz 填器件手册给出的 SCK 上限，不是"板子能跑多快"的经验值：
@@ -171,7 +155,6 @@ const bsp_spi_dev_t bsp_spi1_dev_lcd = {
 /** @brief 驱动管理的总线表：初始化和中断反查都按它轮询 */
 static bsp_spi_t *const s_buses[] = {
     &bsp_spi1,
-    &bsp_spi2,
 };
 
 /** @brief 总线表长度：由表的行数算出 */

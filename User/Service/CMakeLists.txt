@@ -49,14 +49,14 @@ target_link_libraries(svc_key_cmd
 target_compile_options(svc_key_cmd PRIVATE ${USER_WARN_FLAGS})
 
 # -----------------------------------------------------------------------------
-# svc_lvgl：把 LVGL 的显示与触摸绑定到 ST7789 + TSC2046 上
+# svc_lvgl：把 LVGL 的显示绑定到 ST7789 上
 #   第三方库的适配器放在 Service（跨设备组合），不放 Device：
-#   Device 层只保留"窗怎么开、像素怎么写""触摸在哪里"，不含任何 GUI 概念。
-#   本模块是 LVGL 在本工程里的唯一适配点：lv_init / tick / display / flush /
-#   indev。毫秒时基由 TASK 层以函数指针注入，故本层不读时钟、不引 HAL / OS 头。
+#   Device 层只保留"窗怎么开、像素怎么写"，不含任何 GUI 概念。
+#   本模块是 LVGL 在本工程里的唯一适配点：lv_init / tick / display / flush。
+#   毫秒时基由 TASK 层以函数指针注入，故本层不读时钟、不引 HAL / OS 头。
 #
-#   头文件不暴露 lv_ 类型，也不暴露 dev_st7789_t / dev_tsc2046_t，所以两个
-#   设备模块与 lvgl 都写 PRIVATE：别人的类型不会顺着头文件传给 APP / TASK。
+#   头文件不暴露 lv_ 类型，也不暴露 dev_st7789_t，所以设备模块与 lvgl 都写
+#   PRIVATE：别人的类型不会顺着头文件传给 APP / TASK。
 # -----------------------------------------------------------------------------
 add_library(svc_lvgl STATIC
     Svc_LVGL/svc_lvgl.c
@@ -66,7 +66,6 @@ target_include_directories(svc_lvgl
 )
 target_link_libraries(svc_lvgl
     PRIVATE dev_st7789
-    PRIVATE dev_tsc2046
     PRIVATE lvgl
     PRIVATE stm32cubemx
 )

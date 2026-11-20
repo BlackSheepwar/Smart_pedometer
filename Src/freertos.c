@@ -66,38 +66,23 @@ const osThreadAttr_t defaultTask_attributes = {
 };
 /* Definitions for KEY_T */
 osThreadId_t KEY_THandle;
-uint32_t KEY_TBuffer[ 128 ];
-osStaticThreadDef_t KEY_TControlBlock;
 const osThreadAttr_t KEY_T_attributes = {
   .name = "KEY_T",
-  .cb_mem = &KEY_TControlBlock,
-  .cb_size = sizeof(KEY_TControlBlock),
-  .stack_mem = &KEY_TBuffer[0],
-  .stack_size = sizeof(KEY_TBuffer),
+  .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityRealtime,
 };
 /* Definitions for KEY_CMD_T */
 osThreadId_t KEY_CMD_THandle;
-uint32_t KEY_CMD_TBuffer[ 256 ];
-osStaticThreadDef_t KEY_CMD_TControlBlock;
 const osThreadAttr_t KEY_CMD_T_attributes = {
   .name = "KEY_CMD_T",
-  .cb_mem = &KEY_CMD_TControlBlock,
-  .cb_size = sizeof(KEY_CMD_TControlBlock),
-  .stack_mem = &KEY_CMD_TBuffer[0],
-  .stack_size = sizeof(KEY_CMD_TBuffer),
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityHigh,
 };
 /* Definitions for LVGL_T */
 osThreadId_t LVGL_THandle;
-uint32_t LVGL_TBuffer[ 2048 ];
-osStaticThreadDef_t LVGL_TControlBlock;
 const osThreadAttr_t LVGL_T_attributes = {
   .name = "LVGL_T",
-  .cb_mem = &LVGL_TControlBlock,
-  .cb_size = sizeof(LVGL_TControlBlock),
-  .stack_mem = &LVGL_TBuffer[0],
-  .stack_size = sizeof(LVGL_TBuffer),
+  .stack_size = 2048 * 4,
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
 /* Definitions for KEY_EVT_Q */
@@ -119,14 +104,6 @@ const osMutexAttr_t SPI1_LOCK_attributes = {
   .cb_mem = &SPI1_LOCKControlBlock,
   .cb_size = sizeof(SPI1_LOCKControlBlock),
 };
-/* Definitions for SPI2_LOCK */
-osMutexId_t SPI2_LOCKHandle;
-osStaticMutexDef_t SPI2_LOCKControlBlock;
-const osMutexAttr_t SPI2_LOCK_attributes = {
-  .name = "SPI2_LOCK",
-  .cb_mem = &SPI2_LOCKControlBlock,
-  .cb_size = sizeof(SPI2_LOCKControlBlock),
-};
 /* Definitions for UART1_LOCK */
 osMutexId_t UART1_LOCKHandle;
 osStaticMutexDef_t UART1_LOCKControlBlock;
@@ -134,14 +111,6 @@ const osMutexAttr_t UART1_LOCK_attributes = {
   .name = "UART1_LOCK",
   .cb_mem = &UART1_LOCKControlBlock,
   .cb_size = sizeof(UART1_LOCKControlBlock),
-};
-/* Definitions for UART2_LOCK */
-osMutexId_t UART2_LOCKHandle;
-osStaticMutexDef_t UART2_LOCKControlBlock;
-const osMutexAttr_t UART2_LOCK_attributes = {
-  .name = "UART2_LOCK",
-  .cb_mem = &UART2_LOCKControlBlock,
-  .cb_size = sizeof(UART2_LOCKControlBlock),
 };
 
 /* Private function prototypes -----------------------------------------------*/
@@ -169,14 +138,8 @@ void MX_FREERTOS_Init(void) {
   /* creation of SPI1_LOCK */
   SPI1_LOCKHandle = osMutexNew(&SPI1_LOCK_attributes);
 
-  /* creation of SPI2_LOCK */
-  SPI2_LOCKHandle = osMutexNew(&SPI2_LOCK_attributes);
-
   /* creation of UART1_LOCK */
   UART1_LOCKHandle = osMutexNew(&UART1_LOCK_attributes);
-
-  /* creation of UART2_LOCK */
-  UART2_LOCKHandle = osMutexNew(&UART2_LOCK_attributes);
 
   /* USER CODE BEGIN RTOS_MUTEX */
   /* 要互斥量的 BSP 初始化必须在这里：CubeMX 刚把四把锁建出来，

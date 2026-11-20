@@ -41,8 +41,6 @@ struct bsp_gpio {
 const bsp_gpio_t bsp_gpio_pb2  = { .port = GPIOB, .pin = GPIO_PIN_2,  .dir = BSP_GPIO_DIR_OUT }; /* LED */
 const bsp_gpio_t bsp_gpio_pc13 = { .port = GPIOC, .pin = GPIO_PIN_13, .dir = BSP_GPIO_DIR_IN };  /* 按键 */
 const bsp_gpio_t bsp_gpio_pa8  = { .port = GPIOA, .pin = GPIO_PIN_8,  .dir = BSP_GPIO_DIR_OUT }; /* 显示片选 */
-const bsp_gpio_t bsp_gpio_pa4  = { .port = GPIOA, .pin = GPIO_PIN_4,  .dir = BSP_GPIO_DIR_OUT }; /* 触摸片选 */
-const bsp_gpio_t bsp_gpio_pc4  = { .port = GPIOC, .pin = GPIO_PIN_4,  .dir = BSP_GPIO_DIR_IN };  /* 触摸中断 */
 const bsp_gpio_t bsp_gpio_pb11 = { .port = GPIOB, .pin = GPIO_PIN_11, .dir = BSP_GPIO_DIR_OUT }; /* 显示 DC */
 const bsp_gpio_t bsp_gpio_pb12 = { .port = GPIOB, .pin = GPIO_PIN_12, .dir = BSP_GPIO_DIR_OUT }; /* 显示 RST */
 

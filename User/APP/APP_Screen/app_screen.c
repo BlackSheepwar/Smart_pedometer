@@ -13,13 +13,13 @@
  *         s_*         写入者 = 各数据源线程（每项单写者）
  *         s_*         读取者 = Task_LVGL（APP_Screen_Step）
  *         s_shown_*   只被 Task_LVGL 读写，记录"上次真正推给界面的值"
- *         s_pending_mode  按键线程与 LVGL 手势回调都写请求（全部走 __atomic_*），
+ *         s_pending_mode  初始化与按键线程写请求（全部走 __atomic_*），
  *                     显示线程在 Step 里落地到 s_active_mode 并推给界面
  *       所有量都是 8/16/32 位对齐整数，Cortex-M4 上单条 STR/LDR 不可分割，
  *       所以不加锁也不会有"半个值"。volatile 只是防止编译器把数据源写入的
  *       变量提到寄存器里缓存，导致显示线程永远读不到新值。
- *       唯一的例外是 s_pending_mode：它有两个写者，异或与写入都必须原子，
- *       否则"几乎同时的点按 + 滑动"会丢掉一次请求。
+ *       唯一的例外是 s_pending_mode：写入点分散在初始化与按键线程，
+ *       异或与写入都必须原子，免得"某处普通写、某处原子写"两种语义混用。
  */
 
 /*==============================================================================
@@ -94,10 +94,10 @@ static volatile int32_t s_lon_e6 = (int32_t)APP_SCREEN_UNSET_U32;
 static volatile uint8_t s_sat = APP_SCREEN_UNSET_U8;
 
 /**
- * @brief 待显示的模式（按键线程与 LVGL 手势回调都会写）
+ * @brief 待显示的模式（初始化与按键线程都会写）
  * @note 初值 = 速度面板。volatile 理由见文件头。
- *       两个写者，翻转走 __atomic_fetch_xor、选页走 __atomic_store_n，
- *       不能再写成读-改-写或普通赋值。
+ *       写入点分散在初始化、Toggle 与 Select_Mode，翻转走 __atomic_fetch_xor、
+ *       选页走 __atomic_store_n，不能再写成读-改-写或普通赋值。
  */
 static volatile uint8_t s_pending_mode = APP_SCREEN_MODE_SPEED;
 
@@ -131,42 +131,6 @@ static uint8_t s_shown_sat = APP_SCREEN_UNSET_U8;
 /*==============================================================================
  * 内部函数
  *============================================================================*/
-/**
- * @brief 触摸手势 → 换页动作
- * @param gesture 手势种类，见 app_ui_gesture_t
- * @retval 无
- * @note 这一小段就是"手势 ↔ 页面"的全部映射，放在 APP 层而不是适配层：
- *       适配层只知道"往哪边划了"，它不该知道一共有几页、下一页是谁。
- *
- *       方向按手指移动命名，所以语义与直觉相反地要念一遍：
- *         手指向左划（SWIPE_LEFT）＝ 把当前页推走、露出右边那一页 → 下一页
- *         手指向右划（SWIPE_RIGHT）＝ 把左边那一页拉回来           → 上一页
- *       只有两块面板时"下一页"就是经纬度、"上一页"就是速度，所以这里
- *       直接写成 Select_Mode(常量)；将来面板变多，改的只有这两个分支。
- *
- *       到头不回绕：在最后一页继续往左划不做任何事（状态没变，subject
- *       不会通知 observer，界面连动画都不播）。回绕会让人以为按错了。
- *
- *       跑在 LVGL 线程（手势回调里），所以只写标志、不碰 LVGL——
- *       与按键线程走的是同一条路径，真正的换页在下一个 Step 里落地。
- */
-static void APP_Screen_On_Gesture(app_ui_gesture_t gesture)
-{
-    switch (gesture) {
-    case APP_UI_GESTURE_SWIPE_LEFT:
-        APP_Screen_Select_Mode(APP_SCREEN_MODE_POS);
-        break;
-
-    case APP_UI_GESTURE_SWIPE_RIGHT:
-        APP_Screen_Select_Mode(APP_SCREEN_MODE_SPEED);
-        break;
-
-    case APP_UI_GESTURE_TAP:
-        APP_Screen_Toggle_Mode();
-        break;
-    }
-}
-
 /*==============================================================================
  * 接口实现
  *============================================================================*/
@@ -179,7 +143,7 @@ static void APP_Screen_On_Gesture(app_ui_gesture_t gesture)
  */
 void APP_Screen_Init(void)
 {
-    /* 与 Select_Mode 同一种写法：这个变量有多个写者，初始化也走原子存储，
+    /* 这个变量有三个写入点（初始化、Toggle、Select_Mode），都走原子存储，
        免得"某处普通写、某处原子写"两种语义混在同一个变量上。 */
     (void)__atomic_store_n(&s_pending_mode, (uint8_t)APP_SCREEN_MODE_SPEED,
                            __ATOMIC_RELAXED);
@@ -187,21 +151,14 @@ void APP_Screen_Init(void)
 
     App_UI_Init();
     App_UI_Set_Mode(APP_SCREEN_MODE_SPEED);
-
-    /* 触摸入口在界面建好之后才能注册：它落在那层全屏透明手势层上。
-       注册的是"手势"而不是"点击"：点按、左滑、右滑都从这一个入口进来，
-       由 APP_Screen_On_Gesture() 决定各自换到哪一页。 */
-    App_UI_Set_Gesture_Cb(APP_Screen_On_Gesture);
 }
 
 /**
  * @brief 请求在"速度 / 经纬度"之间切换
  * @retval 无
- * @note 两个触发源：按键线程（PC13）与显示线程里的"点按"手势回调。
- *       多写者之后"读-改-写"不再天然安全：两次几乎同时的触发可能只翻一次，
- *       表现为"点了一下没反应"。所以翻转用 __atomic_fetch_xor：
- *       取值只有 0/1，异或 1 就是翻转，Cortex-M4 上是 LDREXB/STREXB 循环，
- *       无锁、不关中断，APP 层也不因此需要引入 FreeRTOS.h。
+ * @note 触发源是按键线程（PC13）。变量另有初始化的写入点，所以翻转用
+ *       __atomic_fetch_xor：取值只有 0/1，异或 1 就是翻转，Cortex-M4 上是
+ *       LDREXB/STREXB 循环，无锁、不关中断，APP 层也不因此需要引入 FreeRTOS.h。
  */
 void APP_Screen_Toggle_Mode(void)
 {
@@ -212,8 +169,8 @@ void APP_Screen_Toggle_Mode(void)
  * @brief 直接选定某块模式面板
  * @param mode APP_SCREEN_MODE_SPEED / APP_SCREEN_MODE_POS
  * @retval 无
- * @note 任意线程可调：按键线程（若有"直达"键）与显示线程里的左右滑手势
- *       都会走这里。写入用 __atomic_store_n——与 Toggle 的异或同属一个
+ * @note 任意线程可调：命令表的 handler 若有"直达"某一页的按键就会走这里。
+ *       写入用 __atomic_store_n——与 Toggle 的异或、Init 的存储同属一个
  *       原子变量，混用普通赋值会让"读到半新半旧"这件事重新有可能。
  *       在 Cortex-M4 上对齐的单字节存储本来就是一条 STR，relaxed 版本
  *       编译出来与普通赋值同价，所以这不是为安全付性能。
@@ -221,7 +178,7 @@ void APP_Screen_Toggle_Mode(void)
  *       只认这两个值：传别的进来直接丢掉，而不是"非 0 就当经纬度"——
  *       那样一个笔误就会把界面锁在经纬度面板上，还查不出原因。
  *       与 Toggle 的区别只在语义：Toggle 是"不管当前是哪块，翻到另一块"，
- *       本函数是"就选这块"，所以划到头再划不会跳回去。
+ *       本函数是"就选这块"。
  */
 void APP_Screen_Select_Mode(uint8_t mode)
 {

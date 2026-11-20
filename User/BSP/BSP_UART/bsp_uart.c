@@ -63,7 +63,6 @@
 /** @brief 每口一把互斥量，用于发送队列的生产者排队
  *  @note 由 .ioc 生成、freertos.c 定义；一个口的发送排队不会挡住另一个口。 */
 extern osMutexId_t UART1_LOCKHandle;
-extern osMutexId_t UART2_LOCKHandle;
 
 /*==============================================================================
  * 宏定义与常量
@@ -147,15 +146,6 @@ static uint8_t s_uart1_rx_fifo[BSP_UART1_RX_FIFO_SIZE];
 /** @brief USART1 发送环形 FIFO，容量 512，可用 511 字节 */
 static uint8_t s_uart1_tx_fifo[BSP_UART1_TX_FIFO_SIZE];
 
-/** @brief USART2 接收 DMA 乒乓缓冲 */
-static uint8_t s_uart2_rx_dma[BSP_UART2_RX_DMA_SIZE] __attribute__((aligned(4)));
-
-/** @brief USART2 接收环形 FIFO */
-static uint8_t s_uart2_rx_fifo[BSP_UART2_RX_FIFO_SIZE];
-
-/** @brief USART2 发送环形 FIFO */
-static uint8_t s_uart2_tx_fifo[BSP_UART2_TX_FIFO_SIZE];
-
 /** @brief USART1 配置句柄；hal / lock 都指向 CubeMX 生成的句柄 */
 const bsp_uart_t bsp_uart1 = {
     .hal          = &huart1,
@@ -168,22 +158,9 @@ const bsp_uart_t bsp_uart1 = {
     .tx_fifo_size = BSP_UART1_TX_FIFO_SIZE,
 };
 
-/** @brief USART2 配置句柄；与 USART1 各持一把锁，两口互不排队 */
-const bsp_uart_t bsp_uart2 = {
-    .hal          = &huart2,
-    .lock         = &UART2_LOCKHandle,
-    .rx_dma       = s_uart2_rx_dma,
-    .rx_fifo      = s_uart2_rx_fifo,
-    .tx_fifo      = s_uart2_tx_fifo,
-    .rx_dma_size  = BSP_UART2_RX_DMA_SIZE,
-    .rx_fifo_size = BSP_UART2_RX_FIFO_SIZE,
-    .tx_fifo_size = BSP_UART2_TX_FIFO_SIZE,
-};
-
 /** @brief 驱动管理的句柄表：Init 与中断反查都按它轮询 */
 static const bsp_uart_t *const s_handles[] = {
     &bsp_uart1,
-    &bsp_uart2,
 };
 
 /** @brief 运行时状态表，下标与 s_handles[] 严格一一对应 */

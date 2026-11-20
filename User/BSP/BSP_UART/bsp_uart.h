@@ -66,11 +66,6 @@ typedef struct bsp_uart bsp_uart_t;
  */
 extern const bsp_uart_t bsp_uart1;
 
-/**
- * @brief USART2：收发均走 DMA，帧格式与波特率由 CubeMX 决定
- */
-extern const bsp_uart_t bsp_uart2;
-
 /*==============================================================================
  * 函数声明
  *============================================================================*/

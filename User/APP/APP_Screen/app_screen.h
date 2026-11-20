@@ -53,7 +53,7 @@
  *============================================================================*/
 /**
  * @brief 模式面板：速度
- * @note 本层对外只暴露"哪一块面板"这个语义，左右滑与点按都靠它落地。
+ * @note 本层对外只暴露"哪一块面板"这个语义，按键换页靠它落地。
  *       适配层还有一份 APP_UI_MODE_*，数值必须一致——app_screen.c 里有
  *       静态断言锁住，改一处忘了另一处会直接编译失败。
  */
@@ -80,13 +80,10 @@ void APP_Screen_Init(void);
 /**
  * @brief 请求在"速度 / 经纬度"之间切换
  * @retval 无
- * @note 两个触发源都走这里：Task_Key_Cmd（PC13）与 LVGL 线程里的"点按"手势
- *       回调。左右滑动**不**走这里，走 Select_Mode——滑动是有方向的，
- *       在最后一页继续往左划不该跳回第一页（见 app_screen.c 的 On_Gesture）。
- *       翻转用 __atomic 异或实现，所以"两条线程几乎同时各触发一次"也只会
- *       翻两次，不会丢一次（早期单写者写法会丢）。
- *       不碰 LVGL、不碰 SPI、不阻塞，可以在命令表的 handler 与 LVGL 事件
- *       回调里直接调。真正的换面板发生在下一个 APP_Screen_Step()。
+ * @note 触发源是 Task_Key_Cmd（PC13）。翻转用 __atomic 异或实现：这个变量
+ *       另有初始化的写入点，原子操作避免"某处普通写、某处原子写"的语义冲突。
+ *       不碰 LVGL、不碰 SPI、不阻塞，可以在命令表的 handler 里直接调。
+ *       真正的换面板发生在下一个 APP_Screen_Step()。
  */
 void APP_Screen_Toggle_Mode(void);
 
@@ -94,10 +91,10 @@ void APP_Screen_Toggle_Mode(void);
  * @brief 直接选定某块模式面板（不再翻转）
  * @param mode APP_SCREEN_MODE_SPEED 或 APP_SCREEN_MODE_POS，其它值忽略
  * @retval 无
- * @note 任意线程可调：按键线程与 LVGL 手势回调（左右滑）都会走这里，
+ * @note 任意线程可调：命令表的 handler 若有"直达"某页的按键就走这里，
  *       写入是 __atomic_store_n，与 Toggle 的异或共享同一个原子变量。
  *       与 Toggle 的区别只在语义：Toggle 是"不管当前是哪块，翻到另一块"，
- *       本函数是"就选这块"，所以重复按同一颗键、或划到头继续划都不会来回跳。
+ *       本函数是"就选这块"，所以重复按同一颗键不会来回跳。
  */
 void APP_Screen_Select_Mode(uint8_t mode);
 

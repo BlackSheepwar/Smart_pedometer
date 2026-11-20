@@ -4,8 +4,8 @@
 #   Third_Party 第 0 层  第三方只读区  LVGL 源码
 #   BSP     第 1 层  硬件驱动层    GPIO 句柄与读写、SPI 总线/设备、UART
 #                                （引脚与时钟由 CubeMX 负责）
-#   Device  第 2 层  设备抽象层    按键、单灯、ST7789 屏、TSC2046 触摸（不含 GUI 概念）
-#   Service 第 3 层  服务层        消抖/长按/连发、命令表分发、LVGL 显示与输入绑定
+#   Device  第 2 层  设备抽象层    按键、单灯、ST7789 屏（不含 GUI 概念）
+#   Service 第 3 层  服务层        消抖/长按/连发、命令表分发、LVGL 显示绑定
 #   APP     第 4 层  应用层        界面生命周期、模式面板与数据同步
 #   TASK    任务层   线程体        一个任务一个 .c，覆盖 CubeMX 的 __weak 入口
 #
