@@ -26,6 +26,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "svc_key_logic.h"
+#include "bsp_iic.h"
 #include "bsp_spi.h"
 #include "bsp_uart.h"
 /* USER CODE END Includes */
@@ -96,6 +97,14 @@ const osMessageQueueAttr_t KEY_EVT_Q_attributes = {
   .mq_mem = &KEY_EVT_QBuffer,
   .mq_size = sizeof(KEY_EVT_QBuffer)
 };
+/* Definitions for IIC_LOCK */
+osMutexId_t IIC_LOCKHandle;
+osStaticMutexDef_t IIC_LOCKControlBlock;
+const osMutexAttr_t IIC_LOCK_attributes = {
+  .name = "IIC_LOCK",
+  .cb_mem = &IIC_LOCKControlBlock,
+  .cb_size = sizeof(IIC_LOCKControlBlock),
+};
 /* Definitions for SPI1_LOCK */
 osMutexId_t SPI1_LOCKHandle;
 osStaticMutexDef_t SPI1_LOCKControlBlock;
@@ -135,6 +144,9 @@ void MX_FREERTOS_Init(void) {
   Svc_Key_Logic_Init();   /* 以当前键电平作为"已确认"初态，避免上电误报 DOWN */
   /* USER CODE END Init */
   /* Create the mutex(es) */
+  /* creation of IIC_LOCK */
+  IIC_LOCKHandle = osMutexNew(&IIC_LOCK_attributes);
+
   /* creation of SPI1_LOCK */
   SPI1_LOCKHandle = osMutexNew(&SPI1_LOCK_attributes);
 
@@ -142,8 +154,9 @@ void MX_FREERTOS_Init(void) {
   UART1_LOCKHandle = osMutexNew(&UART1_LOCK_attributes);
 
   /* USER CODE BEGIN RTOS_MUTEX */
-  /* 要互斥量的 BSP 初始化必须在这里：CubeMX 刚把四把锁建出来，
+  /* 要互斥量的 BSP 初始化必须在这里：CubeMX 刚把这几把锁建出来，
    早一段（Init）句柄还是 NULL，会被 BSP_xxx_Init() 判成 ERR_STATE。 */
+  BSP_IIC_Init();
   BSP_SPI_Init();
   BSP_UART_Init();
   /* USER CODE END RTOS_MUTEX */

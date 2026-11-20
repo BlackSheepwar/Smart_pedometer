@@ -37,6 +37,22 @@ target_link_libraries(bsp_spi
 target_compile_options(bsp_spi PRIVATE ${USER_WARN_FLAGS})
 
 # -----------------------------------------------------------------------------
+# bsp_iic：IIC 模块（总线句柄 + 互斥量排队 + DMA 完成唤醒）
+#   I2C1 配成 400 kHz，收发都走 DMA1_Stream5/6；一次传输同步完成，
+#   多任务按 IIC_LOCK 排队。
+# -----------------------------------------------------------------------------
+add_library(bsp_iic STATIC
+    BSP_IIC/bsp_iic.c
+)
+target_include_directories(bsp_iic
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/BSP_IIC
+)
+target_link_libraries(bsp_iic
+    PRIVATE stm32cubemx
+)
+target_compile_options(bsp_iic PRIVATE ${USER_WARN_FLAGS})
+
+# -----------------------------------------------------------------------------
 # bsp_uart：UART 模块（DMA 乒乓接收 + 环形发送队列 + 互斥量排队）
 #   收发全程不阻塞调用者；接收侧单生产单消费无锁，发送侧靠 UART_LOCK 排队。
 # -----------------------------------------------------------------------------
