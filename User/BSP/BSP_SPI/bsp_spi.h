@@ -1,32 +1,39 @@
 /**
  * @file bsp_spi.h
- * @brief SPI 硬件驱动层：设备句柄统一入口，互斥量排队 + 完成唤醒
+ * @brief SPI 硬件驱动层：只做芯片级字节搬运与速率切换，不等待、不使用任何 OS
  * @author Ricardo
- * @date 2026-10-29
+ * @date 2026-11-20
  *
- * @note 对外只有一级句柄：bsp_spi_dev_t 描述"挂在哪条总线上、用哪根片选"，
- *       所有传输都从设备句柄进入；总线对象是 BSP 内部实现，不对外暴露——
- *       同一条总线挂多个设备时，每个设备各持一份自己的设备句柄。
- *       设备级函数自动拉/放 CS，帧内入口只管搬字节。
+ * @note 本层只回答三个问题：这条总线怎么初始化、SCK 怎么降到某个频率、
+ *       一段字节怎么搬出去或收回来。片选时序、总线独占、整帧语义、
+ *       多设备各要各的速率，全部在设备层的 Dev_SPI（dev_spi.h）里；
+ *       本层不 include 任何设备头，也不知道自己正在给谁搬字节。
  *
- *       两种用法，按事务长度选：
- *         单段  BSP_SPI_Dev_Transfer()，一次调用走完 Select→写→Deselect；
- *         多段  Select() + TransferLocked() × N + Deselect()，锁与片选同生命
- *               周期，整帧独占总线。命令与参数不能跨帧的器件必须用这种，
- *               否则别的设备能在帧中间插进来，字节会被本设备误收。
+ *       这样切是为了让"换芯片只改这一层"成立：HAL 调用、完成回调、
+ *       分频表、错误恢复都是芯片知识，留在这里；而"哪台设备占着总线、
+ *       它的片选该不该低"与芯片无关，换 MCU 一个字都不用动。
  *
- *       一次事务同步完成：抢互斥量排队 → 启动传输 → 等完成唤醒 → 返回。
- *       配了 DMA 走 DMA + 任务通知，没配自动退回 HAL 阻塞接口。
- *       方向能力由 CubeMX 的 Direction 决定，不支持的组合返回 ERR_MODE；
- *       本层只服务 Master，配成 Slave 会在 BSP_SPI_Init() 被拒。
+ *       搬运方式在编译期由 BSP_SPI_TRANSFER_MODE 三选一（0 阻塞 / 1 中断 /
+ *       2 DMA），每次编译只保留选中的那条路径。中断与 DMA 的对外契约完全
+ *       相同：BSP_SPI_StartTransfer() 启动即返回 BSP_SPI_OK，完成或出错时
+ *       在中断里回调 done(ctx, status)，调用者自己决定是睡等、置标志还是
+ *       轮询；这两种方式都可以用 BSP_SPI_IsBusy() 查是否还在进行。阻塞方式
+ *       在函数里同步搬完，返回即已结束，done 不会被调用。切换方式不改变
+ *       任何调用点的写法。
  *
- *       速率按设备配置：设备句柄里的 sck_hz 是该器件能接受的 SCK 上限，
- *       Select() 时按"不超过它"换算出分频，在片选拉低之前切换完成。
- *       于是同一条总线上可以同时挂两种速率不同的器件——
- *       两者引用同一个总线句柄、各写各的 sck_hz 即可，调用方完全无感。
- *       sck_hz 填 0 表示回落到 CubeMX 里配的预分频——注意是"回落"而不是
- *       "不改"：总线上只要有设备改过速率，填 0 的设备下一次 Select 就会把
- *       外设恢复到 CubeMX 的档位，避免被上一个设备的低速拖着走。
+ *       本层不等待、不通知、不持锁，因此不依赖 FreeRTOS，裸机也能直接用。
+ *       回调运行在中断上下文，必须 ISR 安全（不能拿互斥量、不能睡）。
+ *       超时与重试策略属于使用方：等待超时后调用 BSP_SPI_Abort() 中止，
+ *       Abort 会清掉回调登记，迟到的完成回调不会再惊动任何人。
+ *
+ *       方向能力与 DMA 能力是总线句柄的配置项，BSP_SPI_Init() 会与 HAL 的
+ *       实配逐项核对，不一致直接拒绝初始化；本次传输的方向不被支持时返回
+ *       ERR_MODE。本层只服务 Master，配成 Slave 会在初始化时被拒。
+ *
+ *       速率按请求值切换：BSP_SPI_SetRate() 求"不超过请求值"的分频并写入
+ *       外设。改 BR 必须关掉 SPE，因此只能在总线空闲、片选全高时调用——
+ *       这个时刻由 Dev_SPI 的 Select 保证。请求 0 表示回落到 CubeMX 配的
+ *       预分频（是"回落"不是"不动"，见 bsp_spi.c 的说明）。
  *       公共头文件不暴露 HAL 类型，HAL 句柄只存在于 .c。
  */
 
@@ -40,6 +47,32 @@
 #include <stdint.h>
 
 /*==============================================================================
+ * 传输方式配置
+ *============================================================================*/
+/** @brief 阻塞方式：调用 HAL 阻塞接口，返回时已搬完 */
+#define BSP_SPI_MODE_BLOCKING  0U
+
+/** @brief 中断方式：调用 HAL 中断接口，启动即返回，完成点在外设中断里 */
+#define BSP_SPI_MODE_IT        1U
+
+/** @brief DMA 方式：调用 HAL DMA 接口，启动即返回，完成点在 DMA 中断里 */
+#define BSP_SPI_MODE_DMA       2U
+
+/**
+ * @brief 本层使用的搬运方式，取 BSP_SPI_MODE_* 之一
+ * @note 方式在编译期定死，运行期不查、也不做"这次用哪种"的协商：一种方式
+ *       对应一套中断时序与一套错误恢复路径，混用会把两者都搅乱。
+ *       取值超出 0~2 在编译期就报错，不会拖到运行期才发现。
+ */
+#ifndef BSP_SPI_TRANSFER_MODE
+#define BSP_SPI_TRANSFER_MODE  BSP_SPI_MODE_IT
+#endif
+
+#if (BSP_SPI_TRANSFER_MODE > BSP_SPI_MODE_DMA)
+#error "BSP_SPI_TRANSFER_MODE 只能取 0阻塞、1中断、2DMA"
+#endif
+
+/*==============================================================================
  * 类型定义
  *============================================================================*/
 /**
@@ -48,119 +81,126 @@
 typedef enum {
     BSP_SPI_OK          = 0,  /* 成功 */
     BSP_SPI_ERR_PARAM   = -1, /* 参数非法 */
-    BSP_SPI_ERR_STATE   = -2, /* 未初始化 / 调度器未跑 / 外设状态不对 / 已在帧中 */
-    BSP_SPI_ERR_TIMEOUT = -3, /* 排队等锁超时，或传输超时 */
+    BSP_SPI_ERR_STATE   = -2, /* 未初始化 / 外设状态不对 */
+    BSP_SPI_ERR_TIMEOUT = -3, /* 阻塞方式传输超时 */
     BSP_SPI_ERR_MODE    = -4, /* 外设当前配置不支持该方向 */
     BSP_SPI_ERR_BUS     = -5, /* 总线错误：MODF / OVR / CRC */
-    BSP_SPI_ERR_HAL     = -7, /* HAL 启动失败或 DMA 错误 */
+    BSP_SPI_ERR_HAL     = -7, /* HAL 启动失败或传输中出错 */
 } bsp_spi_status_t;
 
 /**
- * @brief SPI 设备句柄（不透明类型，成员定义在 bsp_spi.c）
- * @note 只描述"挂在哪条总线上、用哪根片选、什么极性"，不含引脚号。
+ * @brief SPI 总线句柄（不透明类型，成员定义在 bsp_spi.c）
+ * @note 一个总线句柄对一个 HAL 外设，句柄本身就是"这条总线怎么工作"的
+ *       完整说明：用哪个外设、输入时钟多少、支持哪些方向、有没有 DMA。
+ *       这四项都是配置，句柄 const 进 .rodata；运行期状态（忙标志、回调
+ *       登记、当前分频）放在 .c 的内部对象里，头文件不暴露。
+ *       输入时钟是句柄的配置项，不是调用时现取：它是板级事实，填进句柄后
+ *       分频计算只剩一次除法，调用路径上不碰时钟树的查询接口。
  */
-typedef struct bsp_spi_dev bsp_spi_dev_t;
+typedef struct bsp_spi bsp_spi_t;
+
+/**
+ * @brief 一次异步传输的完成回调
+ * @param ctx    启动时原样传回的上下文指针
+ * @param status 传输结果，取值同 bsp_spi_status_t
+ * @retval 无
+ * @note 在中断里被调用，实现必须 ISR 安全：只能做"记结果 + 唤醒等待者"
+ *       这类 O(1) 动作，不能拿互斥量、不能阻塞、不能调用非 FromISR 版本
+ *       的 FreeRTOS API。调用 BSP_SPI_Abort() 之后本回调不会被再调用；
+ *       阻塞方式下本回调永远不会被调用。
+ */
+typedef void (*bsp_spi_done_t)(void *ctx, bsp_spi_status_t status);
 
 /*==============================================================================
  * 外部变量
  *============================================================================*/
 /**
- * @brief SPI1 上的两个设备：各持一根片选、共用 SCK/MOSI/MISO
- * @note 每个设备各写各的 sck_hz，本层在片选拉低之前自动换挡，
- *       调用方不需要关心上一条总线上一次跑的是哪台。
+ * @brief 驱动管理的 SPI 总线：SPI1
+ * @note 设备层的 Dev_SPI 按总线句柄调用本层；谁挂在这条总线上由设备层登记。
  */
-extern const bsp_spi_dev_t bsp_spi1_dev_lcd;
+extern const bsp_spi_t bsp_spi1;
 
 /*==============================================================================
  * 函数声明
  *============================================================================*/
 /**
- * @brief 初始化 SPI 驱动：轮询总线表，登记句柄与方向能力
+ * @brief 初始化 SPI 驱动：核对句柄配置、登记 HAL 实配与初始分频
  * @retval BSP_SPI_OK: 初始化成功（已初始化的总线会被跳过）
- * @retval BSP_SPI_ERR_STATE: 缺 HAL 句柄或互斥量、外设非 READY、Mode 不是
- *         Master，或数据宽度不是 8 bit
- * @note 必须在 USER CODE BEGIN RTOS_MUTEX 内调用（CubeMX 刚建完总线互斥量），
- *       且 MX_SPIx_Init() 已执行过。不能在中断里调用。
+ * @retval BSP_SPI_ERR_PARAM: 句柄漏填输入时钟（pclk_hz 为 0），或句柄登记的
+ *         方向能力 / DMA 能力与 HAL 实配不一致
+ * @retval BSP_SPI_ERR_STATE: 缺 HAL 句柄、外设非 READY、Mode 不是 Master，
+ *         或数据宽度不是 8 bit
+ * @note 必须在 MX_SPIx_Init() 之后调用，且不能在中断里调用。总线互斥量
+ *       不属于本层：它的创建与检查在 Dev_SPI_Init() 里。
  */
 bsp_spi_status_t BSP_SPI_Init(void);
 
 /**
- * @brief 在设备所属的已持有总线上搬一段字节（不抢锁、不碰片选）
- * @param dev        设备句柄，不能为 NULL，且必须是 Select() 选中的那台
+ * @brief 把总线 SCK 切换到"不超过请求值"的档位
+ * @param bus    总线句柄，不能为 NULL
+ * @param sck_hz 请求的 SCK 上限（Hz），0 表示回落到 CubeMX 配的预分频
+ * @retval BSP_SPI_OK: 已生效（与当前档位相同时是零开销的空操作）
+ * @retval BSP_SPI_ERR_PARAM: 总线句柄为空，或句柄漏填输入时钟
+ * @retval BSP_SPI_ERR_STATE: 驱动未初始化
+ * @retval BSP_SPI_ERR_HAL: HAL_SPI_Init 失败，外设可能停在 RESET
+ * @note 改分频必须关掉 SPE，只能在总线空闲、片选全高时调用；调用者负责
+ *       保证此刻没有传输在进行（Dev_SPI 在拉片选之前调本函数）。
+ *       分频用句柄里的输入时钟算，不在本函数里读 RCC：时钟树变了只改
+ *       句柄那一行常量，不散落在调用路径里。
+ *       请求 0 会退回 CubeMX 的档位，而不是保持当前值——否则一台低速设备
+ *       改过速率之后，没有速率要求的设备会继续被拖着跑。
+ */
+bsp_spi_status_t BSP_SPI_SetRate(const bsp_spi_t *bus, uint32_t sck_hz);
+
+/**
+ * @brief 启动一段字节的搬运：中断 / DMA 异步返回，阻塞方式同步搬完
+ * @param bus        总线句柄，不能为 NULL
  * @param tx         发送缓冲区，NULL 表示本次不发
  * @param rx         接收缓冲区，NULL 表示本次不收
  * @param len        传输字节数，不能为 0
- * @param timeout_ms 本次传输的超时预算（毫秒），0 表示用默认 50 ms
- * @retval BSP_SPI_OK: 传输成功
+ * @param timeout_ms 超时预算（毫秒），0 表示用默认 50 ms；只对阻塞方式生效
+ * @param done       异步完成回调，可为 NULL（此时只能轮询 IsBusy）
+ * @param ctx        回调上下文，原样传回 done
+ * @retval BSP_SPI_OK: 异步方式已启动（尚未完成）；阻塞方式已搬完且成功
  * @retval BSP_SPI_ERR_PARAM: 句柄或长度非法，或两个缓冲区都为 NULL
- * @retval BSP_SPI_ERR_STATE: 驱动未初始化、调度器未运行，或当前帧不是
- *         本任务、本设备开的
- * @retval BSP_SPI_ERR_TIMEOUT: 传输超时（不存在排队，只有传输）
+ * @retval BSP_SPI_ERR_STATE: 驱动未初始化
  * @retval BSP_SPI_ERR_MODE: 外设当前方向不支持本次传输
- * @retval BSP_SPI_ERR_BUS: 总线错误
- * @retval BSP_SPI_ERR_HAL: HAL 启动失败或 DMA 错误
- * @note 只给帧内分段用：调用前必须 BSP_SPI_Dev_Select() 同一个设备，与
- *       Deselect() 成对。总线由 dev->bus 取得，调用者不用单独持有总线句柄。
- *       内部校验 frame_owner 与 frame_dev，不是"本任务 + 本设备"就返回
- *       ERR_STATE，把"忘了开帧""开了别的设备的帧""跨任务误用"变成可查的
- *       错误码。
- *       方向由 tx / rx 推出：只发 / 只收 / 全双工 / ERR_PARAM。不得在中断调用。
+ * @retval BSP_SPI_ERR_TIMEOUT: 阻塞方式传输超时
+ * @retval BSP_SPI_ERR_HAL: 启动失败，或阻塞方式传输出错
+ * @retval BSP_SPI_ERR_BUS: 阻塞方式遇到总线错误
+ * @note 调用者必须已持有总线、已拉低目标设备的片选、已把速率切好；
+ *       这三件事都在 Dev_SPI 里做。方向由 tx / rx 推出：只发 / 只收 /
+ *       全双工 / ERR_PARAM。异步方式返回 OK 不等于搬完，要靠 done 或
+ *       IsBusy() 才知道结束；阻塞方式返回 OK 即为搬完。
+ *       DMA 方式下，若这条总线缺本次方向所需的 DMA 通道，会自动退回阻塞
+ *       方式同步完成，此时 done 同样不会被调用。
+ *       不得在中断里调用。
  */
-bsp_spi_status_t BSP_SPI_TransferLocked(const bsp_spi_dev_t *dev,
-                                        const uint8_t *tx, uint8_t *rx,
-                                        uint16_t len, uint32_t timeout_ms);
+bsp_spi_status_t BSP_SPI_StartTransfer(const bsp_spi_t *bus,
+                                       const uint8_t *tx, uint8_t *rx,
+                                       uint16_t len, uint32_t timeout_ms,
+                                       bsp_spi_done_t done, void *ctx);
 
 /**
- * @brief 取得总线所有权并拉有效片选（帧开始）
- * @param dev        设备句柄，不能为 NULL
- * @param timeout_ms 排队等锁的预算（毫秒），0 表示用默认 50 ms
- * @retval BSP_SPI_OK: 已持有总线，片选已拉有效
- * @retval BSP_SPI_ERR_PARAM: 句柄或总线为空
- * @retval BSP_SPI_ERR_STATE: 未初始化、调度器未运行，或本任务已经在帧中
- * @retval BSP_SPI_ERR_TIMEOUT: 等锁超时；此时片选没有被拉低
- * @retval BSP_SPI_ERR_HAL: 速率切换失败；此时片选没有被拉低
- * @note 电平按 cs_active_level 换算。抢锁成功才拉片选，不存在"CS 已低、
- *       总线还在别人手里"的窗口。与 Deselect() 成对，帧内只能调
- *       TransferLocked()。失败后不要调 Deselect。会阻塞，不得在中断中调用。
- *       本函数同时完成速率切换：句柄的 sck_hz 非 0 时按"不超过该值"算出
- *       分频并写入外设，片选拉低之前生效。因此同一总线上的两个器件可以
- *       各用各的速率，调用方不需要为此做任何事；sck_hz 为 0 则回落到
- *       CubeMX 配的预分频。
+ * @brief 查询总线上是否还有未完成的传输
+ * @param bus 总线句柄，不能为 NULL
+ * @retval 1: 异步传输还在进行
+ * @retval 0: 空闲，或已由回调收尾；句柄为空时也返回 0
+ * @note 启用了 done 回调的调用者通常不需要它；用于"没给回调、只想轮询"
+ *       的用法。阻塞方式启动之后这里恒为 0。
  */
-bsp_spi_status_t BSP_SPI_Dev_Select(const bsp_spi_dev_t *dev,
-                                    uint32_t timeout_ms);
+uint8_t BSP_SPI_IsBusy(const bsp_spi_t *bus);
 
 /**
- * @brief 放无效片选并归还总线（帧结束）
- * @param dev 设备句柄，不能为 NULL
- * @retval 无
- * @note 与 Select() 配对。只对"本任务、本设备"开的帧生效：任务不是帧主、
- *       或 dev 不是本帧选中的那台，都直接返回，避免放掉别人的锁或抬错片选。
- *       必须校验设备：否则 Select(dev1) 后误调 Deselect(dev2) 会放锁而
- *       dev1 的 CS 仍低，接下来用 dev2 的传输会被 dev1 一并收走。
+ * @brief 中止当前传输并让外设回到 READY，清掉回调登记
+ * @param bus 总线句柄，不能为 NULL
+ * @retval BSP_SPI_OK: 已回到空闲
+ * @retval BSP_SPI_ERR_PARAM: 总线句柄为空
+ * @retval BSP_SPI_ERR_HAL: HAL_SPI_Abort 失败，已用 DeInit/Init 硬复位一次
+ * @note 只允许在任务上下文调用。中止自身失败（传输已跑飞）时用
+ *       DeInit/Init 重新初始化一次，保证总线能交给下一个调用者。
+ *       返回后 done 已被清空，迟到的完成/错误回调不会再通知任何人。
  */
-void BSP_SPI_Dev_Deselect(const bsp_spi_dev_t *dev);
-
-/**
- * @brief 在指定设备上提交一次传输，自动拉放片选
- * @param dev        设备句柄，不能为 NULL
- * @param tx         发送缓冲区，NULL 表示本次不发
- * @param rx         接收缓冲区，NULL 表示本次不收
- * @param len        传输字节数，不能为 0
- * @param timeout_ms 超时预算（毫秒），0 表示用默认 50 ms
- * @retval BSP_SPI_OK: 传输成功
- * @retval BSP_SPI_ERR_PARAM: 句柄或长度非法，或两个缓冲区都为 NULL
- * @retval BSP_SPI_ERR_STATE: 驱动未初始化、调度器未运行，或本任务已在帧中
- * @retval BSP_SPI_ERR_TIMEOUT: 排队或传输超时
- * @retval BSP_SPI_ERR_MODE: 外设当前方向不支持本次传输
- * @retval BSP_SPI_ERR_BUS: 总线错误
- * @retval BSP_SPI_ERR_HAL: HAL 错误
- * @note 一次完整帧事务：Select → TransferLocked → Deselect，成功失败都
- *       把片选与总线还回去。方向推断规则与 TransferLocked() 一致。
- *       一帧要分多段发时别用本函数，改用三个底层函数自己拼。
- */
-bsp_spi_status_t BSP_SPI_Dev_Transfer(const bsp_spi_dev_t *dev,
-                                      const uint8_t *tx, uint8_t *rx,
-                                      uint16_t len, uint32_t timeout_ms);
+bsp_spi_status_t BSP_SPI_Abort(const bsp_spi_t *bus);
 
 #endif /* __BSP_SPI_H__ */

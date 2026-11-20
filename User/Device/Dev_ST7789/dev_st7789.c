@@ -4,16 +4,17 @@
  * @author Ricardo
  * @date 2026-11-04
  *
- * @note 本文件不含引脚号：SCK/MOSI/CS 属于 SPI1 总线与设备句柄（BSP 层），
- *       DC/RST/BL 只是三个 bsp_gpio_t 指针。
+ * @note 本文件不含引脚号：SCK/MOSI/CS 属于设备层的 SPI 虚拟外设
+ *       （Dev_SPI，片选引脚句柄在 BSP_GPIO 里），DC/RST/BL 只是三个
+ *       bsp_gpio_t 指针。本文件只 include 虚拟外设的头，不碰 BSP_SPI。
  *       同一条 SPI1 上只有显示设备：整帧期间本设备的 CS 保持低，所以按字节
  *       搬数据不会被打断。
  *
  *       一次写屏的时序：
  *         CS 低 → DC 低 → 发命令 → DC 高 → 发参数/像素 → CS 高
- *       片选与总线在整帧期间一起被本任务独占：BSP_SPI_Dev_Select() 抢锁
- *       成功才拉 CS，帧内只走 BSP_SPI_TransferLocked()，不再重入互斥量，
- *       BSP_SPI_Dev_Deselect() 抬 CS 之后才放锁。所以"CS 全程保持低"与
+ *       片选与总线在整帧期间一起被本任务独占：Dev_SPI_Select() 抢锁
+ *       成功才拉 CS，帧内只走 Dev_SPI_TransferLocked()，不再重入互斥量，
+ *       Dev_SPI_Deselect() 抬 CS 之后才放锁。所以"CS 全程保持低"与
  *       "总线不被打断"是同一件事，不需要额外的临界区；分块大小只影响
  *       单次 DMA 的长度，不影响帧的完整性。
  *
@@ -32,7 +33,7 @@
 #include <stddef.h>
 #include "dev_st7789.h"
 // 功能包含
-#include "bsp_spi.h"
+#include "dev_spi.h"
 #include "bsp_gpio.h"
 
 /*==============================================================================
@@ -93,7 +94,7 @@
  *       static 里——这也意味着本模块是单实例设计，见头文件说明。
  */
 struct dev_st7789 {
-    const bsp_spi_dev_t *dev;       /* SPI 设备句柄：片选与所属总线都由它携带 */
+    const dev_spi_dev_t *dev;       /* 虚拟 SPI 设备：片选与所属总线由它携带 */
     const bsp_gpio_t    *dc;        /* 数据/命令选择：0 命令，1 数据 */
     const bsp_gpio_t    *rst;       /* 硬复位，NULL 表示接板级复位 */
     const bsp_gpio_t    *bl;        /* 背光，NULL 表示常亮 */
@@ -123,7 +124,7 @@ struct dev_st7789 {
  *       判据看现象：整幅明暗反转 → inv 与该玻璃不符；红蓝互换 → bgr 不符。
  */
 const dev_st7789_t dev_st7789_0 = {
-    .dev      = &bsp_spi1_dev_lcd,
+    .dev      = &dev_spi_dev_lcd,
     .dc       = &bsp_gpio_pb11,
     .rst      = &bsp_gpio_pb12,
     .bl       = NULL,
@@ -154,8 +155,8 @@ static uint8_t  s_ready;
  * @param len  字节数，不能为 0
  * @retval 0: 全部发完
  * @retval -2: 其中一次传输失败（总线错误或传输超时）
- * @note 按 DEV_ST7789_CHUNK 分块，因为 BSP 的 len 是 uint16_t。
- *       片选与总线由调用者在帧首用 BSP_SPI_Dev_Select() 取得，本函数只走
+ * @note 按 DEV_ST7789_CHUNK 分块，因为虚拟外设的 len 是 uint16_t。
+ *       片选与总线由调用者在帧首用 Dev_SPI_Select() 取得，本函数只走
  *       已持锁入口，不会重新抢锁，所以整帧期间总线不会被别的设备拿走。
  */
 static int Dev_ST7789_Raw(const dev_st7789_t *lcd, const uint8_t *data,
@@ -165,8 +166,8 @@ static int Dev_ST7789_Raw(const dev_st7789_t *lcd, const uint8_t *data,
         uint16_t chunk = (len > DEV_ST7789_CHUNK) ?
                          (uint16_t)DEV_ST7789_CHUNK : (uint16_t)len;
 
-        if (BSP_SPI_TransferLocked(lcd->dev, data, NULL, chunk, 0u)
-            != BSP_SPI_OK) {
+        if (Dev_SPI_TransferLocked(lcd->dev, data, NULL, chunk, 0u)
+            != DEV_SPI_OK) {
             return -2;
         }
 
@@ -187,15 +188,15 @@ static int Dev_ST7789_Raw(const dev_st7789_t *lcd, const uint8_t *data,
  * @retval -2: 抢总线失败，或传输失败
  * @note 命令与参数在同一个片选帧内完成，避免 CS 上升沿打断参数序列。
  *       抢总线失败时片选没有被拉低，直接返回即可，不需要也不能调
- *       BSP_SPI_Dev_Deselect()。
+ *       Dev_SPI_Deselect()。
  */
 static int Dev_ST7789_Cmd(const dev_st7789_t *lcd, uint8_t cmd,
                           const uint8_t *param, uint16_t param_len)
 {
     int status;
 
-    if (BSP_SPI_Dev_Select(lcd->dev, DEV_ST7789_FRAME_TIMEOUT_MS)
-        != BSP_SPI_OK) {
+    if (Dev_SPI_Select(lcd->dev, DEV_ST7789_FRAME_TIMEOUT_MS)
+        != DEV_SPI_OK) {
         return -2;
     }
 
@@ -207,7 +208,7 @@ static int Dev_ST7789_Cmd(const dev_st7789_t *lcd, uint8_t cmd,
         status = Dev_ST7789_Raw(lcd, param, param_len);
     }
 
-    BSP_SPI_Dev_Deselect(lcd->dev);
+    Dev_SPI_Deselect(lcd->dev);
     return status;
 }
 
@@ -229,14 +230,14 @@ static int Dev_ST7789_FrameOpen(const dev_st7789_t *lcd)
 {
     uint8_t cmd = (uint8_t)DEV_ST7789_CMD_RAMWR;
 
-    if (BSP_SPI_Dev_Select(lcd->dev, DEV_ST7789_FRAME_TIMEOUT_MS)
-        != BSP_SPI_OK) {
+    if (Dev_SPI_Select(lcd->dev, DEV_ST7789_FRAME_TIMEOUT_MS)
+        != DEV_SPI_OK) {
         return -2;
     }
 
     BSP_GPIO_Write(lcd->dc, 0u);
     if (Dev_ST7789_Raw(lcd, &cmd, 1u) != 0) {
-        BSP_SPI_Dev_Deselect(lcd->dev);
+        Dev_SPI_Deselect(lcd->dev);
         return -2;
     }
     BSP_GPIO_Write(lcd->dc, 1u);
@@ -251,7 +252,7 @@ static int Dev_ST7789_FrameOpen(const dev_st7789_t *lcd)
  */
 static void Dev_ST7789_FrameClose(const dev_st7789_t *lcd)
 {
-    BSP_SPI_Dev_Deselect(lcd->dev);
+    Dev_SPI_Deselect(lcd->dev);
 }
 
 /*==============================================================================
