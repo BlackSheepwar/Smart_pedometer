@@ -36,9 +36,9 @@ target_link_libraries(bsp_spi
 target_compile_options(bsp_spi PRIVATE ${USER_WARN_FLAGS})
 
 # -----------------------------------------------------------------------------
-# bsp_iic：IIC 模块（总线句柄 + 互斥量排队 + DMA 完成唤醒）
-#   I2C1 配成 400 kHz，收发都走 DMA1_Stream5/6；一次传输同步完成，
-#   多任务按 IIC_LOCK 排队。
+# bsp_iic：IIC 总线（初始化 / 换速 / 启动一次 DMA 搬运）
+#   不持锁、不等待、不含 OS：总线独占、超时与错误码翻译在设备层（dev_iic）。
+#   一次搬运只登记完成回调后返回，结果由回调给出。PUBLIC 只暴露 bsp_iic.h。
 # -----------------------------------------------------------------------------
 add_library(bsp_iic STATIC
     BSP_IIC/bsp_iic.c
@@ -52,8 +52,9 @@ target_link_libraries(bsp_iic
 target_compile_options(bsp_iic PRIVATE ${USER_WARN_FLAGS})
 
 # -----------------------------------------------------------------------------
-# bsp_uart：UART 模块（DMA 乒乓接收 + 环形发送队列 + 互斥量排队）
-#   收发全程不阻塞调用者；接收侧单生产单消费无锁，发送侧靠 UART_LOCK 排队。
+# bsp_uart：UART 总线（DMA 乒乓接收 + 环形发送队列）
+#   不持锁、不等待、不含 OS：写入串行化、超时与发完判定在设备层（dev_uart）。
+#   本层只做 DMA 收发、FIFO 搬运与错误重启。PUBLIC 只暴露 bsp_uart.h。
 # -----------------------------------------------------------------------------
 add_library(bsp_uart STATIC
     BSP_UART/bsp_uart.c

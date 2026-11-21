@@ -1,27 +1,22 @@
 /**
  * @file bsp_iic.c
- * @brief IIC 硬件驱动层：互斥量排队 + 完成中断唤醒
+ * @brief IIC 主机驱动层：启动 DMA 并登记完成回调，不等待、不持锁
  * @author Ricardo
  * @date 2026-10-27
  *
  * @note 设计模型：
- *       1. 每个 bsp_iic_t 实例绑一把互斥量，任务先抢锁再启动传输；
- *          抢不到就在锁上排队，排队深度等于任务数，没有固定上限；
- *       2. 传输用 HAL 的 DMA 接口启动，启动调用一进去就返回；
- *       3. 完成/错误中断只做两件事：记录结果、唤醒占着总线的任务；
- *       4. 调用者睡在任务通知上，被中断直接唤醒，全程不做轮询。
+ *       1. 每路总线一个常量句柄（hal 指针 + 运行时块地址），运行期状态
+ *          （是否就绪、忙、当前时钟、完成回调）全在运行时块里；
+ *       2. 本层只"启动"：BSP_IIC_StartTransfer() 把命令交给 HAL 的 DMA
+ *          接口，登记 done 后立刻返回，不持锁、不睡等；
+ *       3. 完成/错误中断只做三件事：摘掉登记、清忙标志、调用 done；
+ *       4. 超时判定与复位由调用者发起：BSP_IIC_Abort() 先把 HAL 状态机
+ *          强制拉回 READY，再 DeInit/Init，否则外设停在 BUSY 时 DeInit
+ *          会直接返回 HAL_BUSY、MspDeInit 不执行，越复位越坏。
  *
- *       OS 对象归属：互斥量 IIC_LOCK 定义在 Smart_pedometer.ioc，由 CubeMX 生成到
- *       freertos.c；本文件只 extern 使用，不创建任务、队列或同步对象。
- *       互斥量带优先级继承，所以 BSP_IIC_Init() 必须放在 freertos.c 的
- *       USER CODE BEGIN RTOS_MUTEX，那里互斥量已经建好。
- *
- *       链接注意：HAL 回调是强符号，必须保证 bsp_iic.c.o 被拉进最终
- *       镜像；freertos.c 的 BSP_IIC_Init() 调用会完成这件事。
- *
- *       外设中断必须开：DMA 只搬字节，一次传输的 ADDR / BTF / STOPF 收发尾
+ *       外设中断必须开：DMA 只搬字节，一次传输的 ADDR / BTF / STOPF 收尾
  *       仍由 I2Cx 的 EV 中断推进，出错走 ER 中断。只开 DMA 流中断、不开
- *       外设中断的话，每笔传输都会在超时后被复位一次——现象是设备一直无响应。
+ *       外设中断的话，每笔传输都会永远等不到完成。
  */
 
 /*==============================================================================
@@ -33,48 +28,55 @@
 #include "bsp_iic.h"
 // 功能包含
 #include "i2c.h"
-#include "FreeRTOS.h"
-#include "task.h"
-#include "cmsis_os.h"
-
-/*==============================================================================
- * 外部变量声明
- *============================================================================*/
-/* ---- CubeMX 生成的互斥量：名字与 .ioc 里 FREERTOS.Mutexes01 一致 ---- */
-extern osMutexId_t IIC_LOCKHandle;
 
 /*==============================================================================
  * 宏定义与常量
  *============================================================================*/
-/** @brief 单笔传输默认超时（ms），排队与总线传输共用这一份预算 */
-#define BSP_IIC_DEFAULT_TIMEOUT_MS  50U
+/** @brief 从机地址上限：7 bit 地址，未左移 */
+#define BSP_IIC_ADDR_MAX            0x7FU
+
+/** @brief 寄存器子地址的最大字节数 */
+#define BSP_IIC_MEM_ADDR_SIZE_MAX   2U
 
 /*==============================================================================
  * 类型定义
  *============================================================================*/
 /**
+ * @brief IIC 总线运行时块
+ * @note 每次初始化和每笔搬运都会读写，所以不能放进 const 句柄。
+ */
+typedef struct {
+    bsp_iic_done_t volatile done;      /* 本笔完成回调，空闲为 NULL */
+    void *volatile          ctx;       /* 回调上下文，与 done 同生共死 */
+    volatile uint8_t        busy;      /* 1: 有搬运未收尾 */
+    volatile uint8_t        initialized; /* 1: 已完成初始化 */
+    uint32_t                clk_now;   /* 当前生效的总线时钟（Hz） */
+    uint32_t                clk_init;  /* 初始化时登记的总线时钟（Hz） */
+} bsp_iic_rt_t;
+
+/**
  * @brief IIC 总线对象
- * @note  hal 是 void *，避免公共头文件引入 HAL 类型；lock 存的是互斥量
- *        句柄的地址——句柄值要等 freertos.c 运行时才产生，存地址就能在
- *        实例定义处一次配好，初始化时只做校验。
+ * @note  hal 是 void *，避免公共头文件引入 HAL 类型；rt 指向运行期状态。
  */
 struct bsp_iic {
-    void             *hal;        /* HAL I2C 句柄（I2C_HandleTypeDef *） */
-    osMutexId_t      *lock;       /* 指向 freertos.c 生成的互斥量句柄 */
-    TaskHandle_t volatile waiter; /* 正在等完成的任务，空闲为 NULL */
-    volatile bsp_iic_status_t result; /* 本次传输结果，由中断写入 */
-    volatile uint8_t  initialized; /* 1: 已完成初始化 */
+    void            *hal; /* HAL I2C 句柄（I2C_HandleTypeDef *） */
+    bsp_iic_rt_t    *rt;  /* 运行期状态 */
 };
 
 /*==============================================================================
  * 内部变量
  *============================================================================*/
-/* ---- 新增一路 IIC：照抄一行，改 HAL 句柄与互斥量；bsp_iic.h 同步加一行 extern ---- */
-bsp_iic_t bsp_iic1 = { .hal = &hi2c1, .lock = &IIC_LOCKHandle };   /* 其余字段零初始化 */
+/* ---- 新增一路 IIC：照抄一行，改 HAL 句柄；bsp_iic.h 同步加一行 extern ---- */
+static bsp_iic_rt_t bsp_iic1_rt;
+
+const bsp_iic_t bsp_iic1 = {
+    .hal = &hi2c1,
+    .rt  = &bsp_iic1_rt,
+};
 
 /** @brief 总线表：本层管理的全部总线，初始化与中断反查都按它轮询
- *  @note 表长由行数算出，不需要终止符；一条总线都没登记时表长为 0。 */
-static bsp_iic_t *const s_buses[] = {
+ *  @note 表长由行数算出，不需要终止符。 */
+static const bsp_iic_t *const s_buses[] = {
     &bsp_iic1,
 };
 
@@ -90,7 +92,7 @@ static const size_t s_bus_count = sizeof(s_buses) / sizeof(s_buses[0]);
  * @retval 非 NULL: 对应的总线对象
  * @retval NULL: 不是本驱动管理的句柄
  */
-static bsp_iic_t *BSP_IIC_FindBus(I2C_HandleTypeDef *hi2c)
+static const bsp_iic_t *BSP_IIC_FindBus(I2C_HandleTypeDef *hi2c)
 {
     size_t i;
 
@@ -115,17 +117,17 @@ static bsp_iic_t *BSP_IIC_FindBus(I2C_HandleTypeDef *hi2c)
  * @note 7 bit 地址在这里左移成 HAL 需要的 8 bit 形式；MEM 模式用
  *       HAL_I2C_Mem_*_DMA，一次调用完成子地址写 + repeated START。
  */
-static HAL_StatusTypeDef BSP_IIC_StartHal(bsp_iic_t *bus,
+static HAL_StatusTypeDef BSP_IIC_StartHal(const bsp_iic_t *bus,
                                           const bsp_iic_msg_t *msg)
 {
     I2C_HandleTypeDef *hi2c = (I2C_HandleTypeDef *)bus->hal;
     uint16_t dev_addr = (uint16_t)(msg->dev_addr << 1);
     uint16_t mem_size;
 
-    if (msg->mode == BSP_IIC_MODE_MEM) {
+    if (msg->mode == (uint8_t)BSP_IIC_MODE_MEM) {
         mem_size = (msg->mem_addr_size == 2U) ?
                    I2C_MEMADD_SIZE_16BIT : I2C_MEMADD_SIZE_8BIT;
-        if (msg->dir == BSP_IIC_DIR_TX) {
+        if (msg->dir == (uint8_t)BSP_IIC_DIR_TX) {
             return HAL_I2C_Mem_Write_DMA(hi2c, dev_addr, msg->mem_addr,
                                          mem_size, msg->data, msg->len);
         }
@@ -133,7 +135,7 @@ static HAL_StatusTypeDef BSP_IIC_StartHal(bsp_iic_t *bus,
                                     mem_size, msg->data, msg->len);
     }
 
-    if (msg->dir == BSP_IIC_DIR_TX) {
+    if (msg->dir == (uint8_t)BSP_IIC_DIR_TX) {
         return HAL_I2C_Master_Transmit_DMA(hi2c, dev_addr,
                                            msg->data, msg->len);
     }
@@ -141,316 +143,245 @@ static HAL_StatusTypeDef BSP_IIC_StartHal(bsp_iic_t *bus,
 }
 
 /**
- * @brief 中止当前传输并复位外设
- * @param bus 总线对象
- * @retval 无
- * @note 仅任务上下文调用，且调用者已持锁。
- *
- *       HAL_I2C_DeInit() 在 State 为 BUSY 时会**直接返回 HAL_BUSY 且不做
- *       任何复位**（见 stm32f4xx_hal_i2c.c 开头的状态判断）。而本函数恰恰
- *       是在"上一笔传输超时、外设停在 BUSY"之后才被调用的——照原样写就是
- *       "越复位越坏"：DeInit 空转，MspDeInit 不执行（DMA 不停、中断不关），
- *       紧随其后的 Init 也因状态没归零而复位不彻底。
- *       所以先把状态机与锁强制拉回可用态，再走正常的 DeInit/Init。
- *       DeInit 会停掉 DMA 并关闭传输相关中断，Init 重新按 CubeMX 配置
- *       装回外设。从机把 SDA 拉死时本函数救不回来，那属于总线恢复的范畴。
- */
-static void BSP_IIC_Abort(bsp_iic_t *bus)
-{
-    I2C_HandleTypeDef *hi2c = (I2C_HandleTypeDef *)bus->hal;
-
-    hi2c->State = HAL_I2C_STATE_READY;
-    hi2c->Lock  = HAL_UNLOCKED;
-
-    (void)HAL_I2C_DeInit(hi2c);
-    (void)HAL_I2C_Init(hi2c);
-}
-
-/**
- * @brief 中断收尾：记录结果并唤醒等待者
+ * @brief 中断收尾：摘掉登记、清忙标志、调用完成回调
  * @param bus    总线对象
- * @param result 结果码
+ * @param status 本次结果
  * @retval 无
- * @note 只由 HAL 完成/错误回调调用。result 先写、通知后发，任务看到
- *       通知时 result 一定已经落盘。waiter 为 NULL 说明没人等（已超时
- *       放弃），此时只记录结果，不再通知任何人。
+ * @note 只由 HAL 完成/错误回调调用。先取局部量再清登记，最后才调 done：
+ *       回调里若立刻启动下一笔，新的登记不会被这一笔的清理踩掉。
  */
-static void BSP_IIC_CompleteFromISR(bsp_iic_t *bus, bsp_iic_status_t result)
+static void BSP_IIC_CompleteFromISR(const bsp_iic_t *bus,
+                                    bsp_iic_status_t status)
 {
-    TaskHandle_t waiter = bus->waiter;
-    BaseType_t   woken = pdFALSE;
+    bsp_iic_rt_t  *rt = bus->rt;
+    bsp_iic_done_t done = rt->done;
+    void          *ctx = rt->ctx;
 
-    bus->result = result;
+    rt->done = NULL;
+    rt->ctx  = NULL;
+    rt->busy = 0U;
 
-    if (waiter != NULL) {
-        vTaskNotifyGiveFromISR(waiter, &woken);
+    if (done != NULL) {
+        done(ctx, status);
     }
-
-    portYIELD_FROM_ISR(woken);
 }
 
 /*==============================================================================
  * 接口实现
  *============================================================================*/
 /**
- * @brief 初始化 IIC 总线驱动：轮询总线表，逐路登记
- * @retval BSP_IIC_OK: 初始化成功（已初始化的总线会被跳过）
- * @retval BSP_IIC_ERR_STATE: 某一路缺 HAL 句柄、互斥量未创建，或外设
- *         尚未回到 READY
- * @note 互斥量由 CubeMX 在 freertos.c 中创建、在实例定义处绑定，所以必须
- *       等 MX_FREERTOS_Init() 建完互斥量再调用（USER CODE BEGIN
- *       RTOS_MUTEX 内）；其余条件是 MX_I2Cx_Init() 已经执行过。本函数
- *       不能在中断里调用。新增一路 IIC 只需在 s_buses[] 追加实例，
- *       本函数不用改。
+ * @brief 初始化 IIC 驱动：逐路登记 HAL 句柄、外设状态与初始时钟
+ * @retval BSP_IIC_OK: 全部实例就绪（已就绪的实例会被跳过）
+ * @retval BSP_IIC_ERR_STATE: 某一路缺 HAL 句柄，或外设不在 READY
+ * @note 必须在 MX_I2Cx_Init() 之后调用；不碰任何 OS 对象。
  */
 bsp_iic_status_t BSP_IIC_Init(void)
 {
     size_t i;
 
-    /* ---------- 1. 逐路登记：句柄、互斥量、外设状态 ---------- */
     for (i = 0U; i < s_bus_count; i++) {
-        bsp_iic_t *bus = s_buses[i];
+        const bsp_iic_t *bus = s_buses[i];
+        I2C_HandleTypeDef *hi2c;
+        bsp_iic_rt_t *rt;
 
-        if (bus->initialized != 0U) {
+        if (bus->rt->initialized != 0U) {
             continue;
         }
-        if (bus->hal == NULL || bus->lock == NULL || *bus->lock == NULL) {
-            return BSP_IIC_ERR_STATE;
-        }
-        if (HAL_I2C_GetState((I2C_HandleTypeDef *)bus->hal) !=
-            HAL_I2C_STATE_READY) {
+        if (bus->hal == NULL) {
             return BSP_IIC_ERR_STATE;
         }
 
-        /* 清零上一轮可能残留的运行时状态，再标记本路可用 */
-        bus->waiter = NULL;
-        bus->result = BSP_IIC_OK;
-        bus->initialized = 1U;
+        hi2c = (I2C_HandleTypeDef *)bus->hal;
+        if (HAL_I2C_GetState(hi2c) != HAL_I2C_STATE_READY) {
+            return BSP_IIC_ERR_STATE;
+        }
+
+        rt = bus->rt;
+        rt->done       = NULL;
+        rt->ctx        = NULL;
+        rt->busy       = 0U;
+        rt->clk_now    = hi2c->Init.ClockSpeed;
+        rt->clk_init   = hi2c->Init.ClockSpeed;
+        rt->initialized = 1U;
     }
     return BSP_IIC_OK;
 }
 
 /**
- * @brief 提交一次 IIC 传输并阻塞等待完成
+ * @brief 设置总线时钟
  * @param bus 总线句柄，不能为 NULL
- * @param msg 传输命令，不能为 NULL；data 在函数返回前必须保持有效
- * @retval BSP_IIC_OK: 传输成功
- * @retval BSP_IIC_ERR_PARAM: 地址、方向、模式、长度或缓冲区非法
- * @retval BSP_IIC_ERR_STATE: 驱动未初始化
- * @retval BSP_IIC_ERR_TIMEOUT: 排队等锁超时，或传输超时
- * @retval BSP_IIC_ERR_NACK: 从机 NACK
- * @retval BSP_IIC_ERR_BUS: 总线错误
- * @retval BSP_IIC_ERR_HAL: HAL 启动失败或其他 HAL 错误
- * @note 多任务可并发调用，按互斥量排队，先抢到锁的先发送。timeout_ms
- *       同时用于排队和传输，两者共用一份预算。本函数不能在中断中
- *       调用，也不能被同一任务重入。超时后外设会被 DeInit/Init 复位，
- *       总线随即交给下一个排队的任务。
+ * @param hz  目标时钟（Hz）；传 0 表示回到初始化时登记的值
+ * @retval BSP_IIC_OK: 已生效（或本来就等于目标值）
+ * @retval BSP_IIC_ERR_PARAM: 句柄为空，或目标值为 0 且没有可回落的初值
+ * @retval BSP_IIC_ERR_STATE: 未初始化，或上一笔搬运还没收尾
+ * @retval BSP_IIC_ERR_HAL: HAL 拒绝重新初始化
+ * @note 时钟是整条总线共用的，所以只能在空闲时改；失败时把 Init 里的
+ *       时钟值改回原值并重试一次初始化，避免留下一份半改的配置。
  */
-bsp_iic_status_t BSP_IIC_Transfer(bsp_iic_t *bus, const bsp_iic_msg_t *msg)
+bsp_iic_status_t BSP_IIC_SetSpeed(const bsp_iic_t *bus, uint32_t hz)
 {
-    TickType_t timeout;
-    uint32_t   timeout_ms;
-    bsp_iic_status_t status;
+    I2C_HandleTypeDef *hi2c;
+    bsp_iic_rt_t *rt;
+    uint32_t target;
+
+    if (bus == NULL || bus->hal == NULL) {
+        return BSP_IIC_ERR_PARAM;
+    }
+
+    rt = bus->rt;
+    if (rt->initialized == 0U) {
+        return BSP_IIC_ERR_STATE;
+    }
+    if (rt->busy != 0U) {
+        return BSP_IIC_ERR_STATE;
+    }
+
+    target = (hz != 0U) ? hz : rt->clk_init;
+    if (target == 0U) {
+        return BSP_IIC_ERR_PARAM;
+    }
+    if (target == rt->clk_now) {
+        return BSP_IIC_OK;
+    }
+
+    hi2c = (I2C_HandleTypeDef *)bus->hal;
+    hi2c->Init.ClockSpeed = target;
+    if (HAL_I2C_Init(hi2c) != HAL_OK) {
+        hi2c->Init.ClockSpeed = rt->clk_now;
+        (void)HAL_I2C_Init(hi2c);
+        return BSP_IIC_ERR_HAL;
+    }
+
+    rt->clk_now = target;
+    return BSP_IIC_OK;
+}
+
+/**
+ * @brief 启动一次搬运并立即返回
+ * @param bus  总线句柄，不能为 NULL
+ * @param msg  传输命令，不能为 NULL；data 在 done 之前必须保持有效
+ * @param done 完成回调，可以为 NULL（只能靠 IsBusy 轮询）
+ * @param ctx  回调上下文，原样回传
+ * @retval BSP_IIC_OK: 已交给外设，完成点只在 done
+ * @retval BSP_IIC_ERR_PARAM: 地址、方向、模式、长度或缓冲区非法
+ * @retval BSP_IIC_ERR_STATE: 未初始化，或上一笔还没收尾
+ * @retval BSP_IIC_ERR_HAL: HAL 拒绝启动（启动失败时已复位外设）
+ * @note 启动失败会顺手复位外设：多半是上一笔的 STOP 没走完或 DMA 通道
+ *       还挂着，不复位的话下一笔同样起不来。
+ */
+bsp_iic_status_t BSP_IIC_StartTransfer(const bsp_iic_t *bus,
+                                       const bsp_iic_msg_t *msg,
+                                       bsp_iic_done_t done, void *ctx)
+{
+    bsp_iic_rt_t *rt;
 
     if (bus == NULL || msg == NULL) {
         return BSP_IIC_ERR_PARAM;
     }
-    if (bus->initialized == 0U) {
+    if (bus->hal == NULL) {
+        return BSP_IIC_ERR_PARAM;
+    }
+
+    rt = bus->rt;
+    if (rt->initialized == 0U) {
         return BSP_IIC_ERR_STATE;
     }
-    /* 调度器没跑起来时 pxCurrentTCB 为 NULL，下面 ulTaskNotifyTake() 会直接
-       解引用空指针 —— 在这里挡住，让"太早调用"变成一个可查的错误码。 */
-    if (xTaskGetSchedulerState() != taskSCHEDULER_RUNNING) {
+    if (rt->busy != 0U) {
         return BSP_IIC_ERR_STATE;
     }
+
     if (msg->data == NULL || msg->len == 0U) {
         return BSP_IIC_ERR_PARAM;
     }
-    if (msg->dev_addr > 0x7FU) {
+    if (msg->dev_addr > BSP_IIC_ADDR_MAX) {
         return BSP_IIC_ERR_PARAM;
     }
     if (msg->dir > (uint8_t)BSP_IIC_DIR_RX ||
         msg->mode > (uint8_t)BSP_IIC_MODE_MEM) {
         return BSP_IIC_ERR_PARAM;
     }
-    if (msg->mode == BSP_IIC_MODE_MEM &&
-        msg->mem_addr_size != 1U && msg->mem_addr_size != 2U) {
+    if (msg->mode == (uint8_t)BSP_IIC_MODE_MEM &&
+        (msg->mem_addr_size == 0U ||
+         msg->mem_addr_size > BSP_IIC_MEM_ADDR_SIZE_MAX)) {
         return BSP_IIC_ERR_PARAM;
     }
 
-    timeout_ms = (msg->timeout_ms != 0U) ?
-                 msg->timeout_ms : BSP_IIC_DEFAULT_TIMEOUT_MS;
-    timeout = pdMS_TO_TICKS(timeout_ms);
+    rt->done = done;
+    rt->ctx  = ctx;
+    rt->busy = 1U;
 
-    /* ---------- 1. 抢总线，抢不到说明排队已经超时 ---------- */
-    if (osMutexAcquire(*bus->lock, timeout) != osOK) {
-        return BSP_IIC_ERR_TIMEOUT;
-    }
-
-    /* ---------- 2. 清掉上次残留的通知，登记等待者 ---------- */
-    (void)ulTaskNotifyTake(pdTRUE, 0U);
-    bus->result = BSP_IIC_ERR_HAL;
-    bus->waiter = xTaskGetCurrentTaskHandle();
-
-    /* ---------- 3. 启动 DMA，这个调用立刻就返回 ---------- */
     if (BSP_IIC_StartHal(bus, msg) != HAL_OK) {
-        bus->waiter = NULL;
-        BSP_IIC_Abort(bus); /* 启动失败多半是外设卡住，顺手复位 */
-        (void)osMutexRelease(*bus->lock);
+        rt->done = NULL;
+        rt->ctx  = NULL;
+        rt->busy = 0U;
+        (void)BSP_IIC_Abort(bus);
         return BSP_IIC_ERR_HAL;
     }
 
-    /* ---------- 4. 睡到完成中断唤醒，或者超时 ---------- */
-    if (ulTaskNotifyTake(pdTRUE, timeout) == 0U) {
-        bus->waiter = NULL;
-        BSP_IIC_Abort(bus);
-        status = BSP_IIC_ERR_TIMEOUT;
-    } else {
-        status = bus->result;
+    return BSP_IIC_OK;
+}
+
+/**
+ * @brief 查询总线是否还有搬运未收尾
+ * @param bus 总线句柄
+ * @retval 1: 忙
+ * @retval 0: 空闲（句柄为空也返回 0）
+ */
+uint8_t BSP_IIC_IsBusy(const bsp_iic_t *bus)
+{
+    if (bus == NULL || bus->rt == NULL) {
+        return 0U;
+    }
+    return (bus->rt->busy != 0U) ? 1U : 0U;
+}
+
+/**
+ * @brief 中止当前搬运并把外设复位到可用状态
+ * @param bus 总线句柄
+ * @retval BSP_IIC_OK: 已复位
+ * @retval BSP_IIC_ERR_PARAM: 句柄为空
+ * @retval BSP_IIC_ERR_STATE: 未初始化
+ * @retval BSP_IIC_ERR_HAL: 复位后 HAL 重新初始化失败
+ * @note 先摘登记再动外设：迟到的完成中断不会再回调；这一笔的调用者要
+ *       自己判失败。
+ */
+bsp_iic_status_t BSP_IIC_Abort(const bsp_iic_t *bus)
+{
+    I2C_HandleTypeDef *hi2c;
+    bsp_iic_rt_t *rt;
+
+    if (bus == NULL || bus->hal == NULL) {
+        return BSP_IIC_ERR_PARAM;
     }
 
-    bus->waiter = NULL;
-    (void)osMutexRelease(*bus->lock);
-    return status;
-}
+    rt = bus->rt;
+    if (rt->initialized == 0U) {
+        return BSP_IIC_ERR_STATE;
+    }
 
-/**
- * @brief 直接向从机发送数据（RAW 模式）
- * @param bus      总线句柄，不能为 NULL
- * @param dev_addr 7 bit 从机地址，未左移
- * @param data     发送缓冲区，不能为 NULL
- * @param len      发送字节数，不能为 0
- * @retval BSP_IIC_OK: 发送成功
- * @retval BSP_IIC_ERR_PARAM: 参数非法
- * @retval BSP_IIC_ERR_STATE: 驱动未初始化
- * @retval BSP_IIC_ERR_TIMEOUT: 排队或传输超时
- * @retval BSP_IIC_ERR_NACK: 从机 NACK
- * @retval BSP_IIC_ERR_BUS: 总线错误
- * @retval BSP_IIC_ERR_HAL: HAL 错误
- */
-bsp_iic_status_t BSP_IIC_Write(bsp_iic_t *bus, uint16_t dev_addr,
-                               const uint8_t *data, uint16_t len)
-{
-    bsp_iic_msg_t msg;
+    rt->done = NULL;
+    rt->ctx  = NULL;
+    rt->busy = 0U;
 
-    msg.dev_addr = dev_addr;
-    msg.mem_addr = 0U;
-    msg.mem_addr_size = 1U;
-    msg.len = len;
-    msg.dir = (uint8_t)BSP_IIC_DIR_TX;
-    msg.mode = (uint8_t)BSP_IIC_MODE_RAW;
-    msg.data = (uint8_t *)data;
-    msg.timeout_ms = 0U;
+    hi2c = (I2C_HandleTypeDef *)bus->hal;
+    hi2c->State = HAL_I2C_STATE_READY;
+    hi2c->Lock  = HAL_UNLOCKED;
 
-    return BSP_IIC_Transfer(bus, &msg);
-}
-
-/**
- * @brief 直接从从机读取数据（RAW 模式）
- * @param bus      总线句柄，不能为 NULL
- * @param dev_addr 7 bit 从机地址，未左移
- * @param data     接收缓冲区，不能为 NULL
- * @param len      接收字节数，不能为 0
- * @retval BSP_IIC_OK: 读取成功
- * @retval BSP_IIC_ERR_PARAM: 参数非法
- * @retval BSP_IIC_ERR_STATE: 驱动未初始化
- * @retval BSP_IIC_ERR_TIMEOUT: 排队或传输超时
- * @retval BSP_IIC_ERR_NACK: 从机 NACK
- * @retval BSP_IIC_ERR_BUS: 总线错误
- * @retval BSP_IIC_ERR_HAL: HAL 错误
- */
-bsp_iic_status_t BSP_IIC_Read(bsp_iic_t *bus, uint16_t dev_addr,
-                              uint8_t *data, uint16_t len)
-{
-    bsp_iic_msg_t msg;
-
-    msg.dev_addr = dev_addr;
-    msg.mem_addr = 0U;
-    msg.mem_addr_size = 1U;
-    msg.len = len;
-    msg.dir = (uint8_t)BSP_IIC_DIR_RX;
-    msg.mode = (uint8_t)BSP_IIC_MODE_RAW;
-    msg.data = data;
-    msg.timeout_ms = 0U;
-
-    return BSP_IIC_Transfer(bus, &msg);
-}
-
-/**
- * @brief 向从机的 8 bit 寄存器子地址写数据（MEM 模式）
- * @param bus      总线句柄，不能为 NULL
- * @param dev_addr 7 bit 从机地址，未左移
- * @param reg      8 bit 寄存器子地址
- * @param data     发送缓冲区，不能为 NULL
- * @param len      发送字节数，不能为 0
- * @retval BSP_IIC_OK: 写入成功
- * @retval BSP_IIC_ERR_PARAM: 参数非法
- * @retval BSP_IIC_ERR_STATE: 驱动未初始化
- * @retval BSP_IIC_ERR_TIMEOUT: 排队或传输超时
- * @retval BSP_IIC_ERR_NACK: 从机 NACK
- * @retval BSP_IIC_ERR_BUS: 总线错误
- * @retval BSP_IIC_ERR_HAL: HAL 错误
- */
-bsp_iic_status_t BSP_IIC_WriteReg(bsp_iic_t *bus, uint16_t dev_addr,
-                                  uint8_t reg, const uint8_t *data,
-                                  uint16_t len)
-{
-    bsp_iic_msg_t msg;
-
-    msg.dev_addr = dev_addr;
-    msg.mem_addr = (uint16_t)reg;
-    msg.mem_addr_size = 1U;
-    msg.len = len;
-    msg.dir = (uint8_t)BSP_IIC_DIR_TX;
-    msg.mode = (uint8_t)BSP_IIC_MODE_MEM;
-    msg.data = (uint8_t *)data;
-    msg.timeout_ms = 0U;
-
-    return BSP_IIC_Transfer(bus, &msg);
-}
-
-/**
- * @brief 从从机的 8 bit 寄存器子地址读数据（MEM 模式）
- * @param bus      总线句柄，不能为 NULL
- * @param dev_addr 7 bit 从机地址，未左移
- * @param reg      8 bit 寄存器子地址
- * @param data     接收缓冲区，不能为 NULL
- * @param len      接收字节数，不能为 0
- * @retval BSP_IIC_OK: 读取成功
- * @retval BSP_IIC_ERR_PARAM: 参数非法
- * @retval BSP_IIC_ERR_STATE: 驱动未初始化
- * @retval BSP_IIC_ERR_TIMEOUT: 排队或传输超时
- * @retval BSP_IIC_ERR_NACK: 从机 NACK
- * @retval BSP_IIC_ERR_BUS: 总线错误
- * @retval BSP_IIC_ERR_HAL: HAL 错误
- */
-bsp_iic_status_t BSP_IIC_ReadReg(bsp_iic_t *bus, uint16_t dev_addr,
-                                 uint8_t reg, uint8_t *data,
-                                 uint16_t len)
-{
-    bsp_iic_msg_t msg;
-
-    msg.dev_addr = dev_addr;
-    msg.mem_addr = (uint16_t)reg;
-    msg.mem_addr_size = 1U;
-    msg.len = len;
-    msg.dir = (uint8_t)BSP_IIC_DIR_RX;
-    msg.mode = (uint8_t)BSP_IIC_MODE_MEM;
-    msg.data = data;
-    msg.timeout_ms = 0U;
-
-    return BSP_IIC_Transfer(bus, &msg);
+    (void)HAL_I2C_DeInit(hi2c);
+    if (HAL_I2C_Init(hi2c) != HAL_OK) {
+        return BSP_IIC_ERR_HAL;
+    }
+    return BSP_IIC_OK;
 }
 
 /*==============================================================================
  * HAL 回调覆盖
  *
- * HAL 只为 Master_*_DMA 调 Master*Cplt，只为 Mem_*_DMA 调 Mem*Cplt
- * （见 stm32f4xx_hal_i2c.c 中 I2C_MasterTransmitCplt / I2C_MasterReceiveCplt
- *  的 MEM_ADD 分支），两组不能互相替代：只实现"发送/接收完成"会让
- *  BSP_IIC_WriteReg/ReadReg 永远等不到完成。
- * 这里覆盖的是 HAL 的 __weak 完成回调，不是 I2C1_EV_IRQHandler 本身；
- * IRQ 向量仍由 Src/stm32f4xx_it.c 的 HAL_I2C_EV_IRQHandler() 分发。
+ * 一次传输的完成点有两个来源：I2Cx 的 EV 中断（ADDR 阶段、BTF、STOPF 等
+ * 事件推进状态机）与 DMA 流的中断（字节搬完）。HAL 把两者收在同一组
+ * 完成回调里，所以下面四个回调既可能从外设中断进，也可能从 DMA 中断进。
+ * 错误回调的来源是 I2Cx 的 ER 中断，或 DMA 流的错误中断。
+ * 这里覆盖的是 HAL 的 __weak 回调，不是 IRQ 入口本身。
  *============================================================================*/
 /**
  * @brief 主机发送完成回调
@@ -459,7 +390,7 @@ bsp_iic_status_t BSP_IIC_ReadReg(bsp_iic_t *bus, uint16_t dev_addr,
  */
 void HAL_I2C_MasterTxCpltCallback(I2C_HandleTypeDef *hi2c)
 {
-    bsp_iic_t *bus = BSP_IIC_FindBus(hi2c);
+    const bsp_iic_t *bus = BSP_IIC_FindBus(hi2c);
 
     if (bus != NULL) {
         BSP_IIC_CompleteFromISR(bus, BSP_IIC_OK);
@@ -473,7 +404,7 @@ void HAL_I2C_MasterTxCpltCallback(I2C_HandleTypeDef *hi2c)
  */
 void HAL_I2C_MasterRxCpltCallback(I2C_HandleTypeDef *hi2c)
 {
-    bsp_iic_t *bus = BSP_IIC_FindBus(hi2c);
+    const bsp_iic_t *bus = BSP_IIC_FindBus(hi2c);
 
     if (bus != NULL) {
         BSP_IIC_CompleteFromISR(bus, BSP_IIC_OK);
@@ -483,11 +414,12 @@ void HAL_I2C_MasterRxCpltCallback(I2C_HandleTypeDef *hi2c)
 /**
  * @brief 寄存器写完成回调
  * @param hi2c HAL IIC 句柄
- * @note 强定义覆盖 HAL 的 __weak 版本；MEM 写路径的完成点。
+ * @note 强定义覆盖 HAL 的 __weak 版本；MEM 写路径的完成点。RAW 与 MEM
+ *       两条路径的回调不能互相替代，HAL 按传输类型分别调用。
  */
 void HAL_I2C_MemTxCpltCallback(I2C_HandleTypeDef *hi2c)
 {
-    bsp_iic_t *bus = BSP_IIC_FindBus(hi2c);
+    const bsp_iic_t *bus = BSP_IIC_FindBus(hi2c);
 
     if (bus != NULL) {
         BSP_IIC_CompleteFromISR(bus, BSP_IIC_OK);
@@ -501,7 +433,7 @@ void HAL_I2C_MemTxCpltCallback(I2C_HandleTypeDef *hi2c)
  */
 void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c)
 {
-    bsp_iic_t *bus = BSP_IIC_FindBus(hi2c);
+    const bsp_iic_t *bus = BSP_IIC_FindBus(hi2c);
 
     if (bus != NULL) {
         BSP_IIC_CompleteFromISR(bus, BSP_IIC_OK);
@@ -512,10 +444,11 @@ void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c)
  * @brief 错误回调：把 HAL ErrorCode 翻译成 BSP 返回码
  * @param hi2c HAL IIC 句柄
  * @note AF -> NACK；BERR/ARLO/OVR -> BUS；TIMEOUT -> TIMEOUT；其余 HAL。
+ *       只有登记着回调时才收结果：Abort 之后迟到的错误不会惊动调用者。
  */
 void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c)
 {
-    bsp_iic_t *bus = BSP_IIC_FindBus(hi2c);
+    const bsp_iic_t *bus = BSP_IIC_FindBus(hi2c);
     bsp_iic_status_t result;
 
     if (bus == NULL) {

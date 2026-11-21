@@ -6,8 +6,8 @@
 #   本层没有集中式板级文件。
 #   头文件里只有不透明的 dev_*_t（布局在 .c），所以 bsp_gpio / bsp_spi 一律
 #   写 PRIVATE：需要它们的是本模块的 .c，上层既不需要也拿不到 BSP 的头。
-#   虚拟外设（dev_spi：总线独占、片选、帧）也平铺在本层，实体设备（如
-#   dev_st7789）只用它的头，不直接碰 BSP_SPI。
+#   虚拟外设（dev_spi / dev_iic：总线独占、片选或地址绑定、帧与等待）也平铺
+#   在本层，实体设备（如 dev_st7789）只用它的头，不直接碰 BSP_SPI。
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -57,6 +57,42 @@ target_link_libraries(dev_spi
     PRIVATE stm32cubemx
 )
 target_compile_options(dev_spi PRIVATE ${USER_WARN_FLAGS})
+
+# -----------------------------------------------------------------------------
+# dev_iic：IIC 虚拟外设（总线独占 + 地址与速率绑定 + 等待与超时）
+#   对上只暴露"向某颗从机读写若干字节"；芯片侧的 DMA 启动、完成回调、
+#   速率换挡、外设复位全在 BSP_IIC。IIC_LOCK 互斥量由 CubeMX 生成后注入。
+#   bsp_iic / stm32cubemx 都写 PRIVATE：需要它们的只有本模块的 .c。
+# -----------------------------------------------------------------------------
+add_library(dev_iic STATIC
+    Dev_IIC/dev_iic.c
+)
+target_include_directories(dev_iic
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/Dev_IIC
+)
+target_link_libraries(dev_iic
+    PRIVATE bsp_iic
+    PRIVATE stm32cubemx
+)
+target_compile_options(dev_iic PRIVATE ${USER_WARN_FLAGS})
+
+# -----------------------------------------------------------------------------
+# dev_uart：UART 虚拟外设（写入串行化 + 超时等待 + 发完判定）
+#   对上只暴露"读若干字节 / 写若干字节 / 等发完"；芯片侧的 DMA 收发、
+#   乒乓接收、FIFO 搬运、错误重启全在 BSP_UART。UART1_LOCK 由 CubeMX 生成。
+#   bsp_uart / stm32cubemx 都写 PRIVATE：需要它们的只有本模块的 .c。
+# -----------------------------------------------------------------------------
+add_library(dev_uart STATIC
+    Dev_UART/dev_uart.c
+)
+target_include_directories(dev_uart
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/Dev_UART
+)
+target_link_libraries(dev_uart
+    PRIVATE bsp_uart
+    PRIVATE stm32cubemx
+)
+target_compile_options(dev_uart PRIVATE ${USER_WARN_FLAGS})
 
 # -----------------------------------------------------------------------------
 # dev_st7789：ST7789 SPI 彩屏（开窗 + 突发写像素）

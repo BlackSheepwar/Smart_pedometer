@@ -23,14 +23,15 @@
  *       HAL 的 HT 回调传 Size/2、TC 传 Size、IDLE 传 Size - NDTR，三者含义
  *       不一致；统一换算成"当前写指针位置"后再发布，只有一套边界逻辑。
  *
- *       OS 对象归属：每口一把互斥量，由 .ioc 配置、freertos.c 生成，
- *       本文件只 extern。BSP_UART_Init() 必须放 USER CODE BEGIN RTOS_MUTEX，
- *       那里句柄才建好；HAL 回调是强符号，靠这次调用把本目标拉进镜像。
+ *       OS 对象归属：本文件不碰任何 OS 对象。互斥量、等待、超时与"发完没有"
+ *       的判定都在设备层（dev_uart）；本层在 HAL 回调里只做 memcpy 与索引
+ *       更新，任务侧接口一律不阻塞。HAL 回调是强符号，靠 BSP_UART_Init()
+ *       把本目标拉进镜像。
  *
  *       并发契约：
  *         接收  单生产者（DMA/ISR 写 head）单消费者（一个任务写 tail），无锁；
- *         发送  多生产者（任意任务写 head，本口自己的 LOCK 排队）单消费者
- *               （ISR 写 tail），"检查 busy + 启动 DMA"用 PRIMASK 临界区保护。
+ *         发送  写入方由上层串行化（本层不加锁），ISR 写 tail；
+ *               "检查 busy + 启动 DMA"用 PRIMASK 临界区保护。
  *       RX DMA 流与 UART 中断必须同优先级：IDLE 走 USARTx_IRQn，
  *       HT/TC 走 DMA 流中断，同级才不会互相打断发布位置的计算。
  *
@@ -38,9 +39,8 @@
  *       HAL_UART_Transmit_DMA() 之类的接口，否则 tx_busy 与实际状态脱节，
  *       后续 Write 会一直判定"正在发送"。
  *
- *       实例：每路一套缓冲、一把锁，互不排队。上层不取数据时接收 FIFO
- *       只进不出，超容量后按设计丢弃并累加 rx_overflow——这是"接口先留好、
- *       数据源后接"的正常状态，不是故障。
+ *       实例：每路一套缓冲。上层不取数据时接收 FIFO 只进不出，超容量后按
+ *       设计丢弃并累加 rx_overflow。
  */
 
 /*==============================================================================
@@ -53,25 +53,10 @@
 #include "bsp_uart.h"
 // 功能包含
 #include "usart.h"
-#include "FreeRTOS.h"
-#include "task.h"
-#include "cmsis_os.h"
-
-/*==============================================================================
- * 外部变量声明
- *============================================================================*/
-/** @brief 每口一把互斥量，用于发送队列的生产者排队
- *  @note 由 .ioc 生成、freertos.c 定义；一个口的发送排队不会挡住另一个口。 */
-extern osMutexId_t UART1_LOCKHandle;
 
 /*==============================================================================
  * 宏定义与常量
  *============================================================================*/
-/** @brief 等锁的默认超时（ms）：拿不到锁说明有任务正卡在发送路径上 */
-#define BSP_UART_LOCK_TIMEOUT_MS    100U
-
-/** @brief Flush 的默认超时（ms），调用者传 0 时使用 */
-#define BSP_UART_FLUSH_TIMEOUT_MS   100U
 
 /** @brief USART1 接收 DMA 乒乓缓冲：整块被 DMA 循环写，两个半区各半
  *  @note 半区时间 = 半区字节数 × 10 / 波特率；数值必须是 2 的倍数、不小于 16。 */
@@ -103,12 +88,10 @@ extern osMutexId_t UART1_LOCKHandle;
  * @brief UART 句柄（布局只在 .c 里出现）
  * @note 只放配置，不放运行时状态：句柄是 const，进 .rodata 不占 RAM；
  *       索引与计数放 s_rt[]，两者按下标一一对应。
- *       hal 用 void *，避免头文件引入 HAL；lock 存句柄变量的地址，
- *       句柄值要等 freertos.c 运行时才产生。
+ *       hal 用 void *，避免头文件引入 HAL。
  */
 struct bsp_uart {
     void             *hal;          /* HAL UART 句柄（UART_HandleTypeDef *） */
-    osMutexId_t      *lock;         /* 指向 freertos.c 生成的互斥量句柄 */
     uint8_t          *rx_dma;       /* DMA 循环写缓冲，长度 rx_dma_size */
     uint8_t          *rx_fifo;      /* 接收环形 FIFO，长度 rx_fifo_size */
     uint8_t          *tx_fifo;      /* 发送环形 FIFO，长度 tx_fifo_size */
@@ -146,10 +129,9 @@ static uint8_t s_uart1_rx_fifo[BSP_UART1_RX_FIFO_SIZE];
 /** @brief USART1 发送环形 FIFO，容量 512，可用 511 字节 */
 static uint8_t s_uart1_tx_fifo[BSP_UART1_TX_FIFO_SIZE];
 
-/** @brief USART1 配置句柄；hal / lock 都指向 CubeMX 生成的句柄 */
+/** @brief USART1 配置句柄；hal 指向 CubeMX 生成的 HAL 句柄 */
 const bsp_uart_t bsp_uart1 = {
     .hal          = &huart1,
-    .lock         = &UART1_LOCKHandle,
     .rx_dma       = s_uart1_rx_dma,
     .rx_fifo      = s_uart1_rx_fifo,
     .tx_fifo      = s_uart1_tx_fifo,
@@ -403,11 +385,10 @@ static uint16_t BSP_UART_Copy_Out(bsp_uart_rt_t *rt, uint8_t *buf,
 /**
  * @brief 初始化 UART 驱动并启动接收 DMA
  * @retval BSP_UART_OK: 全部实例就绪（已就绪的实例会被跳过）
- * @retval BSP_UART_ERR_STATE: 缺 HAL 句柄、互斥量尚未创建、UART 不在 READY，
+ * @retval BSP_UART_ERR_STATE: 缺 HAL 句柄、UART 不在 READY，
  *         或收发 DMA 通道未配置
  * @retval BSP_UART_ERR_HAL: 接收 DMA 启动失败
- * @note 必须在 USER CODE BEGIN RTOS_MUTEX 内调用（CubeMX 刚建完各口互斥量），
- *       且 MX_USARTx_UART_Init() 已执行过。不能在中断里调用。
+ * @note 必须在 MX_USARTx_UART_Init() 之后调用，不能在中断里调用。
  *       若 .ioc 把接收 DMA 配成 Normal，这里会改成 Circular 并重新
  *       HAL_DMA_Init()——乒乓模型依赖硬件循环写，Normal 模式只收一圈就停。
  */
@@ -423,11 +404,8 @@ bsp_uart_status_t BSP_UART_Init(void)
         if (rt->ready != 0U) {
             continue;
         }
-        if ((cfg == NULL) || (cfg->hal == NULL) || (cfg->lock == NULL)) {
+        if ((cfg == NULL) || (cfg->hal == NULL)) {
             return BSP_UART_ERR_STATE;
-        }
-        if (*cfg->lock == NULL) {
-            return BSP_UART_ERR_STATE;   /* 本口的 LOCK 还没被 osMutexNew 建出来 */
         }
 
         hal = (UART_HandleTypeDef *)cfg->hal;
@@ -598,13 +576,13 @@ uint16_t BSP_UART_Tx_Free(const bsp_uart_t *uart)
 
 /**
  * @brief 把数据排入发送队列，立即返回
- * @param uart UART 句柄，不可为 NULL
+ * @param uart UART 句柄，可为 NULL
  * @param buf  待发送数据，不可为 NULL
  * @param len  请求发送的字节数，不能为 0
  * @retval 实际排入队列的字节数，小于 len 说明队列满了（剩余部分被丢弃）
- * @note 多任务可并发调用，内部用本口自己的 LOCK 排队，一次调用排入的 len 字节在
- *       队列里连续，不会与其他任务的数据交错——所以"一帧一次 Write"就是
- *       帧级原子的。会短暂阻塞等锁，不得在中断中调用。
+ * @note 本层不加锁：两个调用者同时进来，各自的字节可能在队列里交错。
+ *       需要"一帧一次 Write 即帧级原子"的调用者由设备层（dev_uart）串行化。
+ *       不得在中断中调用。
  */
 uint16_t BSP_UART_Write(const bsp_uart_t *uart, const uint8_t *buf, uint16_t len)
 {
@@ -620,11 +598,6 @@ uint16_t BSP_UART_Write(const bsp_uart_t *uart, const uint8_t *buf, uint16_t len
         return 0U;
     }
 
-    /* ---------- 1. 抢发送锁：生产者之间排队，防止 head 被并发改写 ---------- */
-    if (osMutexAcquire(*uart->lock, pdMS_TO_TICKS(BSP_UART_LOCK_TIMEOUT_MS)) != osOK) {
-        return 0U;
-    }
-
     cfg = rt->cfg;
     mask = (uint16_t)(cfg->tx_fifo_size - 1U);
     head = rt->tx_head;
@@ -634,7 +607,7 @@ uint16_t BSP_UART_Write(const bsp_uart_t *uart, const uint8_t *buf, uint16_t len
         len = space;   /* 放不下的部分调用者自己重发，BSP 不做阻塞等待 */
     }
 
-    /* ---------- 2. 入队：跨过 FIFO 末尾就分两段写 ---------- */
+    /* ---------- 1. 入队：跨过 FIFO 末尾就分两段写 ---------- */
     if (len > 0U) {
         first = (uint16_t)(cfg->tx_fifo_size - head);
         if (first > len) {
@@ -647,49 +620,36 @@ uint16_t BSP_UART_Write(const bsp_uart_t *uart, const uint8_t *buf, uint16_t len
         rt->tx_head = (uint16_t)((head + len) & mask);
     }
 
-    /* ---------- 3. DMA 若空闲就立刻发，否则等 TC 回调接续 ---------- */
+    /* ---------- 2. DMA 若空闲就立刻发，否则等 TC 回调接续 ---------- */
     BSP_UART_Tx_Kick(rt);
 
-    (void)osMutexRelease(*uart->lock);
     return len;
 }
 
 /**
- * @brief 等待发送队列排空且最后一个字节移出移位寄存器
- * @param uart       UART 句柄，不可为 NULL
- * @param timeout_ms 超时预算（毫秒），0 表示用默认 100 ms
- * @retval BSP_UART_OK: 已发完
- * @retval BSP_UART_ERR_PARAM: 句柄非法或驱动未就绪
- * @retval BSP_UART_ERR_TIMEOUT: 超时仍有数据未发完
- * @note 每 1 ms 让出一次 CPU，不要在中断里调用。发送前若刚 Write 完就
- *       Flush，返回时对端已收到最后一个字节的停止位。
+ * @brief 查询发送路径是否已经空闲
+ * @param uart UART 句柄，可为 NULL
+ * @retval 1: 队列已空、发送 DMA 已停、外设状态机已回到 READY
+ * @retval 0: 仍有数据没发完，或句柄非法/未初始化
+ * @note 只回答"现在空不空"，不等待、不延时。要"等发完"由设备层轮询本函数。
  */
-bsp_uart_status_t BSP_UART_Flush(const bsp_uart_t *uart, uint32_t timeout_ms)
+uint8_t BSP_UART_Tx_Idle(const bsp_uart_t *uart)
 {
     bsp_uart_rt_t *rt = BSP_UART_Find(uart);
     UART_HandleTypeDef *hal;
-    uint32_t tickstart;
 
     if ((rt == NULL) || (rt->ready == 0U)) {
-        return BSP_UART_ERR_PARAM;
-    }
-    if (timeout_ms == 0U) {
-        timeout_ms = BSP_UART_FLUSH_TIMEOUT_MS;
+        return 0U;
     }
 
     hal = (UART_HandleTypeDef *)rt->cfg->hal;
-    tickstart = HAL_GetTick();
 
-    /* ---------- 队列空 + DMA 停 + 发送状态机回到 READY 才算真发完 ---------- */
-    while ((rt->tx_head != rt->tx_tail) ||
-           (rt->tx_busy != 0U) ||
-           (hal->gState != HAL_UART_STATE_READY)) {
-        if ((HAL_GetTick() - tickstart) > timeout_ms) {
-            return BSP_UART_ERR_TIMEOUT;
-        }
-        (void)osDelay(1U);
+    /* 队列空 + DMA 停 + 发送状态机回到 READY 才算真发完 */
+    if ((rt->tx_head != rt->tx_tail) || (rt->tx_busy != 0U) ||
+        (hal->gState != HAL_UART_STATE_READY)) {
+        return 0U;
     }
-    return BSP_UART_OK;
+    return 1U;
 }
 
 /*==============================================================================

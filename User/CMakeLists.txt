@@ -47,8 +47,11 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     bsp_iic
     bsp_spi
     bsp_uart
-    # Device 层（虚拟外设：freertos.c 里直接调 Dev_SPI_Init）
+    # Device 层（虚拟外设：freertos.c 里直接调 Dev_SPI_Init / Dev_IIC_Init /
+    # Dev_UART_Init）
     dev_spi
+    dev_iic
+    dev_uart
     # Service 层
     svc_key_logic
     # APP 层（app_key_cmd / app_screen / app_ui_port 由各自模块的内部依赖引入）
