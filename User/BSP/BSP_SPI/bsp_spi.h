@@ -9,26 +9,26 @@
  *       多设备各要各的速率，全部在设备层的 Dev_SPI（dev_spi.h）里；
  *       本层不 include 任何设备头，也不知道自己正在给谁搬字节。
  *
- *       这样切是为了让"换芯片只改这一层"成立：HAL 调用、完成回调、
- *       分频表、错误恢复都是芯片知识，留在这里；而"哪台设备占着总线、
- *       它的片选该不该低"与芯片无关，换 MCU 一个字都不用动。
+ *       HAL 调用、完成回调、分频表、错误恢复都是芯片知识，留在本层；
+ *       哪台设备占着总线、它的片选该不该低，与芯片无关，留在 Dev_SPI。
  *
- *       搬运方式在编译期由 BSP_SPI_TRANSFER_MODE 三选一（0 阻塞 / 1 中断 /
- *       2 DMA），每次编译只保留选中的那条路径。中断与 DMA 的对外契约完全
- *       相同：BSP_SPI_StartTransfer() 启动即返回 BSP_SPI_OK，完成或出错时
- *       在中断里回调 done(ctx, status)，调用者自己决定是睡等、置标志还是
- *       轮询；这两种方式都可以用 BSP_SPI_IsBusy() 查是否还在进行。阻塞方式
- *       在函数里同步搬完，返回即已结束，done 不会被调用。切换方式不改变
- *       任何调用点的写法。
+ *       搬运方式按能力分档：0 无功能 / 1 阻塞 / 2 中断 / 3 DMA。两路的实际
+ *       能力由 BSP_SPI_Init() 从 HAL 句柄探测（方向允许不允许、有没有挂
+ *       DMA 流），结果记在运行期的 rt 里，句柄本身不写能力值——能力是
+ *       CubeMX 的配置结果，不是靠人手抄进代码的常量。
+ *       可以用的那几档对外契约相同：BSP_SPI_StartTransfer() 启动即返回
+ *       BSP_SPI_OK，完成或出错时在中断里回调 done(ctx, status)，也可以用
+ *       BSP_SPI_IsBusy() 查是否还在进行；阻塞档在函数里同步搬完，返回即结束，
+ *       done 不会被调用。
  *
  *       本层不等待、不通知、不持锁，因此不依赖 FreeRTOS，裸机也能直接用。
  *       回调运行在中断上下文，必须 ISR 安全（不能拿互斥量、不能睡）。
  *       超时与重试策略属于使用方：等待超时后调用 BSP_SPI_Abort() 中止，
  *       Abort 会清掉回调登记，迟到的完成回调不会再惊动任何人。
  *
- *       方向能力与 DMA 能力是总线句柄的配置项，BSP_SPI_Init() 会与 HAL 的
- *       实配逐项核对，不一致直接拒绝初始化；本次传输的方向不被支持时返回
- *       ERR_MODE。本层只服务 Master，配成 Slave 会在初始化时被拒。
+ *       某一路探测为"无功能"时，该方向的传输直接返回 ERR_MODE（接收只认
+ *       2LINES，1LINE 与 RXONLY 都不能收）。本层只服务 Master，配成 Slave
+ *       会在初始化时被拒。
  *
  *       速率按请求值切换：BSP_SPI_SetRate() 求"不超过请求值"的分频并写入
  *       外设。改 BR 必须关掉 SPE，因此只能在总线空闲、片选全高时调用——
@@ -47,30 +47,19 @@
 #include <stdint.h>
 
 /*==============================================================================
- * 传输方式配置
+ * 方向能力取值
  *============================================================================*/
-/** @brief 阻塞方式：调用 HAL 阻塞接口，返回时已搬完 */
-#define BSP_SPI_MODE_BLOCKING  0U
+/** @brief 该方向无功能：没接线，或 HAL 的配置不允许这个方向 */
+#define BSP_SPI_CAP_NONE     0U
 
-/** @brief 中断方式：调用 HAL 中断接口，启动即返回，完成点在外设中断里 */
-#define BSP_SPI_MODE_IT        1U
+/** @brief 只能阻塞搬运：调用返回时已搬完，不占用中断 */
+#define BSP_SPI_CAP_BLOCKING 1U
 
-/** @brief DMA 方式：调用 HAL DMA 接口，启动即返回，完成点在 DMA 中断里 */
-#define BSP_SPI_MODE_DMA       2U
+/** @brief 可用外设中断：每字节一次中断，收尾时才回调 */
+#define BSP_SPI_CAP_IT       2U
 
-/**
- * @brief 本层使用的搬运方式，取 BSP_SPI_MODE_* 之一
- * @note 方式在编译期定死，运行期不查、也不做"这次用哪种"的协商：一种方式
- *       对应一套中断时序与一套错误恢复路径，混用会把两者都搅乱。
- *       取值超出 0~2 在编译期就报错，不会拖到运行期才发现。
- */
-#ifndef BSP_SPI_TRANSFER_MODE
-#define BSP_SPI_TRANSFER_MODE  BSP_SPI_MODE_IT
-#endif
-
-#if (BSP_SPI_TRANSFER_MODE > BSP_SPI_MODE_DMA)
-#error "BSP_SPI_TRANSFER_MODE 只能取 0阻塞、1中断、2DMA"
-#endif
+/** @brief 可用 DMA：启动后由 DMA 中断收尾，CPU 不参与搬字节 */
+#define BSP_SPI_CAP_DMA      3U
 
 /*==============================================================================
  * 类型定义
@@ -85,15 +74,18 @@ typedef enum {
     BSP_SPI_ERR_TIMEOUT = -3, /* 阻塞方式传输超时 */
     BSP_SPI_ERR_MODE    = -4, /* 外设当前配置不支持该方向 */
     BSP_SPI_ERR_BUS     = -5, /* 总线错误：MODF / OVR / CRC */
+    /* -6 空号：数值即契约，重排会把调用者手里的旧比较结果静默改掉 */
     BSP_SPI_ERR_HAL     = -7, /* HAL 启动失败或传输中出错 */
 } bsp_spi_status_t;
 
 /**
  * @brief SPI 总线句柄（不透明类型，成员定义在 bsp_spi.c）
- * @note 一个总线句柄对一个 HAL 外设，句柄本身就是"这条总线怎么工作"的
- *       完整说明：用哪个外设、输入时钟多少、支持哪些方向、有没有 DMA。
- *       这四项都是配置，句柄 const 进 .rodata；运行期状态（忙标志、回调
- *       登记、当前分频）放在 .c 的内部对象里，头文件不暴露。
+ * @note 一个总线句柄对一个 HAL 外设，句柄登记的是"用哪个外设、输入时钟
+ *       多少"这类配置；收发两路各能做到哪一档不写在这里，由
+ *       BSP_SPI_Init() 从 HAL 句柄探测后记进运行期对象——能力是 CubeMX
+ *       的配置结果，抄一遍就成了两份会漂移的事实。
+ *       句柄 const 进 .rodata；运行期状态（忙标志、回调登记、当前分频、
+ *       两路探测结果）放在 .c 的内部对象里，头文件不暴露。
  *       输入时钟是句柄的配置项，不是调用时现取：它是板级事实，填进句柄后
  *       分频计算只剩一次除法，调用路径上不碰时钟树的查询接口。
  */
@@ -124,14 +116,15 @@ extern const bsp_spi_t bsp_spi1;
  * 函数声明
  *============================================================================*/
 /**
- * @brief 初始化 SPI 驱动：核对句柄配置、登记 HAL 实配与初始分频
+ * @brief 初始化 SPI 驱动：探测两路的实际搬运能力，记进运行期对象
  * @retval BSP_SPI_OK: 初始化成功（已初始化的总线会被跳过）
- * @retval BSP_SPI_ERR_PARAM: 句柄漏填输入时钟（pclk_hz 为 0），或句柄登记的
- *         方向能力 / DMA 能力与 HAL 实配不一致
+ * @retval BSP_SPI_ERR_PARAM: 句柄漏填输入时钟（pclk_hz 为 0）
  * @retval BSP_SPI_ERR_STATE: 缺 HAL 句柄、外设非 READY、Mode 不是 Master，
  *         或数据宽度不是 8 bit
  * @note 必须在 MX_SPIx_Init() 之后调用，且不能在中断里调用。总线互斥量
  *       不属于本层：它的创建与检查在 Dev_SPI_Init() 里。
+ *       探测看两件事：方向允不允许这一路（2LINES / 1LINE / RXONLY），以及
+ *       这一路有没有挂 DMA 流。结果只记运行期，句柄不写能力值。
  */
 bsp_spi_status_t BSP_SPI_Init(void);
 
@@ -163,17 +156,19 @@ bsp_spi_status_t BSP_SPI_SetRate(const bsp_spi_t *bus, uint32_t sck_hz);
  * @param ctx        回调上下文，原样传回 done
  * @retval BSP_SPI_OK: 异步方式已启动（尚未完成）；阻塞方式已搬完且成功
  * @retval BSP_SPI_ERR_PARAM: 句柄或长度非法，或两个缓冲区都为 NULL
- * @retval BSP_SPI_ERR_STATE: 驱动未初始化
+ * @retval BSP_SPI_ERR_STATE: 驱动未初始化，或上一笔异步传输还没收尾
  * @retval BSP_SPI_ERR_MODE: 外设当前方向不支持本次传输
  * @retval BSP_SPI_ERR_TIMEOUT: 阻塞方式传输超时
- * @retval BSP_SPI_ERR_HAL: 启动失败，或阻塞方式传输出错
+ * @retval BSP_SPI_ERR_HAL: 各档位都启动失败，或阻塞方式传输出错
  * @retval BSP_SPI_ERR_BUS: 阻塞方式遇到总线错误
  * @note 调用者必须已持有总线、已拉低目标设备的片选、已把速率切好；
  *       这三件事都在 Dev_SPI 里做。方向由 tx / rx 推出：只发 / 只收 /
  *       全双工 / ERR_PARAM。异步方式返回 OK 不等于搬完，要靠 done 或
  *       IsBusy() 才知道结束；阻塞方式返回 OK 即为搬完。
- *       DMA 方式下，若这条总线缺本次方向所需的 DMA 通道，会自动退回阻塞
- *       方式同步完成，此时 done 同样不会被调用。
+ *       生效档位由 Init 探测出的两路能力决定，全双工取两路中较低的一档；
+ *       该档启动失败就向下退档重试，直到阻塞档（DMA → 中断 → 阻塞）。
+ *       某一档一旦启动成功，本次传输就固定在该档，不会中途换。
+ *       退到阻塞档时同步搬完，done 不会被调用。
  *       不得在中断里调用。
  */
 bsp_spi_status_t BSP_SPI_StartTransfer(const bsp_spi_t *bus,

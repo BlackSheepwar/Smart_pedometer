@@ -56,7 +56,7 @@ extern osMutexId_t SPI1_LOCKHandle;
  * @note 帧主与帧设备成对存在：两者都为 NULL 表示总线空闲，只有本任务 +
  *       本设备同时匹配才算"这一帧是我开的"。
  */
-typedef struct dev_spi_rt {
+typedef struct {
     TaskHandle_t volatile frame_owner; /* 当前持有帧事务的任务，空闲为 NULL */
     const dev_spi_dev_t  *frame_dev;   /* 当前帧对应的设备，空闲为 NULL */
     volatile dev_spi_status_t result;  /* 最近一次传输结果，由中断写入 */
@@ -70,11 +70,11 @@ typedef struct dev_spi_rt {
  * @note 指向 BSP 的总线句柄与 freertos.c 生成的互斥量；两者都在 .rodata，
  *       可变状态在 rt 里。
  */
-struct dev_spi {
+typedef struct {
     const bsp_spi_t *bsp;  /* BSP 总线：速率与字节搬运由它完成 */
     osMutexId_t     *lock; /* 指向 freertos.c 生成的互斥量句柄 */
     dev_spi_rt_t    *rt;   /* 运行期状态，定义在本文件内 */
-};
+} dev_spi_t;
 
 /**
  * @brief SPI 设备对象
