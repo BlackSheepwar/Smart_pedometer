@@ -4,7 +4,8 @@
  * @author Ricardo
  * @date 2026-11-21
  *
- * @note 本层只导出设备句柄：总线对象定义在 .c 里，不出头文件、不写 extern。
+ * @note 本层只导出设备句柄：总线对象定义在 .c 里，出头文件的只有设备类型，
+ *       总线类型连 typedef 都不出现，也就没有人能 include 到它。
  *       一颗从机器件对应一个设备实例，实例里写死它的 7 bit 地址、总线
  *       时钟与寄存器子地址宽度；上层的每一笔读写都以设备句柄为入口，
  *       不需要知道从机地址，也不需要知道总线是谁。
@@ -43,11 +44,6 @@ typedef enum {
     /* -6 空号：数值即契约，重排会把调用者手里的旧比较结果静默改掉 */
     DEV_IIC_ERR_HAL     = -7, /* HAL 报错（配置错或外设故障） */
 } dev_iic_status_t;
-
-/**
- * @brief IIC 总线对象（不透明，定义在 dev_iic.c）
- */
-typedef struct dev_iic dev_iic_t;
 
 /**
  * @brief IIC 从机设备句柄（不透明，定义在 dev_iic.c）

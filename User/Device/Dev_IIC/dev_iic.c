@@ -58,13 +58,13 @@ typedef struct {
 } dev_iic_rt_t;
 
 /**
- * @brief IIC 总线对象（不出头文件）
+ * @brief IIC 总线对象
  */
-struct dev_iic {
+typedef struct {
     const bsp_iic_t *bsp;  /* 芯片侧总线句柄 */
     osMutexId_t     *lock; /* 指向 CubeMX 生成的互斥量句柄 */
     dev_iic_rt_t    *rt;   /* 运行期状态 */
-};
+} dev_iic_t;
 
 /**
  * @brief 从机设备句柄
@@ -145,13 +145,17 @@ static void Dev_IIC_OnDone(void *ctx, bsp_iic_status_t status)
 }
 
 /**
- * @brief 执行一笔传输：抢总线 → 换速 → 启动 → 等完成
+ * @brief 执行一笔传输：抢总线 → 按本设备登记的速度改总线时钟 → 启动 → 等完成
  * @param dev        设备句柄
  * @param msg        传输命令
  * @param timeout_ms 总预算（ms），0 表示用默认值
  * @retval DEV_IIC_OK: 成功
  * @retval 其他: 失败原因
  * @note 进入前已校验句柄；本函数负责加锁与解锁，任何出口都不漏锁。
+ *       换速改的是整条总线的 SCL，不是这颗器件自己的时钟：上一笔可能是
+ *       另一颗器件、另一个速率，所以每次开口前都要把总线恢复到本设备的
+ *       速率；目标值与当前值相同的时候 BSP 直接返回，不重写分频。
+ *       阻塞方式在启动函数里已经搬完，此时没有通知可等。
  */
 static dev_iic_status_t Dev_IIC_Run(const dev_iic_dev_t *dev,
                                     const bsp_iic_msg_t *msg,
@@ -160,6 +164,7 @@ static dev_iic_status_t Dev_IIC_Run(const dev_iic_dev_t *dev,
     const dev_iic_t *bus;
     dev_iic_rt_t *rt;
     TickType_t ticks;
+    uint32_t budget_ms;
     bsp_iic_status_t st;
     dev_iic_status_t out;
 
@@ -180,8 +185,8 @@ static dev_iic_status_t Dev_IIC_Run(const dev_iic_dev_t *dev,
         return DEV_IIC_ERR_STATE;
     }
 
-    ticks = pdMS_TO_TICKS((timeout_ms != 0U) ?
-                          timeout_ms : DEV_IIC_DEFAULT_TIMEOUT_MS);
+    budget_ms = (timeout_ms != 0U) ? timeout_ms : DEV_IIC_DEFAULT_TIMEOUT_MS;
+    ticks = pdMS_TO_TICKS(budget_ms);
 
     if (osMutexAcquire(*bus->lock, ticks) != osOK) {
         return DEV_IIC_ERR_TIMEOUT;
@@ -200,14 +205,17 @@ static dev_iic_status_t Dev_IIC_Run(const dev_iic_dev_t *dev,
 
     (void)ulTaskNotifyTake(pdTRUE, 0U); /* 清掉上一笔残留的令牌 */
 
-    st = BSP_IIC_StartTransfer(bus->bsp, msg, Dev_IIC_OnDone, rt);
+    st = BSP_IIC_StartTransfer(bus->bsp, msg, budget_ms, Dev_IIC_OnDone, rt);
     if (st != BSP_IIC_OK) {
         rt->owner = NULL;
         (void)osMutexRelease(*bus->lock);
         return Dev_IIC_Map(st);
     }
 
-    if (ulTaskNotifyTake(pdTRUE, ticks) == 0U) {
+    /* 阻塞方式在启动函数里已经搬完、没有回调可等；异步方式才睡等通知。 */
+    if (BSP_IIC_IsBusy(bus->bsp) == 0U) {
+        out = (rt->done != 0U) ? rt->result : DEV_IIC_OK;
+    } else if (ulTaskNotifyTake(pdTRUE, ticks) == 0U) {
         rt->abandoned = 1U;
         (void)BSP_IIC_Abort(bus->bsp);
         out = DEV_IIC_ERR_TIMEOUT;
