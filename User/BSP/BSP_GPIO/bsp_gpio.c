@@ -37,12 +37,30 @@ struct bsp_gpio {
 /*==============================================================================
  * 句柄实例：端口、引脚号、方向只出现在这里
  *============================================================================*/
-/* 引脚句柄表：一行一个引脚，行尾是这颗引脚接什么。 */
-const bsp_gpio_t bsp_gpio_pb2  = { .port = GPIOB, .pin = GPIO_PIN_2,  .dir = BSP_GPIO_DIR_OUT }; /* LED */
-const bsp_gpio_t bsp_gpio_pc13 = { .port = GPIOC, .pin = GPIO_PIN_13, .dir = BSP_GPIO_DIR_IN };  /* 按键 */
-const bsp_gpio_t bsp_gpio_pa8  = { .port = GPIOA, .pin = GPIO_PIN_8,  .dir = BSP_GPIO_DIR_OUT }; /* 显示片选 */
-const bsp_gpio_t bsp_gpio_pb11 = { .port = GPIOB, .pin = GPIO_PIN_11, .dir = BSP_GPIO_DIR_OUT }; /* 显示 DC */
-const bsp_gpio_t bsp_gpio_pb12 = { .port = GPIOB, .pin = GPIO_PIN_12, .dir = BSP_GPIO_DIR_OUT }; /* 显示 RST */
+/**
+ * @brief LED 控制引脚
+ */
+const bsp_gpio_t bsp_gpio_pb2 = { .port = GPIOB, .pin = GPIO_PIN_2, .dir = BSP_GPIO_DIR_OUT };
+
+/**
+ * @brief 按键输入引脚
+ */
+const bsp_gpio_t bsp_gpio_pc13 = { .port = GPIOC, .pin = GPIO_PIN_13, .dir = BSP_GPIO_DIR_IN };
+
+/**
+ * @brief 显示屏片选引脚
+ */
+const bsp_gpio_t bsp_gpio_pa8 = { .port = GPIOA, .pin = GPIO_PIN_8, .dir = BSP_GPIO_DIR_OUT };
+
+/**
+ * @brief 显示屏数据/命令选择引脚
+ */
+const bsp_gpio_t bsp_gpio_pb11 = { .port = GPIOB, .pin = GPIO_PIN_11, .dir = BSP_GPIO_DIR_OUT };
+
+/**
+ * @brief 显示屏复位引脚
+ */
+const bsp_gpio_t bsp_gpio_pb12 = { .port = GPIOB, .pin = GPIO_PIN_12, .dir = BSP_GPIO_DIR_OUT };
 
 /*==============================================================================
  * 接口实现

@@ -50,12 +50,30 @@ typedef struct bsp_gpio bsp_gpio_t;
 /*==============================================================================
  * 外部声明：每个用到的引脚一份句柄
  *============================================================================*/
-/* 与 bsp_gpio.c 的实例表一一对应；行尾是这颗引脚接什么。 */
-extern const bsp_gpio_t bsp_gpio_pb2;   /* LED */
-extern const bsp_gpio_t bsp_gpio_pc13;  /* 按键 */
-extern const bsp_gpio_t bsp_gpio_pa8;   /* 显示片选 */
-extern const bsp_gpio_t bsp_gpio_pb11;  /* 显示 DC */
-extern const bsp_gpio_t bsp_gpio_pb12;  /* 显示 RST */
+/**
+ * @brief LED 控制引脚 PB2 的句柄
+ */
+extern const bsp_gpio_t bsp_gpio_pb2;
+
+/**
+ * @brief 按键输入引脚 PC13 的句柄
+ */
+extern const bsp_gpio_t bsp_gpio_pc13;
+
+/**
+ * @brief 显示屏片选引脚 PA8 的句柄
+ */
+extern const bsp_gpio_t bsp_gpio_pa8;
+
+/**
+ * @brief 显示屏数据/命令选择引脚 PB11 的句柄
+ */
+extern const bsp_gpio_t bsp_gpio_pb11;
+
+/**
+ * @brief 显示屏复位引脚 PB12 的句柄
+ */
+extern const bsp_gpio_t bsp_gpio_pb12;
 
 /*==============================================================================
  * 函数声明

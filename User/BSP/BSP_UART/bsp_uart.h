@@ -1,39 +1,45 @@
 /**
  * @file bsp_uart.h
- * @brief UART 硬件驱动层：DMA 乒乓接收 + 环形发送队列，收发全程不阻塞调用者
+ * @brief UART 硬件驱动层：能力探测、三档搬运、收发字节的注入接口
  * @author Ricardo
  * @date 2026-11-21
  *
- * @note 设计模型（两级缓冲，各解决一个问题）：
- *       1. 硬件级乒乓：DMA 以 Circular 模式循环写一整块接收缓冲，半传输与
- *          传输完成中断把它切成两个半区。DMA 写半区 A 时，半区 B 的内容
- *          已经稳定，可以安全拷走——这一级解决"边收边搬"的撕裂问题。
- *       2. 软件级 FIFO：半区稳定后立刻搬进环形 FIFO。上层何时取、取多少
- *          与数据到达节奏彻底解耦——这一级解决"上层来不及时数据被覆盖"。
- *          只留一级都不行：只有乒乓则上层必须在一个半区时间内消费完，
- *          只有 FIFO 则中断里要逐字节搬运，短帧还得靠轮询发现结尾。
- *       3. IDLE 中断补齐尾巴：短帧填不满半区，靠 IDLE 把"半区内已收到的
- *          那一段"提前发布，延迟从半个半区降到 1 个字符时间。
- *       4. 发送侧是 FIFO + 分段 DMA：环形缓冲回卷处物理不连续，一次 DMA
- *          只能发一段，发送完成中断接着发下一段。
+ * @note 本层只答芯片机制，不做任何缓冲策略：
+ *       1. 初始化时从 HAL 句柄探测收、发两面的搬运能力（DMA / 中断 / 阻塞），
+ *          与 bsp_spi / bsp_iic 用同一套档位语义；启动失败时向下退一档；
+ *       2. 收发字节不在本层排队：收到的字节立刻交给 rx_push，要发的字节由
+ *          tx_fetch 现取，本层只负责把它们塞进外设；
+ *       3. 不含任何 OS 调用、不加锁、不等待。缓冲、溢出记账、等待与串行化
+ *          都在设备层（dev_uart）；
+ *       4. 换到裸机时设备层把等待换成自旋即可，本层一个字都不用改。
  *
- *       本层只做芯片机制：启动接收、把稳定数据搬进 FIFO、把 FIFO 里的数据
- *       交给发送 DMA、出错后重启接收。它不持锁、不等待、不含任何 OS 调用；
- *       "谁在用这个口、写满时等多久、发完没有"这类点对点链路的使用规则
- *       在设备层（dev_uart）。
- *
- *       本层不做帧解析、不注册上层回调、不建线程：帧边界属于 Service，
- *       调度节奏属于 TASK。
+ *       所有权：各口 HAL 句柄与两条 DMA 句柄由本模块独占，上层不要再直接调
+ *       HAL_UART_Transmit_DMA() 之类的接口，否则本层的忙标志与实际状态脱节。
  */
 
-#ifndef __BSP_UART_H__
-#define __BSP_UART_H__
+#ifndef BSP_UART_H
+#define BSP_UART_H
 
 /*==============================================================================
  * 头文件包含
  *============================================================================*/
 // 固定包含
 #include <stdint.h>
+
+/*==============================================================================
+ * 搬运档位
+ *============================================================================*/
+/** @brief 0 无功能：该方向不可用（阻塞档恒可用，保留此值让三档编号对齐） */
+#define BSP_UART_CAP_NONE     0U
+
+/** @brief 1 阻塞：调用返回时已经搬完，不占用中断 */
+#define BSP_UART_CAP_BLOCKING 1U
+
+/** @brief 2 中断：每字节一次外设中断，完成点只在回调里 */
+#define BSP_UART_CAP_IT       2U
+
+/** @brief 3 DMA：启动后 CPU 不参与搬字节，完成点只在流中断回调里 */
+#define BSP_UART_CAP_DMA      3U
 
 /*==============================================================================
  * 类型定义
@@ -43,123 +49,132 @@
  * @note 数值即契约：已发布的数值不再重排。
  */
 typedef enum {
-    BSP_UART_OK          = 0,  /* 成功 */
-    BSP_UART_ERR_PARAM   = -1, /* 参数非法，或句柄不在表里 */
-    BSP_UART_ERR_STATE   = -2, /* 未初始化 / 外设状态不对 / DMA 通道没配 */
-    BSP_UART_ERR_HAL     = -3, /* HAL 启动或重启接收失败 */
+    BSP_UART_OK          = 0,  /* 成功；DMA/中断方式下只表示已经交给外设 */
+    BSP_UART_ERR_PARAM   = -1, /* 参数非法 */
+    BSP_UART_ERR_STATE   = -2, /* 未初始化 / 未启动 / 档位不匹配 */
+    BSP_UART_ERR_TIMEOUT = -3, /* 阻塞方式下外设超时 */
+    BSP_UART_ERR_HAL     = -4, /* HAL 启动或重启失败 */
 } bsp_uart_status_t;
 
 /**
- * @brief UART 句柄（不透明类型，布局定义在 bsp_uart.c）
- * @note 只描述"哪个 HAL 句柄、缓冲多大、起始地址在哪"，不含引脚号与波特率；
- *       引脚与帧格式由 CubeMX 的 MX_UARTx_Init() 决定。
+ * @brief UART 句柄（不透明，布局只在 .c 里出现）
  */
 typedef struct bsp_uart bsp_uart_t;
 
+/**
+ * @brief 收字节回调：把新到的字节交给上层
+ * @param ctx  注册钩子时给的上下文
+ * @param data 字节起始地址，仅在本次调用期间有效
+ * @param len  字节数，不会为 0
+ * @note 在中断上下文调用，必须 ISR 安全；不得阻塞、不得调用非 FromISR 的
+ *       OS 接口。实现方负责自己的缓冲与溢出策略。
+ */
+typedef void (*bsp_uart_rx_push_t)(void *ctx, const uint8_t *data, uint16_t len);
+
+/**
+ * @brief 取发送字节：把待发数据填进 buf
+ * @param ctx 注册钩子时给的上下文
+ * @param buf 目的缓冲区，不可为 NULL
+ * @param max 本次最多填多少字节，不会为 0
+ * @retval 实际填入的字节数，0 表示当前没有待发数据
+ * @note DMA / 中断方式下在中断上下文调用（中断里接着发下一段），阻塞方式下
+ *       在调用 BSP_UART_TxKick() 的任务上下文调用；两种情况都必须 ISR 安全。
+ */
+typedef uint16_t (*bsp_uart_tx_fetch_t)(void *ctx, uint8_t *buf, uint16_t max);
+
+/**
+ * @brief 收发钩子：设备层注册进来，本层只调用，不持有
+ */
+typedef struct {
+    bsp_uart_rx_push_t rx_push;  /* 收到的字节往哪里送，必须非空 */
+    bsp_uart_tx_fetch_t tx_fetch;/* 要发的字节从哪里取，必须非空 */
+    void               *ctx;     /* 原样回传给两个回调 */
+} bsp_uart_hooks_t;
+
 /*==============================================================================
- * 外部变量
+ * 外部变量声明
  *============================================================================*/
 /**
- * @brief USART1：收发均走 DMA，帧格式与波特率由 CubeMX 决定
- * @note 实例本身只登记资源，不含锁与任务相关字段。
+ * @brief 实例句柄：只导出句柄，运行块与缓冲区定义在 .c 的移植段里
+ * @note 每路 UART 一个；上层按句柄区分端口，不直接摸 HAL 句柄。
  */
 extern const bsp_uart_t bsp_uart1;
 
 /*==============================================================================
- * 函数声明
+ * 接口声明
  *============================================================================*/
 /**
- * @brief 初始化 UART 驱动并启动接收 DMA
+ * @brief 初始化全部实例：校验配置并探测两面的搬运能力
  * @retval BSP_UART_OK: 全部实例就绪（已就绪的实例会被跳过）
- * @retval BSP_UART_ERR_STATE: 缺 HAL 句柄、UART 不在 READY，或收发 DMA 通道未配置
- * @retval BSP_UART_ERR_HAL: 接收 DMA 启动失败
+ * @retval BSP_UART_ERR_STATE: 缺 HAL 句柄、外设不在 READY、缓冲区未配置
+ * @retval BSP_UART_ERR_HAL: 接收 DMA 改成循环模式时 HAL_DMA_Init() 失败
  * @note 必须在 MX_USARTx_UART_Init() 之后调用，不能在中断里调用。
- *       若 .ioc 把接收 DMA 配成 Normal，这里会改成 Circular 并重新
- *       HAL_DMA_Init()——乒乓模型依赖硬件循环写，Normal 模式只收一圈就停。
+ *       探测只看两件事：DMA 流有没有挂上、缓冲区配了没有；探测结果记在
+ *       运行块里，启动与搬运按它选档。
  */
 bsp_uart_status_t BSP_UART_Init(void);
 
 /**
- * @brief 查询驱动是否已就绪
- * @param uart UART 句柄，可为 NULL
- * @retval 1: 已初始化且接收 DMA 在跑
- * @retval 0: 未初始化、接收已停或句柄非法
+ * @brief 注册钩子并启动接收
+ * @param uart  实例句柄，不可为 NULL
+ * @param hooks 钩子表，不可为 NULL，两个回调都必须非空
+ * @retval BSP_UART_OK: 已启动（DMA 方式下接收已武装）
+ * @retval BSP_UART_ERR_PARAM: 句柄或钩子非法
+ * @retval BSP_UART_ERR_STATE: 未初始化，或已经启动
+ * @retval BSP_UART_ERR_HAL: 启动接收失败
+ * @note 重复调用直接返回 ERR_STATE；要换钩子先 BSP_UART_Abort()。
+ *       启动后收到的每个字节都会经 rx_push 交出去，本层不存。
+ */
+bsp_uart_status_t BSP_UART_Start(const bsp_uart_t *uart,
+                                 const bsp_uart_hooks_t *hooks);
+
+/**
+ * @brief 查询是否已启动
+ * @param uart 实例句柄，可为 NULL
+ * @retval 1: 已启动且接收在跑
+ * @retval 0: 未启动、已中止或句柄非法
  */
 uint8_t BSP_UART_IsReady(const bsp_uart_t *uart);
 
 /**
- * @brief 查询接收 FIFO 中已收未读的字节数
- * @param uart UART 句柄，可为 NULL
- * @retval 可读字节数，最大为 FIFO 容量减一
- * @note 单消费者语义：只应由一个任务调用 Read/Peek/Available，多任务同时
- *       读会撕裂。要分解给多个消费者，先在设备层或服务层汇聚。
+ * @brief 通知本层"有新数据可以发"，空闲时立刻取一段塞进外设
+ * @param uart 实例句柄，不可为 NULL
+ * @retval BSP_UART_OK: 已启动发送，或发送本来就在跑，或暂时没数据
+ * @retval BSP_UART_ERR_PARAM: 句柄非法
+ * @retval BSP_UART_ERR_STATE: 未启动
+ * @note 由设备层在把字节写进自己的发送队列之后调用；阻塞方式下本函数会
+ *       一直取到 tx_fetch 返回 0 才返回（数据是同步发出去的）。
  */
-uint16_t BSP_UART_Available(const bsp_uart_t *uart);
-
-/**
- * @brief 窥视接收 FIFO 头部的数据，不取走
- * @param uart UART 句柄，可为 NULL
- * @param buf  接收缓冲区，可为 NULL（此时只返回可窥视长度）
- * @param len  最多看多少字节，不能为 0
- * @retval 实际看到的字节数，0 表示 FIFO 为空
- * @note 只读不消费：读索引不动，数据仍留在 FIFO 里，后续 Read() 还能取到。
- */
-uint16_t BSP_UART_Peek(const bsp_uart_t *uart, uint8_t *buf, uint16_t len);
-
-/**
- * @brief 从接收 FIFO 取数据，非阻塞
- * @param uart UART 句柄，可为 NULL
- * @param buf  接收缓冲区，不可为 NULL
- * @param len  最多取多少字节，不能为 0
- * @retval 实际取到的字节数，0 表示当前没有数据
- * @note 取不满不会等待；要"凑够 len 字节或超时"由设备层提供。
- *       会推进读索引：取走的字节本层不再保留，所以"先探性读一段再判断
- *       包是否完整"必须改用 BSP_UART_Peek()。
- */
-uint16_t BSP_UART_Read(const bsp_uart_t *uart, uint8_t *buf, uint16_t len);
-
-/**
- * @brief 读取接收溢出计数
- * @param uart UART 句柄，可为 NULL
- * @retval 上电以来因 FIFO 满而丢弃的字节数
- * @note 累加值，不回绕判断；上层可周期性比对增量来判断"是不是读得太慢"。
- */
-uint32_t BSP_UART_RxOverflow(const bsp_uart_t *uart);
-
-/**
- * @brief 清零接收溢出计数
- * @param uart UART 句柄，可为 NULL
- * @retval 无
- */
-void BSP_UART_RxClearOverflow(const bsp_uart_t *uart);
-
-/**
- * @brief 查询发送 FIFO 剩余可写空间
- * @param uart UART 句柄，可为 NULL
- * @retval 还能排入多少字节
- * @note 并发下数值立刻会变，只适合判断"大概够不够"；要精确就用 Write 的返回值。
- */
-uint16_t BSP_UART_TxFree(const bsp_uart_t *uart);
-
-/**
- * @brief 把数据排入发送队列，立即返回
- * @param uart UART 句柄，可为 NULL
- * @param buf  待发送数据，不可为 NULL
- * @param len  请求发送的字节数，不能为 0
- * @retval 实际排入队列的字节数，小于 len 说明队列满了（剩余部分被丢弃）
- * @note 多生产者并发调用会让两个调用者的字节在队列里交错——本层不加锁，
- *       需要"一帧一次 Write 即帧级原子"的调用者由设备层（dev_uart）串行化。
- *       不得在中断中调用。
- */
-uint16_t BSP_UART_Write(const bsp_uart_t *uart, const uint8_t *buf, uint16_t len);
+bsp_uart_status_t BSP_UART_TxKick(const bsp_uart_t *uart);
 
 /**
  * @brief 查询发送路径是否已经空闲
- * @param uart UART 句柄，可为 NULL
- * @retval 1: 队列已空、发送 DMA 已停、外设状态机已回到 READY
- * @retval 0: 仍有数据没发完，或句柄非法/未初始化
- * @note 只回答"现在空不空"，不等待。要"等发完"由设备层轮询本函数实现。
+ * @param uart 实例句柄，可为 NULL
+ * @retval 1: 当前没有在途数据，外设发送状态机已回到 READY
+ * @retval 0: 仍在发送、未启动或句柄非法
+ * @note 只回答"现在空不空"，不等待。设备层的 Flush 轮询本函数。
  */
 uint8_t BSP_UART_TxIdle(const bsp_uart_t *uart);
 
-#endif /* __BSP_UART_H__ */
+/**
+ * @brief 轮询接收：仅当接收退到阻塞档时使用，把已到的字节交给 rx_push
+ * @param uart 实例句柄，不可为 NULL
+ * @retval BSP_UART_OK: 已处理（可能有 0 个字节）
+ * @retval BSP_UART_ERR_PARAM: 句柄非法
+ * @retval BSP_UART_ERR_STATE: 未启动，或接收不在阻塞档
+ * @note 不阻塞、不等待；DMA / 中断档下返回 ERR_STATE。裸机工程在主循环里
+ *       周期性调用，或由设备层在读写入口调用。
+ */
+bsp_uart_status_t BSP_UART_Poll(const bsp_uart_t *uart);
+
+/**
+ * @brief 中止收发：停掉 DMA / 中断，清掉在途状态
+ * @param uart 实例句柄，不可为 NULL
+ * @retval BSP_UART_OK: 已停
+ * @retval BSP_UART_ERR_PARAM: 句柄非法
+ * @retval BSP_UART_ERR_STATE: 未初始化
+ * @note 之后可以重新 BSP_UART_Start()；已交给设备层的字节不受影响。
+ */
+bsp_uart_status_t BSP_UART_Abort(const bsp_uart_t *uart);
+
+#endif /* BSP_UART_H */

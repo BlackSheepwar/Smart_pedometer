@@ -296,7 +296,7 @@ int Dev_ST7789_Init(const dev_st7789_t *lcd, dev_st7789_delay_t delay_ms)
     static const uint8_t vdvs[]     = { 0x20u };
     static const uint8_t frctrl2[]  = { 0x0Fu };
     static const uint8_t pwctrl1[]  = { 0xA4u, 0xA1u };
-    static const uint8_t colmod16[] = { 0x55u };   /* 16 bit/pixel */
+    static const uint8_t colmod16[] = { 0x55u };
     static const uint8_t pvgam[]    = { 0xD0u, 0x04u, 0x0Du, 0x11u, 0x13u,
                                         0x2Bu, 0x3Fu, 0x54u, 0x4Cu, 0x18u,
                                         0x0Du, 0x0Bu, 0x1Fu, 0x23u };
