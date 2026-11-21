@@ -54,7 +54,7 @@ typedef enum {
     DEV_SPI_ERR_TIMEOUT = -3, /* 排队等锁超时，或传输超时 */
     DEV_SPI_ERR_MODE    = -4, /* 外设当前配置不支持该方向 */
     DEV_SPI_ERR_BUS     = -5, /* 总线错误：MODF / OVR / CRC */
-    DEV_SPI_ERR_HAL     = -7, /* 速率切换或 HAL 启动失败 */
+    DEV_SPI_ERR_HAL     = -6, /* 速率切换或 HAL 启动失败 */
 } dev_spi_status_t;
 
 /**

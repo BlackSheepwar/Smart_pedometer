@@ -41,8 +41,7 @@ typedef enum {
     DEV_IIC_ERR_TIMEOUT = -3, /* 等总线超时，或搬运超时（已中止并复位） */
     DEV_IIC_ERR_NACK    = -4, /* 从机 NACK */
     DEV_IIC_ERR_BUS     = -5, /* 总线错误 */
-    /* -6 空号：数值即契约，重排会把调用者手里的旧比较结果静默改掉 */
-    DEV_IIC_ERR_HAL     = -7, /* HAL 报错（配置错或外设故障） */
+    DEV_IIC_ERR_HAL     = -6, /* HAL 报错（配置错或外设故障） */
 } dev_iic_status_t;
 
 /**

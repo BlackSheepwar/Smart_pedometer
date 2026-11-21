@@ -62,7 +62,7 @@ typedef enum {
 
 /**
  * @brief BSP_IIC 返回码
- * @note 数值即契约：历史值不改，空号不重排。
+ * @note 数值即契约：已发布的数值不再重排。
  */
 typedef enum {
     BSP_IIC_OK          = 0,  /* 成功；异步方式下表示已交给外设 */
@@ -71,8 +71,7 @@ typedef enum {
     BSP_IIC_ERR_TIMEOUT = -3, /* 外设报告超时：阻塞方式超时，或异步方式收到超时错误 */
     BSP_IIC_ERR_NACK    = -4, /* 从机 NACK */
     BSP_IIC_ERR_BUS     = -5, /* 总线错误（BERR / ARLO / OVR） */
-    /* -6 空号：数值即契约，重排会把调用者手里的旧比较结果静默改掉 */
-    BSP_IIC_ERR_HAL     = -7, /* HAL 启动失败或其他 HAL 错误 */
+    BSP_IIC_ERR_HAL     = -6, /* HAL 启动失败或其他 HAL 错误 */
 } bsp_iic_status_t;
 
 /**

@@ -74,8 +74,7 @@ typedef enum {
     BSP_SPI_ERR_TIMEOUT = -3, /* 阻塞方式传输超时 */
     BSP_SPI_ERR_MODE    = -4, /* 外设当前配置不支持该方向 */
     BSP_SPI_ERR_BUS     = -5, /* 总线错误：MODF / OVR / CRC */
-    /* -6 空号：数值即契约，重排会把调用者手里的旧比较结果静默改掉 */
-    BSP_SPI_ERR_HAL     = -7, /* HAL 启动失败或传输中出错 */
+    BSP_SPI_ERR_HAL     = -6, /* HAL 启动失败或传输中出错 */
 } bsp_spi_status_t;
 
 /**
