@@ -15,8 +15,8 @@
  *       ★为什么数据写入和刷屏要分成两级★
  *       LVGL 不是线程安全的（本工程 LV_USE_OS = LV_OS_NONE，内核里没有锁），
  *       而数据来自别的线程。所以：
- *         APP_Screen_Set_*()  只写一个 volatile 整数，跑在数据源线程；
- *         APP_Screen_Step()   发现值变了才调 lv_subject_set_*()，跑在 Task_LVGL。
+ *         APP_Screen_Set*()  只写一个 volatile 整数，跑在数据源线程；
+ *         APP_Screen_Step()  发现值变了才调 lv_subject_set_*()，跑在 Task_LVGL。
  *       每个数据项只有一个写入者、一个读取者，8/16/32 位对齐量在 Cortex-M4 上
  *       单条 STR/LDR 不可分割，因此**不加锁**——单写者单读者就够，不需要临界区。
  *       代价是显示最多滞后一个节拍（10 ms），不可感知。
@@ -85,7 +85,7 @@ void APP_Screen_Init(void);
  *       不碰 LVGL、不碰 SPI、不阻塞，可以在命令表的 handler 里直接调。
  *       真正的换面板发生在下一个 APP_Screen_Step()。
  */
-void APP_Screen_Toggle_Mode(void);
+void APP_Screen_ToggleMode(void);
 
 /**
  * @brief 直接选定某块模式面板（不再翻转）
@@ -96,7 +96,7 @@ void APP_Screen_Toggle_Mode(void);
  *       与 Toggle 的区别只在语义：Toggle 是"不管当前是哪块，翻到另一块"，
  *       本函数是"就选这块"，所以重复按同一颗键不会来回跳。
  */
-void APP_Screen_Select_Mode(uint8_t mode);
+void APP_Screen_SelectMode(uint8_t mode);
 
 /**
  * @brief 提交时间
@@ -106,7 +106,7 @@ void APP_Screen_Select_Mode(uint8_t mode);
  * @note 任意线程可调（写者是唯一的那个数据源线程）。合法性由
  *       App_UI_Set_Time() 再校验一次：非法值会被丢掉而不是显示 23:99。
  */
-void APP_Screen_Set_Time(uint8_t hour, uint8_t minute);
+void APP_Screen_SetTime(uint8_t hour, uint8_t minute);
 
 /**
  * @brief 提交日期
@@ -115,7 +115,7 @@ void APP_Screen_Set_Time(uint8_t hour, uint8_t minute);
  * @param day   1~31
  * @retval 无
  */
-void APP_Screen_Set_Date(uint16_t year, uint8_t month, uint8_t day);
+void APP_Screen_SetDate(uint16_t year, uint8_t month, uint8_t day);
 
 /**
  * @brief 提交电量百分比
@@ -123,14 +123,14 @@ void APP_Screen_Set_Date(uint16_t year, uint8_t month, uint8_t day);
  * @retval 无
  * @note 传百分比而不是电压：折算属于数据源侧的业务。
  */
-void APP_Screen_Set_Battery(uint8_t percent);
+void APP_Screen_SetBattery(uint8_t percent);
 
 /**
  * @brief 提交速度
  * @param speed_d10 速度 × 10（0.1 km/h 为单位），248 = 24.8 km/h
  * @retval 无
  */
-void APP_Screen_Set_Speed(uint16_t speed_d10);
+void APP_Screen_SetSpeed(uint16_t speed_d10);
 
 /**
  * @brief 提交经纬度
@@ -140,7 +140,7 @@ void APP_Screen_Set_Speed(uint16_t speed_d10);
  * @note 两个参数一起提交：界面上一行纬度一行经度，分开写会出现
  *       "新纬度配旧经度"的一帧。
  */
-void APP_Screen_Set_Position(int32_t lat_e6, int32_t lon_e6);
+void APP_Screen_SetPosition(int32_t lat_e6, int32_t lon_e6);
 
 /**
  * @brief 提交卫星颗数
@@ -149,7 +149,7 @@ void APP_Screen_Set_Position(int32_t lat_e6, int32_t lon_e6);
  * @note 与经纬度分开提交：没有定位时也可能有星数（未定位置状态），
  *       两者不是同一条数据。
  */
-void APP_Screen_Set_Satellites(uint8_t count);
+void APP_Screen_SetSatellites(uint8_t count);
 
 /**
  * @brief 把一个显示节拍的数据同步到界面

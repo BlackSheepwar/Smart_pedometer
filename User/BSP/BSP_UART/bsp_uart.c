@@ -85,24 +85,8 @@
  * 类型定义
  *============================================================================*/
 /**
- * @brief UART 句柄（布局只在 .c 里出现）
- * @note 只放配置，不放运行时状态：句柄是 const，进 .rodata 不占 RAM；
- *       索引与计数放 s_rt[]，两者按下标一一对应。
- *       hal 用 void *，避免头文件引入 HAL。
- */
-struct bsp_uart {
-    void             *hal;          /* HAL UART 句柄（UART_HandleTypeDef *） */
-    uint8_t          *rx_dma;       /* DMA 循环写缓冲，长度 rx_dma_size */
-    uint8_t          *rx_fifo;      /* 接收环形 FIFO，长度 rx_fifo_size */
-    uint8_t          *tx_fifo;      /* 发送环形 FIFO，长度 tx_fifo_size */
-    uint16_t          rx_dma_size;  /* 必须是 2 的倍数 */
-    uint16_t          rx_fifo_size; /* 必须是 2 的幂 */
-    uint16_t          tx_fifo_size; /* 必须是 2 的幂 */
-};
-
-/**
- * @brief 一路 UART 的运行时状态
- * @note 句柄是 const，可写字段只能落在本结构里；下标与 s_handles[] 对齐。
+ * @brief 一路 UART 的运行块
+ * @note 句柄是 const，可写字段只能落在本结构里；每个句柄实例各带一份。
  */
 typedef struct {
     const bsp_uart_t *cfg;        /* 对应的配置句柄，Init 时绑定 */
@@ -117,6 +101,23 @@ typedef struct {
     volatile uint8_t  ready;      /* 1: 初始化完成且接收在跑 */
 } bsp_uart_rt_t;
 
+/**
+ * @brief UART 句柄（布局只在 .c 里出现）
+ * @note 只放配置与一个指向运行块的指针：可写数据全在运行块里，句柄是 const，
+ *       进 .rodata 不占 RAM；每路 UART 各带一份运行块，由 rt 指向它。
+ *       hal 用 void *，避免头文件引入 HAL。
+ */
+struct bsp_uart {
+    void             *hal;          /* HAL UART 句柄（UART_HandleTypeDef *） */
+    uint8_t          *rx_dma;       /* DMA 循环写缓冲，长度 rx_dma_size */
+    uint8_t          *rx_fifo;      /* 接收环形 FIFO，长度 rx_fifo_size */
+    uint8_t          *tx_fifo;      /* 发送环形 FIFO，长度 tx_fifo_size */
+    uint16_t          rx_dma_size;  /* 必须是 2 的倍数 */
+    uint16_t          rx_fifo_size; /* 必须是 2 的幂 */
+    uint16_t          tx_fifo_size; /* 必须是 2 的幂 */
+    bsp_uart_rt_t    *rt;           /* 本实例的运行块：每路 UART 各一份 */
+};
+
 /*==============================================================================
  * 内部变量
  *============================================================================*/
@@ -129,6 +130,9 @@ static uint8_t s_uart1_rx_fifo[BSP_UART1_RX_FIFO_SIZE];
 /** @brief USART1 发送环形 FIFO，容量 512，可用 511 字节 */
 static uint8_t s_uart1_tx_fifo[BSP_UART1_TX_FIFO_SIZE];
 
+/** @brief USART1 的运行块，与句柄实例成对定义 */
+static bsp_uart_rt_t bsp_uart1_rt;
+
 /** @brief USART1 配置句柄；hal 指向 CubeMX 生成的 HAL 句柄 */
 const bsp_uart_t bsp_uart1 = {
     .hal          = &huart1,
@@ -138,6 +142,7 @@ const bsp_uart_t bsp_uart1 = {
     .rx_dma_size  = BSP_UART1_RX_DMA_SIZE,
     .rx_fifo_size = BSP_UART1_RX_FIFO_SIZE,
     .tx_fifo_size = BSP_UART1_TX_FIFO_SIZE,
+    .rt           = &bsp_uart1_rt,
 };
 
 /** @brief 驱动管理的句柄表：Init 与中断反查都按它轮询 */
@@ -145,8 +150,6 @@ static const bsp_uart_t *const s_handles[] = {
     &bsp_uart1,
 };
 
-/** @brief 运行时状态表，下标与 s_handles[] 严格一一对应 */
-static bsp_uart_rt_t s_rt[BSP_UART_COUNT];
 
 /** @brief 表里的 UART 路数，供循环比较 */
 static const uint32_t s_uart_count = (uint32_t)BSP_UART_COUNT;
@@ -155,39 +158,33 @@ static const uint32_t s_uart_count = (uint32_t)BSP_UART_COUNT;
  * 内部函数
  *============================================================================*/
 /**
- * @brief 按公共句柄找到对应的运行时状态
+ * @brief 按公共句柄找到对应的运行块
  * @param uart UART 句柄，可为 NULL
- * @retval 对应状态块；句柄不在表中返回 NULL
+ * @retval 对应运行块；句柄未绑定运行块返回 NULL
  * @note 只做指针比对，不判断是否已初始化。
  */
 static bsp_uart_rt_t *BSP_UART_Find(const bsp_uart_t *uart)
 {
-    uint32_t i;
-
     if (uart == NULL) {
         return NULL;
     }
-    for (i = 0U; i < s_uart_count; i++) {
-        if (s_handles[i] == uart) {
-            return &s_rt[i];
-        }
-    }
-    return NULL;
+    return uart->rt;
 }
 
 /**
- * @brief 按 HAL 句柄找到对应的运行时状态（中断入口用）
+ * @brief 按 HAL 句柄找到对应的运行块（中断入口用）
  * @param hal HAL UART 句柄
- * @retval 对应状态块；未在表中或尚未 Init 返回 NULL
+ * @retval 对应运行块；未在表中或尚未 Init 返回 NULL
  * @note 中断里调用，只做指针比对，不做任何 HAL 调用。
  */
-static bsp_uart_rt_t *BSP_UART_Find_By_Hal(const void *hal)
+static bsp_uart_rt_t *BSP_UART_FindByHal(const void *hal)
 {
     uint32_t i;
 
     for (i = 0U; i < s_uart_count; i++) {
-        if ((s_rt[i].cfg != NULL) && (s_rt[i].cfg->hal == hal)) {
-            return &s_rt[i];
+        if ((s_handles[i]->rt != NULL) && (s_handles[i]->rt->cfg != NULL) &&
+            (s_handles[i]->rt->cfg->hal == hal)) {
+            return s_handles[i]->rt;
         }
     }
     return NULL;
@@ -195,14 +192,14 @@ static bsp_uart_rt_t *BSP_UART_Find_By_Hal(const void *hal)
 
 /**
  * @brief 把一段字节压进接收 FIFO，空间不足时丢弃尾部并记账
- * @param rt  运行时状态，不可为 NULL
+ * @param rt  运行块，不可为 NULL
  * @param src 源数据，不可为 NULL
  * @param len 字节数，不能为 0
  * @retval 无
  * @note 仅由中断调用（单生产者）。刻意留一个字节空间用于区分空/满：
  *       head == tail 为空，head + 1 == tail 为满，所以可用容量是 size-1。
  */
-static void BSP_UART_Rx_Push(bsp_uart_rt_t *rt, const uint8_t *src, uint16_t len)
+static void BSP_UART_RxPush(bsp_uart_rt_t *rt, const uint8_t *src, uint16_t len)
 {
     const bsp_uart_t *cfg = rt->cfg;
     uint16_t mask = (uint16_t)(cfg->rx_fifo_size - 1U);
@@ -234,7 +231,7 @@ static void BSP_UART_Rx_Push(bsp_uart_rt_t *rt, const uint8_t *src, uint16_t len
 
 /**
  * @brief 把 DMA 缓冲中"已稳定"的一段发布进 FIFO
- * @param rt  运行时状态，不可为 NULL
+ * @param rt  运行块，不可为 NULL
  * @param pos 当前 DMA 写指针位置：0..rx_dma_size，等于 rx_dma_size 表示
  *            整圈刚回卷（TC 事件）
  * @retval 无
@@ -242,7 +239,7 @@ static void BSP_UART_Rx_Push(bsp_uart_rt_t *rt, const uint8_t *src, uint16_t len
  *       DMA 在半区边界必然触发 HT 或 TC，所以未发布量不会超过半圈；
  *       真出现超过半圈说明丢了中断，按半圈截断并记溢出，不让脏区间扩散。
  */
-static void BSP_UART_Rx_Publish(bsp_uart_rt_t *rt, uint16_t pos)
+static void BSP_UART_RxPublish(bsp_uart_rt_t *rt, uint16_t pos)
 {
     const bsp_uart_t *cfg = rt->cfg;
     uint16_t size = cfg->rx_dma_size;
@@ -253,7 +250,7 @@ static void BSP_UART_Rx_Publish(bsp_uart_rt_t *rt, uint16_t pos)
         /* pub 已经是 0 说明这一圈早就发布过（TC 与 IDLE 撞在同一圈末尾），
            再发一次会把旧数据重复压进 FIFO，比丢数据更难查 */
         if ((pub != 0U) && (size > pub)) {
-            BSP_UART_Rx_Push(rt, &cfg->rx_dma[pub], (uint16_t)(size - pub));
+            BSP_UART_RxPush(rt, &cfg->rx_dma[pub], (uint16_t)(size - pub));
         }
         rt->rx_pub = 0U;
         return;
@@ -262,12 +259,12 @@ static void BSP_UART_Rx_Publish(bsp_uart_rt_t *rt, uint16_t pos)
     /* ---------- 2. 普通事件：算正向距离，回卷拆两段 ---------- */
     if (pos >= pub) {
         if (pos > pub) {
-            BSP_UART_Rx_Push(rt, &cfg->rx_dma[pub], (uint16_t)(pos - pub));
+            BSP_UART_RxPush(rt, &cfg->rx_dma[pub], (uint16_t)(pos - pub));
         }
     } else {
-        BSP_UART_Rx_Push(rt, &cfg->rx_dma[pub], (uint16_t)(size - pub));
+        BSP_UART_RxPush(rt, &cfg->rx_dma[pub], (uint16_t)(size - pub));
         if (pos > 0U) {
-            BSP_UART_Rx_Push(rt, &cfg->rx_dma[0], pos);
+            BSP_UART_RxPush(rt, &cfg->rx_dma[0], pos);
         }
     }
     rt->rx_pub = pos;
@@ -275,13 +272,13 @@ static void BSP_UART_Rx_Publish(bsp_uart_rt_t *rt, uint16_t pos)
 
 /**
  * @brief 启动（或重启）接收：复位发布位置并武装 DMA + IDLE 中断
- * @param rt 运行时状态，不可为 NULL
+ * @param rt 运行块，不可为 NULL
  * @retval BSP_UART_OK: 已启动
  * @retval BSP_UART_ERR_HAL: HAL 拒绝启动（外设忙或 DMA 通道异常）
  * @note 只有在 RxState 为 READY 时才会成功；错误回调里 HAL 已把状态复位，
  *       可以直接调用。重启会把 rx_pub 归零，因为 DMA 从缓冲起点重新写。
  */
-static bsp_uart_status_t BSP_UART_Rx_Start(bsp_uart_rt_t *rt)
+static bsp_uart_status_t BSP_UART_RxStart(bsp_uart_rt_t *rt)
 {
     const bsp_uart_t *cfg = rt->cfg;
 
@@ -296,7 +293,7 @@ static bsp_uart_status_t BSP_UART_Rx_Start(bsp_uart_rt_t *rt)
 
 /**
  * @brief 若发送 DMA 空闲且队列有数据，启动下一段传输
- * @param rt 运行时状态，不可为 NULL
+ * @param rt 运行块，不可为 NULL
  * @retval 无
  * @note 任务与中断都会调用，用 PRIMASK 保存/恢复包住"判断 + 置位 + 启动"，
  *       避免任务刚判定 busy 为 0、中断就插进来又启动一次的竞态。
@@ -304,7 +301,7 @@ static bsp_uart_status_t BSP_UART_Rx_Start(bsp_uart_rt_t *rt)
  *       环形 FIFO 回卷处不连续，所以一段最多发到缓冲末尾，剩下的由 TC
  *       回调接续。
  */
-static void BSP_UART_Tx_Kick(bsp_uart_rt_t *rt)
+static void BSP_UART_TxKick(bsp_uart_rt_t *rt)
 {
     const bsp_uart_t *cfg = rt->cfg;
     uint16_t tail;
@@ -338,7 +335,7 @@ static void BSP_UART_Tx_Kick(bsp_uart_rt_t *rt)
 
 /**
  * @brief 从接收 FIFO 头部拷出数据，可选是否推进读索引
- * @param rt      运行时状态，不可为 NULL
+ * @param rt      运行块，不可为 NULL
  * @param buf     目的缓冲区，不可为 NULL
  * @param len     最多拷多少字节，不能为 0
  * @param consume 1: 真读走（推进 tail）；0: 只窥视（tail 不动）
@@ -347,7 +344,7 @@ static void BSP_UART_Tx_Kick(bsp_uart_rt_t *rt)
  *       tail 推进后才释放空间，所以"窥视看到的字节"在下次 Read 前一定还在，
  *       前提是同一个任务连续调用、不违反单消费者约定。
  */
-static uint16_t BSP_UART_Copy_Out(bsp_uart_rt_t *rt, uint8_t *buf,
+static uint16_t BSP_UART_CopyOut(bsp_uart_rt_t *rt, uint8_t *buf,
                                   uint16_t len, uint8_t consume)
 {
     const bsp_uart_t *cfg = rt->cfg;
@@ -398,7 +395,11 @@ bsp_uart_status_t BSP_UART_Init(void)
 
     for (i = 0U; i < s_uart_count; i++) {
         const bsp_uart_t *cfg = s_handles[i];
-        bsp_uart_rt_t *rt = &s_rt[i];
+        bsp_uart_rt_t *rt = s_handles[i]->rt;
+
+        if (rt == NULL) {
+            return BSP_UART_ERR_STATE;
+        }
         UART_HandleTypeDef *hal;
 
         if (rt->ready != 0U) {
@@ -436,7 +437,7 @@ bsp_uart_status_t BSP_UART_Init(void)
         rt->tx_busy     = 0U;
 
         /* ---------- 3. 武装接收，之后数据全靠中断推进 ---------- */
-        if (BSP_UART_Rx_Start(rt) != BSP_UART_OK) {
+        if (BSP_UART_RxStart(rt) != BSP_UART_OK) {
             rt->cfg = NULL;
             return BSP_UART_ERR_HAL;
         }
@@ -452,7 +453,7 @@ bsp_uart_status_t BSP_UART_Init(void)
  * @retval 1: 已初始化且接收 DMA 在跑
  * @retval 0: 未初始化、接收已停或句柄非法
  */
-uint8_t BSP_UART_Is_Ready(const bsp_uart_t *uart)
+uint8_t BSP_UART_IsReady(const bsp_uart_t *uart)
 {
     bsp_uart_rt_t *rt = BSP_UART_Find(uart);
 
@@ -498,7 +499,7 @@ uint16_t BSP_UART_Peek(const bsp_uart_t *uart, uint8_t *buf, uint16_t len)
     if ((rt == NULL) || (rt->cfg == NULL) || (buf == NULL) || (len == 0U)) {
         return 0U;
     }
-    return BSP_UART_Copy_Out(rt, buf, len, 0U);
+    return BSP_UART_CopyOut(rt, buf, len, 0U);
 }
 
 /**
@@ -519,7 +520,7 @@ uint16_t BSP_UART_Read(const bsp_uart_t *uart, uint8_t *buf, uint16_t len)
     if ((rt == NULL) || (rt->cfg == NULL) || (buf == NULL) || (len == 0U)) {
         return 0U;
     }
-    return BSP_UART_Copy_Out(rt, buf, len, 1U);
+    return BSP_UART_CopyOut(rt, buf, len, 1U);
 }
 
 /**
@@ -528,7 +529,7 @@ uint16_t BSP_UART_Read(const bsp_uart_t *uart, uint8_t *buf, uint16_t len)
  * @retval 上电以来因 FIFO 满而丢弃的字节数
  * @note 累加值，不回绕判断；上层可周期性比对增量来判断"是不是读得太慢"。
  */
-uint32_t BSP_UART_Rx_Overflow(const bsp_uart_t *uart)
+uint32_t BSP_UART_RxOverflow(const bsp_uart_t *uart)
 {
     bsp_uart_rt_t *rt = BSP_UART_Find(uart);
 
@@ -540,7 +541,7 @@ uint32_t BSP_UART_Rx_Overflow(const bsp_uart_t *uart)
  * @param uart UART 句柄，不可为 NULL
  * @retval 无
  */
-void BSP_UART_Rx_Clear_Overflow(const bsp_uart_t *uart)
+void BSP_UART_RxClearOverflow(const bsp_uart_t *uart)
 {
     bsp_uart_rt_t *rt = BSP_UART_Find(uart);
 
@@ -558,7 +559,7 @@ void BSP_UART_Rx_Clear_Overflow(const bsp_uart_t *uart)
  * @retval 还能排入多少字节
  * @note 并发下数值立刻会变，只适合判断"大概够不够"；要精确就用 Write 的返回值。
  */
-uint16_t BSP_UART_Tx_Free(const bsp_uart_t *uart)
+uint16_t BSP_UART_TxFree(const bsp_uart_t *uart)
 {
     bsp_uart_rt_t *rt = BSP_UART_Find(uart);
     uint16_t mask;
@@ -621,7 +622,7 @@ uint16_t BSP_UART_Write(const bsp_uart_t *uart, const uint8_t *buf, uint16_t len
     }
 
     /* ---------- 2. DMA 若空闲就立刻发，否则等 TC 回调接续 ---------- */
-    BSP_UART_Tx_Kick(rt);
+    BSP_UART_TxKick(rt);
 
     return len;
 }
@@ -633,7 +634,7 @@ uint16_t BSP_UART_Write(const bsp_uart_t *uart, const uint8_t *buf, uint16_t len
  * @retval 0: 仍有数据没发完，或句柄非法/未初始化
  * @note 只回答"现在空不空"，不等待、不延时。要"等发完"由设备层轮询本函数。
  */
-uint8_t BSP_UART_Tx_Idle(const bsp_uart_t *uart)
+uint8_t BSP_UART_TxIdle(const bsp_uart_t *uart)
 {
     bsp_uart_rt_t *rt = BSP_UART_Find(uart);
     UART_HandleTypeDef *hal;
@@ -670,7 +671,7 @@ uint8_t BSP_UART_Tx_Idle(const bsp_uart_t *uart)
  */
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
-    bsp_uart_rt_t *rt = BSP_UART_Find_By_Hal(huart);
+    bsp_uart_rt_t *rt = BSP_UART_FindByHal(huart);
     uint16_t pos;
     uint16_t dma_size;
 
@@ -696,7 +697,7 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
         break;
     }
 
-    BSP_UART_Rx_Publish(rt, pos);
+    BSP_UART_RxPublish(rt, pos);
 }
 
 /**
@@ -708,7 +709,7 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
  */
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
-    bsp_uart_rt_t *rt = BSP_UART_Find_By_Hal(huart);
+    bsp_uart_rt_t *rt = BSP_UART_FindByHal(huart);
 
     if ((rt == NULL) || (rt->ready == 0U)) {
         return;
@@ -717,7 +718,7 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
     rt->tx_tail = (uint16_t)((rt->tx_tail + rt->tx_len) &
                              (uint16_t)(rt->cfg->tx_fifo_size - 1U));
     rt->tx_busy = 0U;
-    BSP_UART_Tx_Kick(rt);
+    BSP_UART_TxKick(rt);
 }
 
 /**
@@ -728,17 +729,17 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
  *       会关掉 DMAR 并退出接收，不重启就永久收不到数据。
  *       重启前 rx_pub 归零（DMA 从缓冲起点重新写），已进 FIFO 的数据不受影响。
  *       重启失败时不重试——继续重试只会反复失败，上层可从溢出计数与
- *       BSP_UART_Is_Ready() 观察到异常。
+ *       BSP_UART_IsReady() 观察到异常。
  */
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
-    bsp_uart_rt_t *rt = BSP_UART_Find_By_Hal(huart);
+    bsp_uart_rt_t *rt = BSP_UART_FindByHal(huart);
 
     if ((rt == NULL) || (rt->ready == 0U)) {
         return;
     }
 
-    if (BSP_UART_Rx_Start(rt) != BSP_UART_OK) {
+    if (BSP_UART_RxStart(rt) != BSP_UART_OK) {
         rt->ready = 0U;   /* 接收彻底停了，让查询接口能反映出来 */
     }
 }

@@ -91,7 +91,7 @@ typedef struct {
 
 /**
  * @brief IIC 总线句柄（不透明类型，成员定义在 bsp_iic.c）
- * @note  句柄本身是常量，运行期状态存在 .c 里的运行时块中，所以实例可以
+ * @note  句柄本身是常量，运行块定义在 bsp_iic.c 里，所以实例可以
  *        进 .rodata。
  */
 typedef struct bsp_iic bsp_iic_t;

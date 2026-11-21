@@ -28,7 +28,7 @@
  *
  *       两个处理函数都只碰"写状态"这一层：
  *         灯 → Dev_LED_Toggle() / Dev_LED_Write()  写一个 GPIO；
- *         页 → APP_Screen_Toggle_Mode()            只翻一个标志。
+ *         页 → APP_Screen_ToggleMode()            只翻一个标志。
  *       真正的 subject 写入都在 LVGL 线程里（见 app_screen.h），两者都不碰
  *       LVGL、不碰 SPI、不发跨线程唤醒。界面刷新与换面板落地由显示线程
  *       按固定节拍轮询完成，因此按键线程与界面线程之间零耦合，
@@ -49,7 +49,7 @@
 #include <stdint.h>
 // 功能包含
 #include "app_key_cmd.h"
-#include "app_screen.h"         /* APP_Screen_Toggle_Mode()：请求换面板，只翻标志 */
+#include "app_screen.h"         /* APP_Screen_ToggleMode()：请求换面板，只翻标志 */
 #include "dev_led.h"
 #include "svc_key_cmd.h"        /* svc_key_cmd_entry_t：表的元素类型 */
 
@@ -63,7 +63,7 @@
 static void Key_Led_Toggle(void)
 {
     Dev_LED_Toggle(&dev_led_1);
-    APP_Screen_Toggle_Mode();
+    APP_Screen_ToggleMode();
 }
 
 /**

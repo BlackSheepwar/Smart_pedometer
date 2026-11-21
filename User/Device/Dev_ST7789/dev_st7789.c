@@ -88,10 +88,21 @@
  * 类型定义
  *============================================================================*/
 /**
+ * @brief 面板的运行块（内部类型，不进公共头文件）
+ * @note 每块面板一份：状态跟着句柄走，多块面板之间互不覆盖。
+ */
+typedef struct {
+    uint16_t width;     /* 当前逻辑宽度，随旋转变化，Init 之前为 0 */
+    uint16_t height;    /* 当前逻辑高度，随旋转变化，Init 之前为 0 */
+    uint8_t  rotation;  /* 当前旋转档位 0~3 */
+    uint8_t  ready;     /* 1 表示 Init 已完成；未完成时拒绝开窗与写像素 */
+} dev_st7789_rt_t;
+
+/**
  * @brief ST7789 面板句柄
- * @note 只放配置：总线、片选、三个控制脚、面板原生尺寸与偏移、色序。
- *       运行时状态（当前旋转、逻辑宽高、就绪标志）不进句柄，放在下面的
- *       static 里——这也意味着本模块是单实例设计，见头文件说明。
+ * @note 只放配置与一个指向运行块的指针：总线、片选、三个控制脚、
+ *       面板原生尺寸与偏移、色序都在这里；运行块的类型定义在本文件中，
+ *       实例与句柄成对出现，状态不共享。
  */
 struct dev_st7789 {
     const dev_spi_dev_t *dev;       /* 虚拟 SPI 设备：片选与所属总线由它携带 */
@@ -104,11 +115,18 @@ struct dev_st7789 {
     uint16_t             height;    /* 面板原生高度（未旋转） */
     uint8_t              bgr;       /* 1: MADCTL 置 RGB/BGR 位，红蓝互换时用 */
     uint8_t              inv;       /* 1: 发 INVON（IPS 面板）；0: 发 INVOFF（TN 面板） */
+    dev_st7789_rt_t     *rt;        /* 本实例的运行块：每块面板各一份 */
 };
 
 /*==============================================================================
  * 内部变量
  *============================================================================*/
+/**
+ * @brief 面板 0 的运行块
+ * @note 与面板实例成对定义：一个句柄实例配一份运行块，库侧一起进移植段。
+ */
+static dev_st7789_rt_t dev_st7789_0_rt;
+
 /**
  * @brief 默认面板实例
  * @note 几何四参数描述"玻璃在显存里的位置"：ST7789 显存固定 240 列 × 320 行，
@@ -134,16 +152,9 @@ const dev_st7789_t dev_st7789_0 = {
     .height   = 320u,
     .bgr      = 0u,
     .inv      = 0u,
+    .rt       = &dev_st7789_0_rt,
 };
 
-/** @brief 当前逻辑宽度（随旋转变化），Init 之前为 0 */
-static uint16_t s_width;
-/** @brief 当前逻辑高度（随旋转变化），Init 之前为 0 */
-static uint16_t s_height;
-/** @brief 当前旋转档位 0~3 */
-static uint8_t  s_rotation;
-/** @brief 1 表示 Init 已完成，未完成时拒绝开窗与写像素 */
-static uint8_t  s_ready;
 
 /*==============================================================================
  * 内部函数
@@ -306,7 +317,7 @@ int Dev_ST7789_Init(const dev_st7789_t *lcd, dev_st7789_delay_t delay_ms)
     }
 
     /* 重新初始化时先摘掉就绪标志：中途失败不会留下"自称已就绪"的状态 */
-    s_ready = 0u;
+    lcd->rt->ready = 0u;
 
     /* ---------- 1. 硬复位：RST 低 20 ms 再拉高，等待内部复位完成 ---------- */
     if (lcd->rst != NULL) {
@@ -376,9 +387,9 @@ int Dev_ST7789_Init(const dev_st7789_t *lcd, dev_st7789_delay_t delay_ms)
         return -2;
     }
 
-    /* 全部成功才置就绪：中途任何一步失败时 s_ready 保持 0，
+    /* 全部成功才置就绪：中途任何一步失败时 lcd->rt->ready 保持 0，
        上层不会在半个配置好的面板上写数据 */
-    s_ready = 1u;
+    lcd->rt->ready = 1u;
     return 0;
 }
 
@@ -392,7 +403,7 @@ int Dev_ST7789_Init(const dev_st7789_t *lcd, dev_st7789_delay_t delay_ms)
  * @note MADCTL 取值：0x00 正向、0x60 交换行列并镜像、0xC0 双向镜像、
  *       0xA0 交换行列。交换行列的档位（1、3）逻辑宽高随之互换。
  *       句柄的 bgr 为 1 时额外置 bit3，用于修正模组走线导致的红蓝互换。
- *       命令发成功才更新 s_width / s_height：失败时不会留下一个"没生效
+ *       命令发成功才更新 lcd->rt->width / lcd->rt->height：失败时不会留下一个"没生效
  *       的尺寸"，否则上层按新尺寸算出来的坐标全是错的。
  */
 int Dev_ST7789_SetRotation(const dev_st7789_t *lcd, uint8_t rotation)
@@ -440,9 +451,9 @@ int Dev_ST7789_SetRotation(const dev_st7789_t *lcd, uint8_t rotation)
     }
 
     /* 命令成功后才落盘：失败时不让 Width/Height 返回一个没生效的尺寸 */
-    s_width    = width;
-    s_height   = height;
-    s_rotation = rotation;
+    lcd->rt->width    = width;
+    lcd->rt->height   = height;
+    lcd->rt->rotation = rotation;
     return 0;
 }
 
@@ -458,7 +469,7 @@ uint16_t Dev_ST7789_Width(const dev_st7789_t *lcd)
         return 0u;
     }
 
-    return s_width;
+    return lcd->rt->width;
 }
 
 /**
@@ -473,7 +484,7 @@ uint16_t Dev_ST7789_Height(const dev_st7789_t *lcd)
         return 0u;
     }
 
-    return s_height;
+    return lcd->rt->height;
 }
 
 /**
@@ -489,7 +500,7 @@ uint8_t Dev_ST7789_GetRotation(const dev_st7789_t *lcd)
         return 0xFFu;
     }
 
-    return s_rotation;
+    return lcd->rt->rotation;
 }
 
 /**
@@ -514,10 +525,10 @@ int Dev_ST7789_SetWindow(const dev_st7789_t *lcd, uint16_t x0, uint16_t y0,
     uint32_t ys;
     uint32_t ye;
 
-    if ((lcd == NULL) || (s_ready == 0u) || (s_width == 0u)) {
+    if ((lcd == NULL) || (lcd->rt->ready == 0u) || (lcd->rt->width == 0u)) {
         return -1;
     }
-    if ((x0 > x1) || (y0 > y1) || (x1 >= s_width) || (y1 >= s_height)) {
+    if ((x0 > x1) || (y0 > y1) || (x1 >= lcd->rt->width) || (y1 >= lcd->rt->height)) {
         return -1;
     }
 
@@ -566,7 +577,7 @@ int Dev_ST7789_WritePixels(const dev_st7789_t *lcd, const uint8_t *data,
 {
     int status;
 
-    if ((lcd == NULL) || (data == NULL) || (len == 0u) || (s_ready == 0u)) {
+    if ((lcd == NULL) || (data == NULL) || (len == 0u) || (lcd->rt->ready == 0u)) {
         return -1;
     }
     if ((len & 1u) != 0u) {
@@ -604,7 +615,7 @@ int Dev_ST7789_WritePattern(const dev_st7789_t *lcd, const uint8_t *pattern,
 {
     int status;
 
-    if ((lcd == NULL) || (pattern == NULL) || (s_ready == 0u)) {
+    if ((lcd == NULL) || (pattern == NULL) || (lcd->rt->ready == 0u)) {
         return -1;
     }
     if ((pat_len == 0u) || (total_len == 0u) ||

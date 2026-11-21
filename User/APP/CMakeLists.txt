@@ -126,7 +126,7 @@ target_compile_options(app_ui_port PRIVATE ${USER_WARN_FLAGS})
 #
 #   svc_key_cmd 必须 PUBLIC：本库的公开头要暴露 svc_key_cmd_entry_t，
 #   用它的代码（TASK）得顺带拿到 svc_key_cmd.h 与 svc_key_logic.h。
-#   处理函数只写状态：APP_Screen_Toggle_Mode() / Select_Mode()（标志）、
+#   处理函数只写状态：APP_Screen_ToggleMode() / Select_Mode()（标志）、
 #   Dev_LED_Toggle() / Write()（GPIO），都不碰 LVGL。
 #   本层因此既不 include FreeRTOS.h / cmsis_os2.h，也不依赖 svc_lvgl。
 # -----------------------------------------------------------------------------

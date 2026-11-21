@@ -78,10 +78,10 @@
  *       osKernelGetTickCount() 内部带 IS_IRQ() 分支，任务与中断上下文
  *       都能安全调用。
  */
-static uint32_t Task_LVGL_Tick_Ms(void)
+static uint32_t Task_LVGL_TickMs(void)
 {
     _Static_assert(configTICK_RATE_HZ == 1000,
-                   "Task_LVGL_Tick_Ms 假设 1 tick = 1 ms；tick 频率变了必须改回换算写法");
+                   "Task_LVGL_TickMs 假设 1 tick = 1 ms；tick 频率变了必须改回换算写法");
 
     return osKernelGetTickCount();
 }
@@ -94,7 +94,7 @@ static uint32_t Task_LVGL_Tick_Ms(void)
  *       按键扫描与 OLED 任务照常运行。设备层只描述"按手册要等 N 毫秒"，
  *       具体怎么等由本函数决定——这是"换 OS 只改 TASK"的落点之一。
  */
-static void Task_LVGL_Delay_Ms(uint32_t ms)
+static void Task_LVGL_DelayMs(uint32_t ms)
 {
     (void)osDelay(ms);
 }
@@ -114,7 +114,7 @@ void Task_LVGL(void *argument)
     (void)argument;
 
     /* ---------- 1. 显示服务先于界面：screen 需要挂到 display 上 ---------- */
-    if (Svc_LVGL_Init(Task_LVGL_Tick_Ms, Task_LVGL_Delay_Ms) != 0) {
+    if (Svc_LVGL_Init(Task_LVGL_TickMs, Task_LVGL_DelayMs) != 0) {
         for (;;) {
             (void)osDelay(TASK_LVGL_FAULT_DELAY_MS);
         }

@@ -5,7 +5,7 @@
  * @date 2026-11-21
  *
  * @note 设计模型：
- *       1. 每路总线一个总线对象（bsp 句柄 + 互斥量 + 运行时块），总线对象
+ *       1. 每路总线一个总线对象（bsp 句柄 + 互斥量 + 运行块），总线对象
  *          不导出，上层只看得到设备句柄；
  *       2. 一次读写 = 抢总线互斥量 → 按设备句柄换总线时钟 → 启动一笔 DMA
  *          → 睡在任务通知上等完成 → 超时就中止并复位；
@@ -46,7 +46,7 @@ extern osMutexId_t IIC_LOCKHandle;
  * 类型定义
  *============================================================================*/
 /**
- * @brief 总线运行时块
+ * @brief 总线运行块
  * @note 记着谁在等、结果是什么、这一笔是否已被放弃。
  */
 typedef struct {
@@ -63,7 +63,7 @@ typedef struct {
 typedef struct {
     const bsp_iic_t *bsp;  /* 芯片侧总线句柄 */
     osMutexId_t     *lock; /* 指向 CubeMX 生成的互斥量句柄 */
-    dev_iic_rt_t    *rt;   /* 运行期状态 */
+    dev_iic_rt_t    *rt;   /* 运行块 */
 } dev_iic_t;
 
 /**
@@ -79,7 +79,7 @@ struct dev_iic_dev {
 /*==============================================================================
  * 内部变量
  *============================================================================*/
-/** @brief I2C1 的运行时块 */
+/** @brief I2C1 的运行块 */
 static dev_iic_rt_t dev_iic1_rt;
 
 /** @brief I2C1 总线对象；不导出，只经设备句柄间接使用 */
@@ -122,7 +122,7 @@ static dev_iic_status_t Dev_IIC_Map(bsp_iic_status_t status)
 
 /**
  * @brief 搬运完成回调（中断上下文）
- * @param ctx    总线运行时块
+ * @param ctx    总线运行块
  * @param status 本次结果
  * @retval 无
  * @note 先写结果与完成标志、再读 owner 与放弃标志：任务被唤醒后看到的

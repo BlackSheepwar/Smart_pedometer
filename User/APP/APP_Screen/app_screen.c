@@ -160,7 +160,7 @@ void APP_Screen_Init(void)
  *       __atomic_fetch_xor：取值只有 0/1，异或 1 就是翻转，Cortex-M4 上是
  *       LDREXB/STREXB 循环，无锁、不关中断，APP 层也不因此需要引入 FreeRTOS.h。
  */
-void APP_Screen_Toggle_Mode(void)
+void APP_Screen_ToggleMode(void)
 {
     (void)__atomic_fetch_xor(&s_pending_mode, 1u, __ATOMIC_RELAXED);
 }
@@ -180,7 +180,7 @@ void APP_Screen_Toggle_Mode(void)
  *       与 Toggle 的区别只在语义：Toggle 是"不管当前是哪块，翻到另一块"，
  *       本函数是"就选这块"。
  */
-void APP_Screen_Select_Mode(uint8_t mode)
+void APP_Screen_SelectMode(uint8_t mode)
 {
     if ((mode != APP_SCREEN_MODE_SPEED) && (mode != APP_SCREEN_MODE_POS)) {
         return;
@@ -198,7 +198,7 @@ void APP_Screen_Select_Mode(uint8_t mode)
  *       先写进去，由 App_UI_Set_Time() 在显示线程里丢掉，这样即使
  *       RTC 读失败（返回 0xFF）也不会把非法时间画到屏上。
  */
-void APP_Screen_Set_Time(uint8_t hour, uint8_t minute)
+void APP_Screen_SetTime(uint8_t hour, uint8_t minute)
 {
     s_hhmm = (uint16_t)(((uint16_t)hour * 100u) + (uint16_t)minute);
 }
@@ -212,7 +212,7 @@ void APP_Screen_Set_Time(uint8_t hour, uint8_t minute)
  * @note 年份取模放在这里而不是显示层：数据区只存"要显示的东西"，
  *       免得读的人还要再想一次 2026 与 26 的关系。
  */
-void APP_Screen_Set_Date(uint16_t year, uint8_t month, uint8_t day)
+void APP_Screen_SetDate(uint16_t year, uint8_t month, uint8_t day)
 {
     s_date = ((uint32_t)(year % 100u) * 10000u)
              + ((uint32_t)month * 100u)
@@ -224,7 +224,7 @@ void APP_Screen_Set_Date(uint16_t year, uint8_t month, uint8_t day)
  * @param percent 0~100
  * @retval 无
  */
-void APP_Screen_Set_Battery(uint8_t percent)
+void APP_Screen_SetBattery(uint8_t percent)
 {
     s_batt = percent;
 }
@@ -234,7 +234,7 @@ void APP_Screen_Set_Battery(uint8_t percent)
  * @param speed_d10 速度 × 10（0.1 km/h）
  * @retval 无
  */
-void APP_Screen_Set_Speed(uint16_t speed_d10)
+void APP_Screen_SetSpeed(uint16_t speed_d10)
 {
     s_speed_d10 = speed_d10;
 }
@@ -249,7 +249,7 @@ void APP_Screen_Set_Speed(uint16_t speed_d10)
  *       残留窗口是 Step 读完纬度之后写者才更新经度，此时会推一帧
  *       「旧纬度 + 新经度」——只影响一帧显示，不会产生非法坐标。
  */
-void APP_Screen_Set_Position(int32_t lat_e6, int32_t lon_e6)
+void APP_Screen_SetPosition(int32_t lat_e6, int32_t lon_e6)
 {
     s_lat_e6 = (int32_t)APP_SCREEN_UNSET_U32;   /* 先标记为未完成 */
     s_lon_e6 = lon_e6;
@@ -261,7 +261,7 @@ void APP_Screen_Set_Position(int32_t lat_e6, int32_t lon_e6)
  * @param count 0~24
  * @retval 无
  */
-void APP_Screen_Set_Satellites(uint8_t count)
+void APP_Screen_SetSatellites(uint8_t count)
 {
     s_sat = count;
 }

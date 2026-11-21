@@ -25,7 +25,7 @@
  *       subject_mode（0 = 速度，1 = 经纬度）。
  *
  *       ★换页的触发源★
- *         1. PC13 按键 → APP_Screen_Toggle_Mode()（翻到另一页）
+ *         1. PC13 按键 → APP_Screen_ToggleMode()（翻到另一页）
  *       页数是界面语义，归 APP_Screen 管；本层只负责把数据写进 subject，
  *       不解析任何输入事件。
  *

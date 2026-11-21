@@ -14,7 +14,7 @@
  *
  *       搬运方式按能力分档：0 无功能 / 1 阻塞 / 2 中断 / 3 DMA。两路的实际
  *       能力由 BSP_SPI_Init() 从 HAL 句柄探测（方向允许不允许、有没有挂
- *       DMA 流），结果记在运行期的 rt 里，句柄本身不写能力值——能力是
+ *       DMA 流），结果记在运行块里，句柄本身不写能力值——能力是
  *       CubeMX 的配置结果，不是靠人手抄进代码的常量。
  *       可以用的那几档对外契约相同：BSP_SPI_StartTransfer() 启动即返回
  *       BSP_SPI_OK，完成或出错时在中断里回调 done(ctx, status)，也可以用
@@ -82,9 +82,9 @@ typedef enum {
  * @brief SPI 总线句柄（不透明类型，成员定义在 bsp_spi.c）
  * @note 一个总线句柄对一个 HAL 外设，句柄登记的是"用哪个外设、输入时钟
  *       多少"这类配置；收发两路各能做到哪一档不写在这里，由
- *       BSP_SPI_Init() 从 HAL 句柄探测后记进运行期对象——能力是 CubeMX
+ *       BSP_SPI_Init() 从 HAL 句柄探测后记进运行块——能力是 CubeMX
  *       的配置结果，抄一遍就成了两份会漂移的事实。
- *       句柄 const 进 .rodata；运行期状态（忙标志、回调登记、当前分频、
+ *       句柄 const 进 .rodata；运行块（忙标志、回调登记、当前分频、
  *       两路探测结果）放在 .c 的内部对象里，头文件不暴露。
  *       输入时钟是句柄的配置项，不是调用时现取：它是板级事实，填进句柄后
  *       分频计算只剩一次除法，调用路径上不碰时钟树的查询接口。
@@ -116,7 +116,7 @@ extern const bsp_spi_t bsp_spi1;
  * 函数声明
  *============================================================================*/
 /**
- * @brief 初始化 SPI 驱动：探测两路的实际搬运能力，记进运行期对象
+ * @brief 初始化 SPI 驱动：探测两路的实际搬运能力，记进运行块
  * @retval BSP_SPI_OK: 初始化成功（已初始化的总线会被跳过）
  * @retval BSP_SPI_ERR_PARAM: 句柄漏填输入时钟（pclk_hz 为 0）
  * @retval BSP_SPI_ERR_STATE: 缺 HAL 句柄、外设非 READY、Mode 不是 Master，
@@ -124,7 +124,7 @@ extern const bsp_spi_t bsp_spi1;
  * @note 必须在 MX_SPIx_Init() 之后调用，且不能在中断里调用。总线互斥量
  *       不属于本层：它的创建与检查在 Dev_SPI_Init() 里。
  *       探测看两件事：方向允不允许这一路（2LINES / 1LINE / RXONLY），以及
- *       这一路有没有挂 DMA 流。结果只记运行期，句柄不写能力值。
+ *       这一路有没有挂 DMA 流。结果只记进运行块，句柄不写能力值。
  */
 bsp_spi_status_t BSP_SPI_Init(void);
 

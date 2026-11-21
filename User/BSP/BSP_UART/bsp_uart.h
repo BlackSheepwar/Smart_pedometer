@@ -86,7 +86,7 @@ bsp_uart_status_t BSP_UART_Init(void);
  * @retval 1: 已初始化且接收 DMA 在跑
  * @retval 0: 未初始化、接收已停或句柄非法
  */
-uint8_t BSP_UART_Is_Ready(const bsp_uart_t *uart);
+uint8_t BSP_UART_IsReady(const bsp_uart_t *uart);
 
 /**
  * @brief 查询接收 FIFO 中已收未读的字节数
@@ -125,14 +125,14 @@ uint16_t BSP_UART_Read(const bsp_uart_t *uart, uint8_t *buf, uint16_t len);
  * @retval 上电以来因 FIFO 满而丢弃的字节数
  * @note 累加值，不回绕判断；上层可周期性比对增量来判断"是不是读得太慢"。
  */
-uint32_t BSP_UART_Rx_Overflow(const bsp_uart_t *uart);
+uint32_t BSP_UART_RxOverflow(const bsp_uart_t *uart);
 
 /**
  * @brief 清零接收溢出计数
  * @param uart UART 句柄，可为 NULL
  * @retval 无
  */
-void BSP_UART_Rx_Clear_Overflow(const bsp_uart_t *uart);
+void BSP_UART_RxClearOverflow(const bsp_uart_t *uart);
 
 /**
  * @brief 查询发送 FIFO 剩余可写空间
@@ -140,7 +140,7 @@ void BSP_UART_Rx_Clear_Overflow(const bsp_uart_t *uart);
  * @retval 还能排入多少字节
  * @note 并发下数值立刻会变，只适合判断"大概够不够"；要精确就用 Write 的返回值。
  */
-uint16_t BSP_UART_Tx_Free(const bsp_uart_t *uart);
+uint16_t BSP_UART_TxFree(const bsp_uart_t *uart);
 
 /**
  * @brief 把数据排入发送队列，立即返回
@@ -161,6 +161,6 @@ uint16_t BSP_UART_Write(const bsp_uart_t *uart, const uint8_t *buf, uint16_t len
  * @retval 0: 仍有数据没发完，或句柄非法/未初始化
  * @note 只回答"现在空不空"，不等待。要"等发完"由设备层轮询本函数实现。
  */
-uint8_t BSP_UART_Tx_Idle(const bsp_uart_t *uart);
+uint8_t BSP_UART_TxIdle(const bsp_uart_t *uart);
 
 #endif /* __BSP_UART_H__ */

@@ -43,7 +43,7 @@ typedef enum {
 
 /**
  * @brief UART 设备句柄（不透明，定义在 dev_uart.c）
- * @note 一个实例对应一个物理口：bsp 句柄、互斥量、运行期状态。
+ * @note 一个实例对应一个物理口：bsp 句柄、互斥量、运行块。
  */
 typedef struct dev_uart dev_uart_t;
 
@@ -64,7 +64,7 @@ extern const dev_uart_t dev_uart1;
  * @retval DEV_UART_OK: 全部实例就绪
  * @retval DEV_UART_ERR_STATE: 缺 bsp 句柄、互斥量尚未创建，或 bsp_uart 未就绪
  * @note 必须在 BSP_UART_Init() 之后、USER CODE BEGIN RTOS_MUTEX 内调用。
- *       探测走 BSP_UART_Is_Ready() 这个公开接口，不去读 BSP 句柄内部字段。
+ *       探测走 BSP_UART_IsReady() 这个公开接口，不去读 BSP 句柄内部字段。
  */
 dev_uart_status_t Dev_UART_Init(void);
 

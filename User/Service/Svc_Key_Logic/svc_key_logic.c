@@ -45,7 +45,7 @@ extern osMessageQueueId_t KEY_EVT_QHandle;
  * 内部类型
  *============================================================================*/
 /**
- * @brief 一个按键的运行时状态
+ * @brief 一个按键的运行块
  * @note reading 是"这一拍读到什么"，pressed 是"确认下来是什么"：
  *       前者一直在变（抖），后者只在前者稳定够久之后才跟着变。
  */
@@ -56,7 +56,7 @@ typedef struct {
     uint8_t  reading;       /* 这一拍的读数：1 = 按下，0 = 松开 */
     uint8_t  pressed;       /* 确认后的状态：1 = 按住，0 = 松开 */
     uint8_t  long_fired;    /* 本次按住是否已经报过 LONG */
-} key_state_t;
+} svc_key_rt_t;
 
 /*==============================================================================
  * 配置表
@@ -86,7 +86,7 @@ static const svc_key_cfg_t s_key_cfg_table[] = {
 
 /**
  * @brief 表里有多少个键
- * @note 运行时状态数组按这个数分配，加键不需要改实现。
+ * @note 运行块数组按这个数分配，加键不需要改实现。
  */
 #define SVC_KEY_CFG_COUNT   (sizeof(s_key_cfg_table) / sizeof(*s_key_cfg_table))
 
@@ -94,10 +94,10 @@ static const svc_key_cfg_t s_key_cfg_table[] = {
  * 静态数据
  *============================================================================*/
 /**
- * @brief 每个按键的运行时状态，个数跟配置表一致
+ * @brief 每个按键的运行块，个数跟配置表一致
  * @note 配置表是 const（进 .rodata），只有这里会变，RAM 占用只跟键数有关。
  */
-static key_state_t s_key_state[SVC_KEY_CFG_COUNT];
+static svc_key_rt_t s_key_rt[SVC_KEY_CFG_COUNT];
 
 /** @brief 表里的键数，供循环比较 */
 static const uint8_t s_key_count = (uint8_t)SVC_KEY_CFG_COUNT;
@@ -117,7 +117,7 @@ static uint32_t s_key_drop_count;
  * @param add  增量
  * @retval 饱和后的和
  */
-static uint16_t Svc_Key_Logic_Sat_Add(uint16_t base, uint16_t add)
+static uint16_t Svc_Key_Logic_SatAdd(uint16_t base, uint16_t add)
 {
     uint32_t sum = (uint32_t)base + (uint32_t)add;
 
@@ -146,51 +146,51 @@ static void Svc_Key_Logic_SendEvent(const dev_key_t *key, key_event_t event)
 
 /**
  * @brief 刚确认按下：报 DOWN，并把长按计时从"已经按住多久"开始
- * @param state 运行时状态
+ * @param rt 运行块
  * @param cfg   该键的配置
  * @note hold_ms 取 stable_ms 是为了把消抖窗口也算进按住时间：
  *       手指真正按下在窗口开头，判定在窗口结尾。
  */
-static void Svc_Key_Logic_OnPress(key_state_t *state, const svc_key_cfg_t *cfg)
+static void Svc_Key_Logic_OnPress(svc_key_rt_t *rt, const svc_key_cfg_t *cfg)
 {
-    state->pressed    = 1u;
-    state->hold_ms    = state->stable_ms;
-    state->repeat_ms  = 0u;
-    state->long_fired = 0u;
+    rt->pressed    = 1u;
+    rt->hold_ms    = rt->stable_ms;
+    rt->repeat_ms  = 0u;
+    rt->long_fired = 0u;
 
     Svc_Key_Logic_SendEvent(cfg->key, KEY_EVENT_DOWN);
 }
 
 /**
  * @brief 刚确认松开：报 CLICK 或 LONG_UP
- * @param state 运行时状态
+ * @param rt 运行块
  * @param cfg   该键的配置
  * @note 报过 LONG 的松手是"长按结束"，没报过就是"单击"。
  */
-static void Svc_Key_Logic_OnRelease(key_state_t *state, const svc_key_cfg_t *cfg)
+static void Svc_Key_Logic_OnRelease(svc_key_rt_t *rt, const svc_key_cfg_t *cfg)
 {
-    state->pressed = 0u;
+    rt->pressed = 0u;
 
     Svc_Key_Logic_SendEvent(cfg->key,
-                            (state->long_fired != 0u) ? KEY_EVENT_LONG_UP : KEY_EVENT_CLICK);
+                            (rt->long_fired != 0u) ? KEY_EVENT_LONG_UP : KEY_EVENT_CLICK);
 }
 
 /**
  * @brief 按住状态下的计时：先等长按阈值，过了阈值就按间隔连发
- * @param state 运行时状态
+ * @param rt 运行块
  * @param cfg   该键的配置
  * @param elapsed_ms 本次节拍的毫秒数
  */
-static void Svc_Key_Logic_OnHold(key_state_t *state, const svc_key_cfg_t *cfg,
+static void Svc_Key_Logic_OnHold(svc_key_rt_t *rt, const svc_key_cfg_t *cfg,
                                  uint16_t elapsed_ms)
 {
     /* ---------- 1. 还没到长按：攒时长 ---------- */
-    if (state->long_fired == 0u) {
-        state->hold_ms = Svc_Key_Logic_Sat_Add(state->hold_ms, elapsed_ms);
+    if (rt->long_fired == 0u) {
+        rt->hold_ms = Svc_Key_Logic_SatAdd(rt->hold_ms, elapsed_ms);
 
-        if (state->hold_ms >= cfg->long_ms) {
-            state->long_fired = 1u;
-            state->repeat_ms  = 0u;
+        if (rt->hold_ms >= cfg->long_ms) {
+            rt->long_fired = 1u;
+            rt->repeat_ms  = 0u;
             Svc_Key_Logic_SendEvent(cfg->key, KEY_EVENT_LONG);
         }
 
@@ -198,53 +198,53 @@ static void Svc_Key_Logic_OnHold(key_state_t *state, const svc_key_cfg_t *cfg,
     }
 
     /* ---------- 2. 已经报过长按：按 repeat_ms 一直发 ---------- */
-    state->repeat_ms = Svc_Key_Logic_Sat_Add(state->repeat_ms, elapsed_ms);
+    rt->repeat_ms = Svc_Key_Logic_SatAdd(rt->repeat_ms, elapsed_ms);
 
-    if (state->repeat_ms >= cfg->repeat_ms) {
-        state->repeat_ms = 0u;
+    if (rt->repeat_ms >= cfg->repeat_ms) {
+        rt->repeat_ms = 0u;
         Svc_Key_Logic_SendEvent(cfg->key, KEY_EVENT_REPEAT);
     }
 }
 
 /**
  * @brief 推进一个按键的一拍：判稳 → 状态切换 → 计时
- * @param state 运行时状态
+ * @param rt 运行块
  * @param cfg   该键的配置
  * @param elapsed_ms 本次节拍的毫秒数
  */
-static void Svc_Key_Logic_Step(key_state_t *state, const svc_key_cfg_t *cfg,
+static void Svc_Key_Logic_Step(svc_key_rt_t *rt, const svc_key_cfg_t *cfg,
                                uint16_t elapsed_ms)
 {
     uint8_t reading = Dev_Key_Read(cfg->key);
 
     /* ---------- 1. 读数变了：从这一拍重新计时，先不承认 ---------- */
-    if (reading != state->reading) {
-        state->reading   = reading;
-        state->stable_ms = elapsed_ms;
+    if (reading != rt->reading) {
+        rt->reading   = reading;
+        rt->stable_ms = elapsed_ms;
         return;
     }
 
     /* ---------- 2. 读数没变：攒够 debounce_ms 才算数 ---------- */
-    state->stable_ms = Svc_Key_Logic_Sat_Add(state->stable_ms, elapsed_ms);
+    rt->stable_ms = Svc_Key_Logic_SatAdd(rt->stable_ms, elapsed_ms);
 
-    if (state->stable_ms < cfg->debounce_ms) {
+    if (rt->stable_ms < cfg->debounce_ms) {
         return;
     }
 
     /* ---------- 3. 稳了而且是个新状态：切换并产事件 ---------- */
-    if (reading != state->pressed) {
+    if (reading != rt->pressed) {
         if (reading != 0u) {
-            Svc_Key_Logic_OnPress(state, cfg);
+            Svc_Key_Logic_OnPress(rt, cfg);
         } else {
-            Svc_Key_Logic_OnRelease(state, cfg);
+            Svc_Key_Logic_OnRelease(rt, cfg);
         }
 
         return;
     }
 
     /* ---------- 4. 状态没变：按住就继续计时，松开什么都不用做 ---------- */
-    if (state->pressed != 0u) {
-        Svc_Key_Logic_OnHold(state, cfg, elapsed_ms);
+    if (rt->pressed != 0u) {
+        Svc_Key_Logic_OnHold(rt, cfg, elapsed_ms);
     }
 }
 
@@ -262,15 +262,15 @@ void Svc_Key_Logic_Init(void)
     uint8_t index;
 
     for (index = 0u; index < s_key_count; ++index) {
-        key_state_t *state   = &s_key_state[index];
+        svc_key_rt_t *rt   = &s_key_rt[index];
         uint8_t      reading = Dev_Key_Read(s_key_cfg_table[index].key);
 
-        state->reading    = reading;
-        state->pressed    = reading;
-        state->stable_ms  = s_key_cfg_table[index].debounce_ms;
-        state->hold_ms    = 0u;
-        state->repeat_ms  = 0u;
-        state->long_fired = 0u;
+        rt->reading    = reading;
+        rt->pressed    = reading;
+        rt->stable_ms  = s_key_cfg_table[index].debounce_ms;
+        rt->hold_ms    = 0u;
+        rt->repeat_ms  = 0u;
+        rt->long_fired = 0u;
     }
 }
 
@@ -287,6 +287,6 @@ void Svc_Key_Logic_Tick(uint16_t elapsed_ms)
     }
 
     for (index = 0u; index < s_key_count; ++index) {
-        Svc_Key_Logic_Step(&s_key_state[index], &s_key_cfg_table[index], elapsed_ms);
+        Svc_Key_Logic_Step(&s_key_rt[index], &s_key_cfg_table[index], elapsed_ms);
     }
 }

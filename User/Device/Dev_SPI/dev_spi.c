@@ -13,7 +13,7 @@
  *          frame_owner + frame_dev 把这类误用变成 ERR_STATE。
  *       3. 本层只认"设备要什么速率"，怎么求出分频是 BSP 的事；错误码
  *          在这里翻译一次，上层只认 DEV_SPI_*。
- *       4. 运行期状态（帧主、帧设备、就绪标志）放在内部 rt 对象里，
+ *       4. 运行块（帧主、帧设备、就绪标志）放在内部 rt 对象里，
  *          总线句柄本身 const，与框架的配置型句柄约定一致。
  *
  *       OS 对象归属：总线互斥量由 .ioc 配置、freertos.c 生成，本文件只
@@ -52,7 +52,7 @@ extern osMutexId_t SPI1_LOCKHandle;
  * 类型定义
  *============================================================================*/
 /**
- * @brief 总线的运行期状态（内部类型，不进公共头文件）
+ * @brief 总线的运行块（内部类型，不进公共头文件）
  * @note 帧主与帧设备成对存在：两者都为 NULL 表示总线空闲，只有本任务 +
  *       本设备同时匹配才算"这一帧是我开的"。
  */
@@ -73,7 +73,7 @@ typedef struct {
 typedef struct {
     const bsp_spi_t *bsp;  /* BSP 总线：速率与字节搬运由它完成 */
     osMutexId_t     *lock; /* 指向 freertos.c 生成的互斥量句柄 */
-    dev_spi_rt_t    *rt;   /* 运行期状态，定义在本文件内 */
+    dev_spi_rt_t    *rt;   /* 运行块，定义在本文件内 */
 } dev_spi_t;
 
 /**
@@ -94,7 +94,7 @@ struct dev_spi_dev {
 /*==============================================================================
  * 内部变量
  *============================================================================*/
-/** @brief SPI1 的运行期状态，仅本文件可见 */
+/** @brief SPI1 的运行块，仅本文件可见 */
 static dev_spi_rt_t dev_spi1_rt = {
     .frame_owner = NULL,
     .frame_dev   = NULL,
@@ -160,7 +160,7 @@ static dev_spi_status_t Dev_SPI_Map(bsp_spi_status_t status)
 
 /**
  * @brief BSP 的完成回调：落盘结果并唤醒开着帧的任务
- * @param ctx    Dev_SPI_TransferLocked 登记的本总线运行期对象
+ * @param ctx    Dev_SPI_TransferLocked 登记的本总线运行块
  * @param status BSP 层的结果码
  * @retval 无
  * @note 在中断上下文执行，只做两件 O(1) 的事：写结果、唤醒等待者，

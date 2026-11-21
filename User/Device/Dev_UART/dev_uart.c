@@ -5,7 +5,7 @@
  * @date 2026-11-21
  *
  * @note 设计模型：
- *       1. 每个物理口一个设备对象（bsp 句柄 + 互斥量 + 运行期状态），
+ *       1. 每个物理口一个设备对象（bsp 句柄 + 互斥量 + 运行块），
  *          对象本身不导出，上层只拿到设备句柄；
  *       2. 写：抢互斥量 → 循环把字节排进 bsp_uart 的发送 FIFO → 满了就让出
  *          CPU 等一拍，直到排完或超时 → 放锁。一次 Write 的字节在队列里连续；
@@ -47,7 +47,7 @@ extern osMutexId_t UART1_LOCKHandle;
  * 类型定义
  *============================================================================*/
 /**
- * @brief 设备运行时状态
+ * @brief 设备运行块
  */
 typedef struct {
     volatile uint8_t initialized; /* 1: 已完成初始化 */
@@ -59,13 +59,13 @@ typedef struct {
 struct dev_uart {
     const bsp_uart_t *bsp;  /* 芯片侧 UART 句柄 */
     osMutexId_t      *lock; /* 指向 CubeMX 生成的互斥量句柄 */
-    dev_uart_rt_t    *rt;   /* 运行期状态 */
+    dev_uart_rt_t    *rt;   /* 运行块 */
 };
 
 /*==============================================================================
  * 内部变量
  *============================================================================*/
-/** @brief USART1 的运行时状态 */
+/** @brief USART1 的运行块 */
 static dev_uart_rt_t dev_uart1_rt;
 
 /** @brief USART1 设备对象；不导出，只经设备句柄间接使用 */
@@ -106,7 +106,7 @@ static uint8_t Dev_UART_Expired(TickType_t start, TickType_t ticks)
  * @brief 初始化本层：检查互斥量并探测 bsp_uart 是否就绪
  * @retval DEV_UART_OK: 全部实例就绪
  * @retval DEV_UART_ERR_STATE: 缺 bsp 句柄、互斥量尚未创建，或 bsp_uart 未就绪
- * @note 探测走 BSP_UART_Is_Ready()，不读 BSP 句柄内部字段。
+ * @note 探测走 BSP_UART_IsReady()，不读 BSP 句柄内部字段。
  */
 dev_uart_status_t Dev_UART_Init(void)
 {
@@ -121,7 +121,7 @@ dev_uart_status_t Dev_UART_Init(void)
         if (dev->bsp == NULL || dev->lock == NULL || *dev->lock == NULL) {
             return DEV_UART_ERR_STATE;
         }
-        if (BSP_UART_Is_Ready(dev->bsp) == 0U) {
+        if (BSP_UART_IsReady(dev->bsp) == 0U) {
             return DEV_UART_ERR_STATE;
         }
         dev->rt->initialized = 1U;
@@ -140,7 +140,7 @@ uint8_t Dev_UART_IsReady(const dev_uart_t *dev)
     if (dev == NULL || dev->rt->initialized == 0U) {
         return 0U;
     }
-    return BSP_UART_Is_Ready(dev->bsp);
+    return BSP_UART_IsReady(dev->bsp);
 }
 
 /**
@@ -297,7 +297,7 @@ dev_uart_status_t Dev_UART_Flush(const dev_uart_t *dev, uint32_t timeout_ms)
 
     start = xTaskGetTickCount();
 
-    while (BSP_UART_Tx_Idle(dev->bsp) == 0U) {
+    while (BSP_UART_TxIdle(dev->bsp) == 0U) {
         if (Dev_UART_Expired(start, ticks) != 0U) {
             (void)osMutexRelease(*dev->lock);
             return DEV_UART_ERR_TIMEOUT;
@@ -319,7 +319,7 @@ uint16_t Dev_UART_TxFree(const dev_uart_t *dev)
     if (dev == NULL) {
         return 0U;
     }
-    return BSP_UART_Tx_Free(dev->bsp);
+    return BSP_UART_TxFree(dev->bsp);
 }
 
 /**
@@ -332,7 +332,7 @@ uint32_t Dev_UART_RxOverflow(const dev_uart_t *dev)
     if (dev == NULL) {
         return 0U;
     }
-    return BSP_UART_Rx_Overflow(dev->bsp);
+    return BSP_UART_RxOverflow(dev->bsp);
 }
 
 /**
@@ -345,5 +345,5 @@ void Dev_UART_RxClearOverflow(const dev_uart_t *dev)
     if (dev == NULL) {
         return;
     }
-    BSP_UART_Rx_Clear_Overflow(dev->bsp);
+    BSP_UART_RxClearOverflow(dev->bsp);
 }

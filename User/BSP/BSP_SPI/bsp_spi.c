@@ -16,7 +16,7 @@
  *          BSP_SPI_Abort()；Abort 自己也失败就 DeInit/Init 硬复位一次。
  *       3. 分频表是芯片事实，留在这里；"哪台设备要多快"由 Dev_SPI 传进来，
  *          本层不识别设备。总线句柄里的输入时钟是配置项，调用路径不读 RCC。
- *       4. 运行期状态（忙标志、回调登记、当前分频、两路探测结果）放在内部
+ *       4. 运行块（忙标志、回调登记、当前分频、两路探测结果）放在内部
  *          rt 对象里，总线句柄本身 const 进 .rodata，与框架的配置型句柄
  *          约定一致。
  *
@@ -54,7 +54,7 @@ typedef enum {
 } bsp_spi_dir_t;
 
 /**
- * @brief 总线的运行期状态（内部类型，不进公共头文件）
+ * @brief 总线的运行块（内部类型，不进公共头文件）
  * @note 句柄本身 const，可变部分全在这里：中断写忙标志、任务登记回调、
  *       当前分频。presc_init 是 CubeMX 给的基准，presc_code 是当前生效值，
  *       两者必须分开存——设备改过速率之后当前值已经不是基准值了。
@@ -73,13 +73,13 @@ typedef struct {
 
 /**
  * @brief SPI 总线对象（BSP 内部类型，不对外暴露；上层通过 Dev_SPI 使用）
- * @note hal 用 void *，避免头文件引入 HAL；rt 指向运行期状态，句柄保持
+ * @note hal 用 void *，避免头文件引入 HAL；rt 指向运行块，句柄保持
  *       const 才能进 .rodata。这里只放配置，两路能怎么搬由 Init 探测。
  */
 struct bsp_spi {
     void          *hal;      /* HAL SPI 句柄（SPI_HandleTypeDef *） */
     uint32_t       pclk_hz;  /* 该外设的输入时钟（Hz），配置型 */
-    bsp_spi_rt_t  *rt;       /* 运行期状态，定义在本文件内 */
+    bsp_spi_rt_t  *rt;       /* 运行块，定义在本文件内 */
 };
 
 /**
@@ -96,7 +96,7 @@ typedef struct {
 /*==============================================================================
  * 内部变量
  *============================================================================*/
-/** @brief SPI1 的运行期状态，仅本文件可见 */
+/** @brief SPI1 的运行块，仅本文件可见 */
 static bsp_spi_rt_t bsp_spi1_rt = {
     .done        = NULL,
     .ctx         = NULL,
@@ -205,7 +205,7 @@ static uint8_t BSP_SPI_Lesser(uint8_t a, uint8_t b)
 }
 
 /**
- * @brief 探测两路实际能做到的搬运方式，记进运行期对象
+ * @brief 探测两路实际能做到的搬运方式，记进运行块
  * @param bus  总线对象，不能为 NULL
  * @param hspi HAL SPI 句柄
  * @retval 无
@@ -352,7 +352,7 @@ static bsp_spi_status_t BSP_SPI_RunBlocking(const bsp_spi_t *bus,
  * @brief 中止当前传输、清掉回调登记，并让外设回到 READY
  * @param bus 总线对象，不能为 NULL
  * @retval BSP_SPI_OK: 已回到空闲
- * @retval BSP_SPI_ERR_PARAM: 总线或运行期对象为空
+ * @retval BSP_SPI_ERR_PARAM: 总线或运行块为空
  * @retval BSP_SPI_ERR_HAL: HAL_SPI_Abort 失败，已用 DeInit/Init 硬复位
  * @note 仅任务上下文、已持总线时调用。Abort 自身失败（DMA 已跑飞）时用
  *       DeInit/Init 硬复位一次，保证总线能交给下一个调用者。
@@ -639,7 +639,7 @@ bsp_spi_status_t BSP_SPI_Init(void)
         rt->presc_code = hspi->Init.BaudRatePrescaler;
         rt->presc_init = hspi->Init.BaudRatePrescaler;
 
-        /* 清零上一轮可能残留的运行时状态，再标记本路可用 */
+        /* 清零上一轮可能残留的运行块，再标记本路可用 */
         rt->done = NULL;
         rt->ctx  = NULL;
         rt->busy = 0U;
@@ -658,7 +658,7 @@ bsp_spi_status_t BSP_SPI_Init(void)
  * @retval BSP_SPI_ERR_HAL: HAL_SPI_Init 失败
  * @note 只在算出的分频与当前值不同时才动外设：同速率连续传输零开销。
  *       分频由句柄里的 pclk_hz 算出，不在调用路径里读 RCC——输入时钟是
- *       板级配置，不是每次调用都要问一次的运行期事实。
+ *       板级配置，不是每次调用都要重读的运行块字段。
  *       改 BR 必须关掉 SPE，所以只能在总线空闲、片选全高时调用；
  *       调用者（Dev_SPI 的 Select）负责保证这个时机，本层不做检查。
  *       HAL_SPI_Init 只重写 CR1/CR2，不会重跑 MspInit（那只在 State 为
