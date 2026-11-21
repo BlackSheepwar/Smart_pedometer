@@ -1,389 +1,409 @@
 /**
- * @file bsp_uart.c
- * @brief UART 硬件驱动层实现：两路能力探测、三档搬运、字节注入
- * @author Ricardo
- * @date 2026-11-21
+ * @file    bsp_uart.c
+ * @brief   串口芯片层实现：档位探测、三档搬运、中断只记位置。
+ * @author  Ricardo
+ * @date    2026-11-21
  *
- * @note 数据流（本层不缓存，缓存全在设备层）：
- *
- *         USARTx RX ──DMA Circular──> rx_buf（本层暂存）
- *                          │
- *              HT / TC / IDLE│只算"新增了哪一段"，立刻交给 rx_push
- *                          ▼
- *                    设备层的接收队列
- *
- *         设备层发送队列 ──tx_fetch──> tx_stage ──DMA/中断──> USARTx TX
- *
- *       为什么本层不排队：队列容量、满时丢谁、溢出怎么记，都是"产品策略"，
- *       与芯片无关；放在本层会让裸机与 RTOS 两套实现各写一遍。本层只做
- *       "把字节从寄存器搬到内存、再从内存搬回寄存器"。
- *
- *       位置换算：HAL 的 HT 回调传 Size/2、TC 传 Size、IDLE 传 Size-NDTR，
- *       三者含义不一致；统一换算成"DMA 当前写指针位置"后再算增量，只有一套
- *       边界逻辑（见 BSP_UART_RxPublish）。
- *
- *       退档：启动失败时收/发各自向下退一档（DMA→中断→阻塞），只退不进；
- *       退档后本层不再尝试高档。设备层通过表现（吞吐、延迟）感知，不需要
- *       额外的状态查询接口。
- *
- *       并发：接收单生产者（中断写 rx_pub）单消费者（无，本层不存）；
- *       发送"检查 + 置位 + 启动"用 PRIMASK 临界区保护，临界区内不等待硬件。
- *       RX DMA 流与 UART 中断必须同优先级：IDLE 走 USARTx_IRQn，HT/TC 走
- *       DMA 流中断，同级才不会互相打断位置计算。
+ * 设计模型：
+ *  1. 缓冲归上层：接收缓冲由 BSP_UART_Start() 传入，DMA 直接写它；
+ *     发送数据不拷贝，向上层要一段连续区间的指针，搬完只归还长度。
+ *  2. 中断只做索引与状态：接收中断累计绝对计数，发送完成中断归还上一段、
+ *     再取下一段指针，不在这里搬字节，也不在这里等待。
+ *  3. 档位在 Init 探测（DMA 流是否存在），启动失败逐级向下退；
+ *     退档只发生在启动那一刻，不影响已经在途的数据。
+ *  4. 阻塞档完全不进中断：接收靠 BSP_UART_RxPoll() 轮询，发送在
+ *     BSP_UART_TxKick() 里同步搬完，两个接口都不等待超过发送预算。
  */
 
-/*==============================================================================
- * 头文件包含
- *============================================================================*/
-// 固定包含
-#include <stddef.h>
-#include <stdint.h>
 #include "bsp_uart.h"
-// 功能包含
+#include "stm32f4xx_hal.h"
 #include "usart.h"
 
+#include <stddef.h>
+
 /*==============================================================================
- * 宏定义与常量
+ * 配置
  *============================================================================*/
 
-/** @brief USART1 接收 DMA 目标缓冲：整块被 DMA 循环写
- *  @note 这是硬件写入口，不是给上层用的队列；数值必须是 2 的倍数、不小于 16。
- *        半区时间 = 半区字节数 × 10 / 波特率。 */
-#define BSP_UART1_RX_BUF_SIZE       256U
+/** @brief 阻塞档一次轮询最多搬走的字节数：太小会跟不上线速率，太大占中断关断时间 */
+#define BSP_UART_RX_POLL_MAX   32U
 
-/** @brief USART1 发送暂存：一拍最多塞给外设这么多字节
- *  @note DMA 源必须是一块连续内存，所以先取到这块再启动传输。 */
-#define BSP_UART1_TX_STAGE_SIZE     256U
-
-/** @brief 实例表长度，由 s_handles[] 的行数决定 */
-#define BSP_UART_COUNT              (sizeof(s_handles) / sizeof(s_handles[0]))
+/** @brief 接收缓冲的最小字节数；再小就没有余量容纳一次中断到下一次取数之间的数据 */
+#define BSP_UART_RX_SIZE_MIN   16U
 
 /*==============================================================================
  * 类型定义
  *============================================================================*/
+
 /**
- * @brief 一路 UART 的运行块
- * @note 句柄是 const，可写字段只能落在本结构里；每个句柄实例各带一份。
+ * @brief 串口运行块：每路 UART 一份
  */
-typedef struct {
-    const bsp_uart_t *cfg;          /* 对应的配置句柄，Init 时绑定 */
-    bsp_uart_hooks_t  hooks;        /* 设备层注册进来的收发钩子 */
-    volatile uint16_t rx_pub;       /* 已交给上层的 DMA 位置，0..rx_buf_size */
-    volatile uint16_t tx_len;       /* 已取进暂存区、还没发完的字节数 */
-    volatile uint8_t  tx_busy;      /* 1: 发送已经交给外设 */
-    volatile uint8_t  rx_byte;      /* 中断档逐字节接收的落点 */
-    volatile uint8_t  ready;        /* 1: 已注册钩子且接收在跑 */
-    volatile uint8_t  initialized;  /* 1: 已初始化并探测过能力 */
-    uint8_t           tx_mode;      /* 发送生效档位 */
-    uint8_t           rx_mode;      /* 接收生效档位 */
+typedef struct
+{
+    uint8_t          *rx_buf;      /**< 上层给的接收缓冲，DMA 直接写入 */
+    uint16_t          rx_size;     /**< 接收缓冲字节数，2 的幂 */
+    bsp_uart_tx_ops_t tx;          /**< 发送侧取数 / 归还回调 */
+    volatile uint32_t rx_total;    /**< 累计收到的绝对字节数 */
+    volatile uint16_t rx_last;     /**< 上一次记录的 DMA 写入位置 */
+    volatile uint16_t tx_len;      /**< 在途那段的字节数 */
+    volatile uint8_t  tx_busy;     /**< 1 = 有一段在途 */
+    volatile uint8_t  rx_byte;     /**< 中断档的逐字节接收暂存 */
+    volatile uint8_t  ready;       /**< 1 = 接收已武装 */
+    volatile uint8_t  initialized; /**< 1 = 档位已探测 */
+    uint8_t           tx_mode;     /**< 生效的发送档位 */
+    uint8_t           rx_mode;     /**< 生效的接收档位 */
 } bsp_uart_rt_t;
 
 /**
- * @brief UART 句柄（布局只在 .c 里出现）
- * @note 只放配置与一个指向运行块的指针：可写数据全在运行块里，句柄是 const，
- *       进 .rodata 不占 RAM；每路 UART 各带一份运行块，由 rt 指向它。
- *       hal 用 void *，避免头文件引入 HAL。
+ * @brief 串口总线句柄：只登记外设，运行期状态在运行块里
  */
-struct bsp_uart {
-    void           *hal;           /* HAL UART 句柄（UART_HandleTypeDef *） */
-    uint8_t        *rx_buf;        /* DMA 循环写缓冲，长度 rx_buf_size */
-    uint8_t        *tx_stage;      /* 发送暂存，长度 tx_stage_size */
-    uint16_t        rx_buf_size;   /* 必须是 2 的倍数 */
-    uint16_t        tx_stage_size; /* 一拍最多多少字节 */
-    bsp_uart_rt_t  *rt;            /* 本实例的运行块：每路 UART 各一份 */
+struct bsp_uart
+{
+    void          *hal;   /**< UART_HandleTypeDef 指针 */
+    bsp_uart_rt_t *rt;    /**< 本实例的运行块 */
 };
 
 /*==============================================================================
- * 内部变量
+ * 运行块与句柄实例
  *============================================================================*/
-/** @brief USART1 接收 DMA 目标缓冲，4 字节对齐便于 DMA 突发访问 */
-static uint8_t s_uart1_rx_buf[BSP_UART1_RX_BUF_SIZE] __attribute__((aligned(4)));
-
-/** @brief USART1 发送暂存，一拍一段 */
-static uint8_t s_uart1_tx_stage[BSP_UART1_TX_STAGE_SIZE];
 
 /** @brief USART1 的运行块，与句柄实例成对定义 */
 static bsp_uart_rt_t bsp_uart1_rt;
 
-/** @brief USART1 配置句柄；hal 指向 CubeMX 生成的 HAL 句柄 */
-const bsp_uart_t bsp_uart1 = {
-    .hal           = &huart1,
-    .rx_buf        = s_uart1_rx_buf,
-    .tx_stage      = s_uart1_tx_stage,
-    .rx_buf_size   = BSP_UART1_RX_BUF_SIZE,
-    .tx_stage_size = BSP_UART1_TX_STAGE_SIZE,
-    .rt            = &bsp_uart1_rt,
+/**
+ * @brief USART1 的总线句柄
+ *
+ * @note 本实例只登记"用哪个外设"；接收缓冲、发送回调、档位在
+ *       BSP_UART_Init() 与 BSP_UART_Start() 里填进运行块。
+ */
+const bsp_uart_t bsp_uart1 =
+{
+    .hal = &huart1,
+    .rt  = &bsp_uart1_rt
 };
 
-/** @brief 驱动管理的句柄表：Init 与中断反查都按它轮询 */
-static const bsp_uart_t *const s_handles[] = {
+/** @brief 已注册的串口句柄表：回调靠它把 HAL 句柄换回运行块 */
+static const bsp_uart_t *const s_handles[] =
+{
     &bsp_uart1,
 };
 
-/** @brief 表里的 UART 路数，供循环比较 */
-static const uint32_t s_uart_count = (uint32_t)BSP_UART_COUNT;
+/** @brief 句柄表长度：空表时也成立，避免 sizeof 表达式在 -Wtype-limits 下告警 */
+static const size_t s_uart_count = sizeof(s_handles) / sizeof(s_handles[0]);
 
 /*==============================================================================
  * 内部函数
  *============================================================================*/
+
 /**
- * @brief 按公共句柄找到对应的运行块
- * @param uart UART 句柄，可为 NULL
- * @retval 对应运行块；句柄未绑定运行块返回 NULL
- * @note 只做指针比对，不判断是否已初始化。
+ * @brief 把 HAL 返回码翻成本层返回码
+ * @param st        HAL 返回值
+ * @return bsp_uart_status_t
+ * @retval BSP_UART_OK        成功
+ * @retval BSP_UART_ERR_STATE 外设忙
+ * @retval BSP_UART_ERR_TIMEOUT 等待超时
+ * @retval BSP_UART_ERR_HAL   其它失败
  */
-static bsp_uart_rt_t *BSP_UART_Find(const bsp_uart_t *uart)
+static bsp_uart_status_t BSP_UART_MapHal(HAL_StatusTypeDef st)
 {
-    if (uart == NULL) {
-        return NULL;
+    switch (st)
+    {
+        case HAL_OK:
+            return BSP_UART_OK;
+        case HAL_BUSY:
+            return BSP_UART_ERR_STATE;
+        case HAL_TIMEOUT:
+            return BSP_UART_ERR_TIMEOUT;
+        default:
+            return BSP_UART_ERR_HAL;
     }
-    return uart->rt;
 }
 
 /**
- * @brief 按 HAL 句柄找到对应的运行块（中断入口用）
- * @param hal HAL UART 句柄
- * @retval 对应运行块；未在表中或尚未 Init 返回 NULL
- * @note 中断里调用，只做指针比对，不做任何 HAL 调用。
+ * @brief 按 HAL 句柄找回运行块
+ * @param hal       外设句柄
+ * @return bsp_uart_rt_t* 找到的运行块；没有登记过时返回 NULL
  */
-static bsp_uart_rt_t *BSP_UART_FindByHal(const void *hal)
+static bsp_uart_rt_t *BSP_UART_Find(const UART_HandleTypeDef *hal)
 {
-    uint32_t i;
+    size_t i;
 
-    for (i = 0U; i < s_uart_count; i++) {
-        if ((s_handles[i]->rt != NULL) && (s_handles[i]->rt->cfg != NULL) &&
-            (s_handles[i]->rt->cfg->hal == hal)) {
+    for (i = 0U; i < s_uart_count; i++)
+    {
+        if ((s_handles[i]->hal == hal) && (s_handles[i]->rt != NULL))
+        {
             return s_handles[i]->rt;
         }
     }
+
     return NULL;
 }
 
 /**
- * @brief 从 HAL 句柄探测发送能力
- * @param hal HAL UART 句柄，不可为 NULL
- * @retval BSP_UART_CAP_DMA: 发送 DMA 流已挂上
- * @retval BSP_UART_CAP_IT: 没有 DMA 流，退到中断
- * @note 阻塞档不需要额外硬件能力，退档时由搬运流程继续往下走。
+ * @brief 探测发送侧可用的最高档位
+ * @param hal       外设句柄
+ * @return uint8_t  BSP_UART_CAP_DMA 或 BSP_UART_CAP_IT
+ *
+ * @note 发送侧只区分"挂没挂 DMA 流"；阻塞档恒可用，不参与探测。
  */
 static uint8_t BSP_UART_ActualTx(const UART_HandleTypeDef *hal)
 {
-    return (hal->hdmatx != NULL) ? (uint8_t)BSP_UART_CAP_DMA
-                                 : (uint8_t)BSP_UART_CAP_IT;
+    return (hal->hdmatx != NULL) ? BSP_UART_CAP_DMA : BSP_UART_CAP_IT;
 }
 
 /**
- * @brief 从 HAL 句柄探测接收能力
- * @param hal HAL UART 句柄，不可为 NULL
- * @retval BSP_UART_CAP_DMA: 接收 DMA 流已挂上
- * @retval BSP_UART_CAP_IT: 没有 DMA 流，退到中断
- * @note 阻塞接收（轮询）不需要硬件中断能力，退档时继续往下走。
+ * @brief 探测接收侧可用的最高档位
+ * @param hal       外设句柄
+ * @return uint8_t  BSP_UART_CAP_DMA 或 BSP_UART_CAP_IT
  */
 static uint8_t BSP_UART_ActualRx(const UART_HandleTypeDef *hal)
 {
-    return (hal->hdmarx != NULL) ? (uint8_t)BSP_UART_CAP_DMA
-                                 : (uint8_t)BSP_UART_CAP_IT;
+    return (hal->hdmarx != NULL) ? BSP_UART_CAP_DMA : BSP_UART_CAP_IT;
 }
 
 /**
- * @brief 把一段字节交给设备层
- * @param rt   运行块，不可为 NULL
- * @param data 字节起始地址，不可为 NULL
- * @param len  字节数，0 表示没有新数据（直接返回）
- * @retval 无
- * @note 中断上下文调用；钩子未注册时什么也不做（正常流程里注册过才会 ready）。
+ * @brief 累计 DMA 已经写进接收缓冲的字节数
+ * @param hal       外设句柄
+ * @param rt        运行块
+ *
+ * @note 只做索引运算：读 DMA 剩余计数换算成写指针，与上次记录的位置求差，
+ *       差值与 rx_size 取模避免回绕误判。中断与任务上下文都调用，
+ *       任务上下文调用前必须关中断。
  */
-static void BSP_UART_RxGive(bsp_uart_rt_t *rt, const uint8_t *data, uint16_t len)
+static void BSP_UART_RxAccumulate(const UART_HandleTypeDef *hal, bsp_uart_rt_t *rt)
 {
-    if ((len == 0U) || (rt->hooks.rx_push == NULL)) {
-        return;
-    }
-    rt->hooks.rx_push(rt->hooks.ctx, data, len);
-}
+    uint16_t rem;
+    uint16_t pos;
+    uint16_t mask;
+    uint16_t delta;
 
-/**
- * @brief 把 DMA 缓冲中"已稳定"的一段交给上层
- * @param rt  运行块，不可为 NULL
- * @param pos 当前 DMA 写指针位置：0..rx_buf_size，等于 rx_buf_size 表示
- *            整圈刚回卷（TC 事件）
- * @retval 无
- * @note 交付区间永远是从 rx_pub 到 pos 的正向距离，跨回卷时拆成两段。
- *       DMA 在半区边界必然触发 HT 或 TC，所以未交付量不会超过半圈；
- *       真出现超过半圈说明丢了中断，按半圈截断，不让脏区间扩散。
- */
-static void BSP_UART_RxPublish(bsp_uart_rt_t *rt, uint16_t pos)
-{
-    const bsp_uart_t *cfg = rt->cfg;
-    uint16_t size = cfg->rx_buf_size;
-    uint16_t pub = rt->rx_pub;
-
-    /* ---------- 1. TC：整圈写完，pos 归一到 0，交付 pub..size ---------- */
-    if (pos >= size) {
-        /* pub 已经是 0 说明这一圈早就交过（TC 与 IDLE 撞在同一圈末尾），
-           再交一次会把旧数据重复送上去 */
-        if ((pub != 0U) && (size > pub)) {
-            BSP_UART_RxGive(rt, &cfg->rx_buf[pub], (uint16_t)(size - pub));
-        }
-        rt->rx_pub = 0U;
+    if (hal->hdmarx == NULL)
+    {
         return;
     }
 
-    /* ---------- 2. 普通事件：算正向距离，回卷拆两段 ---------- */
-    if (pos >= pub) {
-        if (pos > pub) {
-            BSP_UART_RxGive(rt, &cfg->rx_buf[pub], (uint16_t)(pos - pub));
-        }
-    } else {
-        BSP_UART_RxGive(rt, &cfg->rx_buf[pub], (uint16_t)(size - pub));
-        if (pos > 0U) {
-            BSP_UART_RxGive(rt, &cfg->rx_buf[0], pos);
-        }
+    mask = (uint16_t)(rt->rx_size - 1U);
+    rem  = (uint16_t)__HAL_DMA_GET_COUNTER(hal->hdmarx);
+    if (rem > rt->rx_size)
+    {
+        rem = rt->rx_size;
     }
-    rt->rx_pub = pos;
+
+    pos   = (uint16_t)((rt->rx_size - rem) & mask);
+    delta = (uint16_t)((pos - rt->rx_last) & mask);
+
+    if (delta != 0U)
+    {
+        rt->rx_total += (uint32_t)delta;
+        rt->rx_last   = pos;
+    }
 }
 
 /**
- * @brief 按当前接收档位武装接收
- * @param rt 运行块，不可为 NULL
- * @retval BSP_UART_OK: 已武装
- * @retval BSP_UART_ERR_HAL: HAL 拒绝启动
- * @note DMA 档从缓冲起点重新开始，所以 rx_pub 归零；中断档逐字节进 rt->rx_byte；
- *       阻塞档不武装任何中断，由 BSP_UART_Poll() 主动取。
+ * @brief 按当前接收档位武装一次接收
+ * @param hal       外设句柄
+ * @param rt        运行块
+ * @return HAL 状态
+ * @retval HAL_OK   已经武装
+ * @retval HAL_BUSY 外设还在收上一轮
+ * @retval HAL_ERROR 外设拒绝
+ *
+ * @note 阻塞档不武装，直接返回 HAL_OK。
  */
-static bsp_uart_status_t BSP_UART_RxArm(bsp_uart_rt_t *rt)
+static HAL_StatusTypeDef BSP_UART_RxArm(const UART_HandleTypeDef *hal, bsp_uart_rt_t *rt)
 {
-    const bsp_uart_t *cfg = rt->cfg;
-    UART_HandleTypeDef *hal = (UART_HandleTypeDef *)cfg->hal;
-
-    rt->rx_pub = 0U;
-
-    if (rt->rx_mode == BSP_UART_CAP_DMA) {
-        if (HAL_UARTEx_ReceiveToIdle_DMA(hal, cfg->rx_buf,
-                                        cfg->rx_buf_size) != HAL_OK) {
-            return BSP_UART_ERR_HAL;
-        }
-        return BSP_UART_OK;
-    }
-    if (rt->rx_mode == BSP_UART_CAP_IT) {
-        if (HAL_UART_Receive_IT(hal, (uint8_t *)&rt->rx_byte, 1U) != HAL_OK) {
-            return BSP_UART_ERR_HAL;
-        }
-        return BSP_UART_OK;
-    }
-    return BSP_UART_OK;   /* 阻塞档：没有人打断，靠轮询 */
-}
-
-/**
- * @brief 从设备层取一段待发字节到暂存区
- * @param rt 运行块，不可为 NULL
- * @retval 取到的字节数，0 表示设备层暂时没有数据
- * @note 在临界区或中断里调用，依赖设备层的 tx_fetch 是 ISR 安全的。
- */
-static uint16_t BSP_UART_TxFetch(bsp_uart_rt_t *rt)
-{
-    uint16_t n;
-
-    if (rt->hooks.tx_fetch == NULL) {
-        return 0U;
-    }
-    n = rt->hooks.tx_fetch(rt->hooks.ctx, rt->cfg->tx_stage,
-                           rt->cfg->tx_stage_size);
-    if (n > rt->cfg->tx_stage_size) {
-        n = rt->cfg->tx_stage_size;   /* 钩子返回越界值时就地截断 */
-    }
-    return n;
-}
-
-/**
- * @brief 按当前发送档位把暂存区这一段交给外设
- * @param rt 运行块，不可为 NULL
- * @retval BSP_UART_OK: 已交给外设（异步）或已发完（阻塞）
- * @retval BSP_UART_ERR_HAL: HAL 启动失败
- * @note 只用于 DMA / 中断两档；阻塞档在 BSP_UART_TxKick() 里同步发。
- */
-static bsp_uart_status_t BSP_UART_TxStart(bsp_uart_rt_t *rt)
-{
-    UART_HandleTypeDef *hal = (UART_HandleTypeDef *)rt->cfg->hal;
     HAL_StatusTypeDef st;
 
-    if (rt->tx_mode == BSP_UART_CAP_DMA) {
-        st = HAL_UART_Transmit_DMA(hal, rt->cfg->tx_stage, rt->tx_len);
-    } else {
-        st = HAL_UART_Transmit_IT(hal, rt->cfg->tx_stage, rt->tx_len);
+    switch (rt->rx_mode)
+    {
+        case BSP_UART_CAP_DMA:
+            rt->rx_last = 0U;
+            st = HAL_UARTEx_ReceiveToIdle_DMA((UART_HandleTypeDef *)hal,
+                                              rt->rx_buf,
+                                              rt->rx_size);
+            break;
+
+        case BSP_UART_CAP_IT:
+            st = HAL_UART_Receive_IT((UART_HandleTypeDef *)hal,
+                                     (uint8_t *)&rt->rx_byte,
+                                     1U);
+            break;
+
+        default:
+            st = HAL_OK;
+            break;
     }
-    return (st == HAL_OK) ? BSP_UART_OK : BSP_UART_ERR_HAL;
+
+    return st;
 }
 
 /**
- * @brief 算一段字节发完需要多少毫秒
- * @param hal HAL UART 句柄，不可为 NULL
- * @param len 字节数，不能为 0
- * @retval 阻塞发送的等待上限（毫秒）
- * @note 按 10 bit/字节（8N1）向上取整，再加 2 ms 余量；波特率取自 HAL 句柄
- *       里的配置值，不写死数字。
+ * @brief 组装一次发送的预算时间
+ * @param hal       外设句柄
+ * @param len       本次要发的字节数
+ * @return uint32_t 毫秒
+ *
+ * @note 8N1 每字节 10 位，向上取整后再留 2 ms 给外设状态切换。
  */
 static uint32_t BSP_UART_SendBudgetMs(const UART_HandleTypeDef *hal, uint16_t len)
 {
-    uint32_t baud = (hal->Init.BaudRate != 0U) ? hal->Init.BaudRate : 1U;
+    uint32_t baud = hal->Init.BaudRate;
 
-    return (uint32_t)((((uint32_t)len * 10000U) + baud - 1U) / baud) + 2U;
+    if (baud == 0U)
+    {
+        baud = 1U;
+    }
+
+    return (((uint32_t)len * 10U * 1000U) + baud - 1U) / baud + 2U;
+}
+
+/**
+ * @brief 从上层取一段数据并交给外设
+ * @param hal       外设句柄
+ * @param rt        运行块
+ * @param mode      本次使用的档位
+ * @return HAL 状态
+ *
+ * @note 阻塞档在这里同步搬完；中断与 DMA 档只启动，完成点在回调里。
+ */
+static HAL_StatusTypeDef BSP_UART_TxStart(UART_HandleTypeDef *hal,
+                                          uint8_t mode,
+                                          const uint8_t *data,
+                                          uint16_t len)
+{
+    switch (mode)
+    {
+        case BSP_UART_CAP_DMA:
+            return HAL_UART_Transmit_DMA(hal, data, len);
+
+        case BSP_UART_CAP_IT:
+            return HAL_UART_Transmit_IT(hal, data, len);
+
+        default:
+            return HAL_UART_Transmit(hal, data, len, BSP_UART_SendBudgetMs(hal, len));
+    }
+}
+
+/**
+ * @brief 在中断上下文里接着发下一段
+ * @param hal       外设句柄
+ * @param rt        运行块
+ *
+ * @note 只做"取指针 + 启动"，不拷贝、不等待；启动失败就把档位降一级留给
+ *       下一次任务上下文重试，绝不在中断里调用阻塞接口。
+ */
+static void BSP_UART_TxStartNext(UART_HandleTypeDef *hal, bsp_uart_rt_t *rt)
+{
+    const uint8_t *data = NULL;
+    uint16_t len;
+    HAL_StatusTypeDef st;
+
+    if ((rt->tx.acquire == NULL) || (rt->rx_buf == NULL))
+    {
+        return;
+    }
+
+    while (rt->tx_busy == 0U)
+    {
+        len = rt->tx.acquire(rt->tx.ctx, &data);
+        if ((len == 0U) || (data == NULL))
+        {
+            return;
+        }
+
+        rt->tx_len  = len;
+        rt->tx_busy = 1U;
+        st = BSP_UART_TxStart(hal, rt->tx_mode, data, len);
+
+        if (st == HAL_OK)
+        {
+            return;
+        }
+
+        rt->tx_busy = 0U;
+        rt->tx_len  = 0U;
+
+        if (rt->tx_mode <= BSP_UART_CAP_IT)
+        {
+            rt->tx_mode = BSP_UART_CAP_BLOCKING;
+            return;
+        }
+
+        rt->tx_mode--;
+    }
+}
+
+/**
+ * @brief 发送完成：归还上一段，再启动下一段
+ * @param hal       外设句柄
+ * @param rt        运行块
+ */
+static void BSP_UART_TxDone(UART_HandleTypeDef *hal, bsp_uart_rt_t *rt)
+{
+    uint16_t len = rt->tx_len;
+
+    rt->tx_len  = 0U;
+    rt->tx_busy = 0U;
+
+    if ((len != 0U) && (rt->tx.release != NULL))
+    {
+        rt->tx.release(rt->tx.ctx, len);
+    }
+
+    if (rt->tx_mode <= BSP_UART_CAP_BLOCKING)
+    {
+        return;
+    }
+
+    BSP_UART_TxStartNext(hal, rt);
 }
 
 /*==============================================================================
- * 接口实现：初始化与启动
+ * 对外接口
  *============================================================================*/
+
 /**
- * @brief 初始化全部实例：校验配置、探测两面能力、把接收 DMA 改成循环
- * @retval BSP_UART_OK: 全部实例就绪（已就绪的实例会被跳过）
- * @retval BSP_UART_ERR_STATE: 缺 HAL 句柄、缓冲区未配置、外设不在 READY
- * @retval BSP_UART_ERR_HAL: 接收 DMA 改成循环模式时 HAL_DMA_Init() 失败
- * @note 必须在 MX_USARTx_UART_Init() 之后调用，不能在中断里调用。
- *       若 .ioc 把接收 DMA 配成 Normal，这里会改成 Circular 并重新
- *       HAL_DMA_Init()——半区模型依赖硬件循环写，Normal 只收一圈就停。
+ * @brief 初始化串口芯片层：探测两路搬运档位
+ * @return bsp_uart_status_t
+ * @retval BSP_UART_OK        探测完成
+ * @retval BSP_UART_ERR_PARAM 某个句柄的外设为空
+ * @retval BSP_UART_ERR_STATE 外设不在 READY
+ * @retval BSP_UART_ERR_HAL   接收 DMA 流重新配置失败
  */
 bsp_uart_status_t BSP_UART_Init(void)
 {
-    uint32_t i;
+    size_t i;
+    UART_HandleTypeDef *hal;
+    bsp_uart_rt_t *rt;
 
-    for (i = 0U; i < s_uart_count; i++) {
-        const bsp_uart_t *cfg = s_handles[i];
-        bsp_uart_rt_t *rt = s_handles[i]->rt;
-        UART_HandleTypeDef *hal;
+    for (i = 0U; i < s_uart_count; i++)
+    {
+        hal = (UART_HandleTypeDef *)s_handles[i]->hal;
+        rt  = s_handles[i]->rt;
 
-        if (rt == NULL) {
-            return BSP_UART_ERR_STATE;
-        }
-        if (rt->initialized != 0U) {
-            continue;
-        }
-        if ((cfg->hal == NULL) || (cfg->rx_buf == NULL) ||
-            (cfg->tx_stage == NULL) || (cfg->rx_buf_size < 16U) ||
-            (cfg->tx_stage_size < 16U)) {
-            return BSP_UART_ERR_STATE;
+        if ((hal == NULL) || (rt == NULL))
+        {
+            return BSP_UART_ERR_PARAM;
         }
 
-        hal = (UART_HandleTypeDef *)cfg->hal;
         if ((hal->gState != HAL_UART_STATE_READY) ||
-            (hal->RxState != HAL_UART_STATE_READY)) {
+            (hal->RxState != HAL_UART_STATE_READY))
+        {
             return BSP_UART_ERR_STATE;
         }
 
-        /* ---------- 1. 接收 DMA 必须是循环模式，否则半区模型只有一圈 ---------- */
-        if ((hal->hdmarx != NULL) && (hal->hdmarx->Init.Mode != DMA_CIRCULAR)) {
+        if (hal->hdmarx != NULL)
+        {
             hal->hdmarx->Init.Mode = DMA_CIRCULAR;
-            if (HAL_DMA_Init(hal->hdmarx) != HAL_OK) {
+            if (HAL_DMA_Init(hal->hdmarx) != HAL_OK)
+            {
                 return BSP_UART_ERR_HAL;
             }
         }
 
-        /* ---------- 2. 探测两面的能力，先按最高档起步 ---------- */
-        rt->cfg         = cfg;
-        rt->tx_mode     = BSP_UART_ActualTx(hal);
-        rt->rx_mode     = BSP_UART_ActualRx(hal);
-        rt->rx_pub      = 0U;
-        rt->tx_len      = 0U;
-        rt->tx_busy     = 0U;
-        rt->ready       = 0U;
+        rt->tx_mode = BSP_UART_ActualTx(hal);
+        rt->rx_mode = BSP_UART_ActualRx(hal);
+        rt->ready   = 0U;
         rt->initialized = 1U;
     }
 
@@ -391,345 +411,436 @@ bsp_uart_status_t BSP_UART_Init(void)
 }
 
 /**
- * @brief 注册钩子并启动接收，失败时向下退档重试
- * @param uart  实例句柄，不可为 NULL
- * @param hooks 钩子表，不可为 NULL，两个回调都必须非空
- * @retval BSP_UART_OK: 已启动
- * @retval BSP_UART_ERR_PARAM: 句柄或钩子非法
- * @retval BSP_UART_ERR_STATE: 未初始化，或已经启动
- * @retval BSP_UART_ERR_HAL: 退到阻塞档仍然启动失败
- * @note 重复调用返回 ERR_STATE；要换钩子先 BSP_UART_Abort()。
- *       退档只发生在启动失败时：DMA 起不来就试中断，中断起不来就只留轮询。
+ * @brief 启动接收，并登记发送侧回调
+ * @param uart      串口总线句柄
+ * @param rx_buf    上层的接收缓冲
+ * @param rx_size   接收缓冲字节数，2 的幂且不小于 16
+ * @param tx_ops    发送侧取数 / 归还回调
+ * @return bsp_uart_status_t
+ * @retval BSP_UART_OK        接收已武装
+ * @retval BSP_UART_ERR_PARAM 指针为空、缓冲不合规、回调为空
+ * @retval BSP_UART_ERR_STATE 未初始化、已经在跑、外设忙
+ * @retval BSP_UART_ERR_HAL   三档都启动失败
  */
 bsp_uart_status_t BSP_UART_Start(const bsp_uart_t *uart,
-                                 const bsp_uart_hooks_t *hooks)
+                                 uint8_t *rx_buf,
+                                 uint16_t rx_size,
+                                 const bsp_uart_tx_ops_t *tx_ops)
 {
-    bsp_uart_rt_t *rt = BSP_UART_Find(uart);
-    bsp_uart_status_t st;
+    UART_HandleTypeDef *hal;
+    bsp_uart_rt_t *rt;
+    HAL_StatusTypeDef st;
 
-    if ((rt == NULL) || (rt->cfg == NULL) || (hooks == NULL) ||
-        (hooks->rx_push == NULL) || (hooks->tx_fetch == NULL)) {
+    if ((uart == NULL) || (uart->rt == NULL) || (rx_buf == NULL) || (tx_ops == NULL))
+    {
         return BSP_UART_ERR_PARAM;
     }
-    if (rt->initialized == 0U) {
-        return BSP_UART_ERR_STATE;
+
+    if ((tx_ops->acquire == NULL) || (tx_ops->release == NULL))
+    {
+        return BSP_UART_ERR_PARAM;
     }
-    if (rt->ready != 0U) {
+
+    if ((rx_size < BSP_UART_RX_SIZE_MIN) || ((rx_size & (uint16_t)(rx_size - 1U)) != 0U))
+    {
+        return BSP_UART_ERR_PARAM;
+    }
+
+    rt  = uart->rt;
+    hal = (UART_HandleTypeDef *)uart->hal;
+
+    if ((rt->initialized == 0U) || (rt->ready != 0U))
+    {
         return BSP_UART_ERR_STATE;
     }
 
-    rt->hooks = *hooks;
+    rt->rx_buf    = rx_buf;
+    rt->rx_size   = rx_size;
+    rt->tx        = *tx_ops;
+    rt->rx_total  = 0U;
+    rt->rx_last   = 0U;
+    rt->tx_len    = 0U;
+    rt->tx_busy   = 0U;
+    rt->rx_mode   = BSP_UART_ActualRx(hal);
+    rt->tx_mode   = BSP_UART_ActualTx(hal);
 
-    for (;;) {
-        st = BSP_UART_RxArm(rt);
-        if (st == BSP_UART_OK) {
-            break;
+    while (rt->rx_mode > BSP_UART_CAP_BLOCKING)
+    {
+        st = BSP_UART_RxArm(hal, rt);
+        if (st == HAL_OK)
+        {
+            rt->ready = 1U;
+            return BSP_UART_OK;
         }
-        if (rt->rx_mode <= BSP_UART_CAP_BLOCKING) {
-            return BSP_UART_ERR_HAL;
+
+        if (st == HAL_BUSY)
+        {
+            return BSP_UART_ERR_STATE;
         }
+
         rt->rx_mode--;
     }
 
-    rt->tx_len  = 0U;
-    rt->tx_busy = 0U;
-    rt->ready   = 1U;
+    rt->ready = 1U;
+
     return BSP_UART_OK;
 }
 
 /**
- * @brief 查询是否已启动
- * @param uart 实例句柄，可为 NULL
- * @retval 1: 已启动且接收在跑
- * @retval 0: 未启动、已中止或句柄非法
+ * @brief 查询接收到的绝对字节数
+ * @param uart      串口总线句柄
+ * @return uint32_t 累计字节数
+ */
+uint32_t BSP_UART_RxCount(const bsp_uart_t *uart)
+{
+    uint32_t total;
+    uint32_t primask;
+
+    if ((uart == NULL) || (uart->rt == NULL))
+    {
+        return 0U;
+    }
+
+    if (uart->rt->rx_mode != BSP_UART_CAP_DMA)
+    {
+        return uart->rt->rx_total;
+    }
+
+    primask = __get_PRIMASK();
+    __disable_irq();
+    BSP_UART_RxAccumulate((const UART_HandleTypeDef *)uart->hal, uart->rt);
+    total = uart->rt->rx_total;
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
+
+    return total;
+}
+
+/**
+ * @brief 查询接收是否就绪
+ * @param uart      串口总线句柄
+ * @return uint8_t
+ * @retval 1        可以取数
+ * @retval 0        未启动或已中止
  */
 uint8_t BSP_UART_IsReady(const bsp_uart_t *uart)
 {
-    bsp_uart_rt_t *rt = BSP_UART_Find(uart);
+    if ((uart == NULL) || (uart->rt == NULL))
+    {
+        return 0U;
+    }
 
-    return ((rt != NULL) && (rt->ready != 0U)) ? 1U : 0U;
+    return uart->rt->ready;
 }
 
-/*==============================================================================
- * 接口实现：发送
- *============================================================================*/
 /**
- * @brief 通知本层可以发送了，空闲时取一段塞进外设
- * @param uart 实例句柄，不可为 NULL
- * @retval BSP_UART_OK: 已启动，或本来就在跑，或暂时没数据
- * @retval BSP_UART_ERR_PARAM: 句柄非法
- * @retval BSP_UART_ERR_STATE: 未启动
- * @retval BSP_UART_ERR_HAL: 启动失败（已向下退一档，下次调用用新档位重试）
- * @note 阻塞档在本函数里同步发完，期间一直占着调用线程；DMA / 中断档只
- *       启动一段就返回，剩下的由完成回调接续。
+ * @brief 把接收缓冲里的字节搬进外设（仅阻塞档使用）
+ * @param uart      串口总线句柄
+ * @return bsp_uart_status_t
+ * @retval BSP_UART_OK        搬完当前可读字节
+ * @retval BSP_UART_ERR_PARAM uart 为空
+ * @retval BSP_UART_ERR_STATE 未启动
+ */
+bsp_uart_status_t BSP_UART_RxPoll(const bsp_uart_t *uart)
+{
+    UART_HandleTypeDef *hal;
+    bsp_uart_rt_t *rt;
+    uint32_t n = 0U;
+    uint32_t mask;
+    uint8_t byte;
+
+    if ((uart == NULL) || (uart->rt == NULL))
+    {
+        return BSP_UART_ERR_PARAM;
+    }
+
+    rt = uart->rt;
+
+    if (rt->rx_mode != BSP_UART_CAP_BLOCKING)
+    {
+        return BSP_UART_OK;
+    }
+
+    if (rt->ready == 0U)
+    {
+        return BSP_UART_ERR_STATE;
+    }
+
+    hal  = (UART_HandleTypeDef *)uart->hal;
+    mask = (uint32_t)(rt->rx_size - 1U);
+
+    while ((n < BSP_UART_RX_POLL_MAX) &&
+           (__HAL_UART_GET_FLAG(hal, UART_FLAG_RXNE) != RESET))
+    {
+        byte = (uint8_t)hal->Instance->DR;
+        rt->rx_buf[rt->rx_total & mask] = byte;
+        rt->rx_total++;
+        n++;
+    }
+
+    return BSP_UART_OK;
+}
+
+/**
+ * @brief 请求发送队列继续外发
+ * @param uart      串口总线句柄
+ * @return bsp_uart_status_t
+ * @retval BSP_UART_OK        已启动或队列为空
+ * @retval BSP_UART_ERR_PARAM uart 为空
+ * @retval BSP_UART_ERR_STATE 未启动或外设忙
+ * @retval BSP_UART_ERR_TIMEOUT 阻塞档超时（数据仍在队列）
+ * @retval BSP_UART_ERR_HAL   所有档位都启动失败（数据仍在队列）
  */
 bsp_uart_status_t BSP_UART_TxKick(const bsp_uart_t *uart)
 {
-    bsp_uart_rt_t *rt = BSP_UART_Find(uart);
     UART_HandleTypeDef *hal;
+    bsp_uart_rt_t *rt;
+    const uint8_t *data = NULL;
+    uint16_t len;
+    HAL_StatusTypeDef st;
     uint32_t primask;
-    bsp_uart_status_t st;
 
-    if ((rt == NULL) || (rt->cfg == NULL)) {
+    if ((uart == NULL) || (uart->rt == NULL))
+    {
         return BSP_UART_ERR_PARAM;
     }
-    if (rt->ready == 0U) {
+
+    rt  = uart->rt;
+    hal = (UART_HandleTypeDef *)uart->hal;
+
+    if (rt->ready == 0U)
+    {
         return BSP_UART_ERR_STATE;
     }
 
-    hal = (UART_HandleTypeDef *)rt->cfg->hal;
-
-    /* ---------- 阻塞档：取一段发一段，直到设备层没有数据 ---------- */
-    if (rt->tx_mode == BSP_UART_CAP_BLOCKING) {
-        for (;;) {
-            uint16_t n = BSP_UART_TxFetch(rt);
-            HAL_StatusTypeDef st;
-
-            if (n == 0U) {
+    if (rt->tx_mode <= BSP_UART_CAP_BLOCKING)
+    {
+        for (;;)
+        {
+            len = rt->tx.acquire(rt->tx.ctx, &data);
+            if ((len == 0U) || (data == NULL))
+            {
                 return BSP_UART_OK;
             }
-            st = HAL_UART_Transmit(hal, rt->cfg->tx_stage, n,
-                                   BSP_UART_SendBudgetMs(hal, n));
-            if (st != HAL_OK) {
-                return (st == HAL_TIMEOUT) ? BSP_UART_ERR_TIMEOUT
-                                           : BSP_UART_ERR_HAL;
+
+            st = BSP_UART_TxStart(hal, BSP_UART_CAP_BLOCKING, data, len);
+            if (st != HAL_OK)
+            {
+                return BSP_UART_MapHal(st);
             }
+
+            rt->tx.release(rt->tx.ctx, len);
         }
     }
 
-    /* ---------- DMA / 中断档：登记 + 启动，临界区内不等待硬件 ---------- */
-    primask = __get_PRIMASK();
-    __disable_irq();
+    for (;;)
+    {
+        primask = __get_PRIMASK();
+        __disable_irq();
 
-    if (rt->tx_busy != 0U) {
-        __set_PRIMASK(primask);
-        return BSP_UART_OK;
-    }
-    if (rt->tx_len == 0U) {
-        rt->tx_len = BSP_UART_TxFetch(rt);
-        if (rt->tx_len == 0U) {
-            __set_PRIMASK(primask);
+        if (rt->tx_busy != 0U)
+        {
+            if (primask == 0U)
+            {
+                __enable_irq();
+            }
             return BSP_UART_OK;
         }
-    }
 
-    rt->tx_busy = 1U;
-    st = BSP_UART_TxStart(rt);
-    if (st != BSP_UART_OK) {
-        rt->tx_busy = 0U;    /* 暂存区里的字节保留，下次用低一档重试 */
-        if (rt->tx_mode > BSP_UART_CAP_BLOCKING) {
-            rt->tx_mode--;
+        len = rt->tx.acquire(rt->tx.ctx, &data);
+        if ((len == 0U) || (data == NULL))
+        {
+            if (primask == 0U)
+            {
+                __enable_irq();
+            }
+            return BSP_UART_OK;
         }
-    }
 
-    __set_PRIMASK(primask);
-    return st;
+        rt->tx_len  = len;
+        rt->tx_busy = 1U;
+
+        if (primask == 0U)
+        {
+            __enable_irq();
+        }
+
+        st = BSP_UART_TxStart(hal, rt->tx_mode, data, len);
+        if (st == HAL_OK)
+        {
+            return BSP_UART_OK;
+        }
+
+        primask = __get_PRIMASK();
+        __disable_irq();
+        rt->tx_busy = 0U;
+        rt->tx_len  = 0U;
+        if (primask == 0U)
+        {
+            __enable_irq();
+        }
+
+        if (st == HAL_BUSY)
+        {
+            return BSP_UART_OK;
+        }
+
+        if (rt->tx_mode <= BSP_UART_CAP_IT)
+        {
+            rt->tx_mode = BSP_UART_CAP_BLOCKING;
+            return BSP_UART_OK;
+        }
+
+        rt->tx_mode--;
+    }
 }
 
 /**
- * @brief 查询发送路径是否已经空闲
- * @param uart 实例句柄，可为 NULL
- * @retval 1: 暂存区空、没有在途传输、外设发送状态机已回到 READY
- * @retval 0: 仍在发送、未启动或句柄非法
- * @note 只回答"现在空不空"，不等待；设备层的 Flush 轮询本函数。
+ * @brief 查询发送是否已经停稳
+ * @param uart      串口总线句柄
+ * @return uint8_t
+ * @retval 1        队列空且在途数据已收尾
+ * @retval 0        还有数据在途
  */
 uint8_t BSP_UART_TxIdle(const bsp_uart_t *uart)
 {
-    bsp_uart_rt_t *rt = BSP_UART_Find(uart);
     UART_HandleTypeDef *hal;
 
-    if ((rt == NULL) || (rt->cfg == NULL) || (rt->ready == 0U)) {
+    if ((uart == NULL) || (uart->rt == NULL))
+    {
+        return 1U;
+    }
+
+    hal = (UART_HandleTypeDef *)uart->hal;
+
+    if ((uart->rt->tx_busy != 0U) || (uart->rt->tx_len != 0U))
+    {
         return 0U;
     }
 
-    hal = (UART_HandleTypeDef *)rt->cfg->hal;
-
-    if ((rt->tx_len != 0U) || (rt->tx_busy != 0U) ||
-        (hal->gState != HAL_UART_STATE_READY)) {
-        return 0U;
-    }
-    return 1U;
-}
-
-/*==============================================================================
- * 接口实现：轮询与中止
- *============================================================================*/
-/**
- * @brief 轮询接收：仅接收退到阻塞档时使用
- * @param uart 实例句柄，不可为 NULL
- * @retval BSP_UART_OK: 已处理（可能 0 个字节）
- * @retval BSP_UART_ERR_PARAM: 句柄非法
- * @retval BSP_UART_ERR_STATE: 未启动，或接收不在阻塞档
- * @note 不阻塞、不等待。一次最多取一小批，避免长时间占着调用者；读 DR
- *       会顺带清掉 ORE / FE / NE，所以这里不需要额外的清标志步骤。
- */
-bsp_uart_status_t BSP_UART_Poll(const bsp_uart_t *uart)
-{
-    bsp_uart_rt_t *rt = BSP_UART_Find(uart);
-    UART_HandleTypeDef *hal;
-    uint8_t buf[16];
-    uint16_t n = 0U;
-
-    if ((rt == NULL) || (rt->cfg == NULL)) {
-        return BSP_UART_ERR_PARAM;
-    }
-    if (rt->ready == 0U) {
-        return BSP_UART_ERR_STATE;
-    }
-    if (rt->rx_mode != BSP_UART_CAP_BLOCKING) {
-        return BSP_UART_ERR_STATE;
-    }
-
-    hal = (UART_HandleTypeDef *)rt->cfg->hal;
-
-    while ((n < (uint16_t)sizeof(buf)) &&
-           (__HAL_UART_GET_FLAG(hal, UART_FLAG_RXNE) != RESET)) {
-        buf[n] = (uint8_t)(hal->Instance->DR & 0xFFU);
-        n++;
-    }
-    BSP_UART_RxGive(rt, buf, n);
-    return BSP_UART_OK;
+    return (hal->gState == HAL_UART_STATE_READY) ? 1U : 0U;
 }
 
 /**
- * @brief 中止收发，清掉在途状态
- * @param uart 实例句柄，不可为 NULL
- * @retval BSP_UART_OK: 已停
- * @retval BSP_UART_ERR_PARAM: 句柄非法
- * @retval BSP_UART_ERR_STATE: 未初始化
- * @note 之后可以重新 BSP_UART_Start() 注册钩子；已经交给设备层的字节不受影响。
+ * @brief 中止收发并清掉就绪标记
+ * @param uart      串口总线句柄
+ * @return bsp_uart_status_t
+ * @retval BSP_UART_OK        已中止
+ * @retval BSP_UART_ERR_PARAM uart 为空
+ * @retval BSP_UART_ERR_HAL   外设拒绝中止
  */
 bsp_uart_status_t BSP_UART_Abort(const bsp_uart_t *uart)
 {
-    bsp_uart_rt_t *rt = BSP_UART_Find(uart);
+    HAL_StatusTypeDef st;
 
-    if ((rt == NULL) || (rt->cfg == NULL)) {
+    if ((uart == NULL) || (uart->rt == NULL))
+    {
         return BSP_UART_ERR_PARAM;
     }
-    if (rt->initialized == 0U) {
-        return BSP_UART_ERR_STATE;
-    }
 
-    (void)HAL_UART_Abort((UART_HandleTypeDef *)rt->cfg->hal);
-    rt->ready   = 0U;
-    rt->tx_busy = 0U;
-    rt->tx_len  = 0U;
-    rt->rx_pub  = 0U;
-    return BSP_UART_OK;
+    st = HAL_UART_Abort((UART_HandleTypeDef *)uart->hal);
+
+    uart->rt->ready   = 0U;
+    uart->rt->tx_busy = 0U;
+    uart->rt->tx_len  = 0U;
+
+    return (st == HAL_OK) ? BSP_UART_OK : BSP_UART_ERR_HAL;
 }
 
 /*==============================================================================
  * HAL 回调覆盖
  *
- * 覆盖的是 HAL 的 __weak 回调，不是 USARTx_IRQHandler / DMAx_StreamY_IRQHandler
- * 本身；中断向量仍由工程的中断文件分发。
- *
- *   接收 DMA 档：HAL_UARTEx_ReceiveToIdle_DMA() 把 HT / TC / IDLE 统一送到
- *                  HAL_UARTEx_RxEventCallback()，事件类型在 huart->RxEventType；
- *   接收中断档：HAL_UART_Receive_IT() 每个字节进一次 HAL_UART_RxCpltCallback()；
- *   接收阻塞档：两个回调都不参与，数据由 BSP_UART_Poll() 主动取；
- *   发送 DMA / 中断档：HAL_UART_TxCpltCallback() 一段完成后接续下一段。
+ * 三个完成回调与一个错误回调是 HAL 的 __weak 出口，本层把它们覆盖成
+ * "只记状态、只启动"：接收方向不碰数据（DMA 已经写进缓冲），发送方向
+ * 只归还长度、取下一段指针；任何回调都不做字节拷贝、不做等待。
+ * 阻塞档不经过这里。
  *============================================================================*/
+
 /**
- * @brief 接收事件回调：把 HT / TC / IDLE 换算成同一个写指针位置再交付
- * @param huart HAL UART 句柄
- * @param Size  HAL 给出的事件位置，本文件不用（三种事件含义不一致），
- *              统一改用 RxEventType + DMA 计数器推导
- * @retval 无
- * @note 中断上下文，只算增量并调用 rx_push，不访问任何 OS 对象。
+ * @brief 接收事件：DMA 半满 / 满 / 空闲
+ * @param huart     外设句柄
+ * @param Size      本次事件的字节数（未使用，位置从 DMA 计数换算）
+ *
+ * @note 触发点：DMA 传输完成（半满、满）与线路空闲；只累计绝对计数。
  */
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
-    bsp_uart_rt_t *rt = BSP_UART_FindByHal(huart);
-    uint16_t pos;
-    uint16_t size;
+    bsp_uart_rt_t *rt = BSP_UART_Find(huart);
 
     (void)Size;
 
-    if ((rt == NULL) || (rt->ready == 0U) ||
-        (rt->rx_mode != BSP_UART_CAP_DMA) || (huart->hdmarx == NULL)) {
+    if ((rt == NULL) || (rt->rx_mode != BSP_UART_CAP_DMA))
+    {
         return;
     }
 
-    size = rt->cfg->rx_buf_size;
-
-    switch (huart->RxEventType) {
-    case HAL_UART_RXEVENT_HT:
-        pos = (uint16_t)(size / 2U);      /* 前半区已稳定 */
-        break;
-    case HAL_UART_RXEVENT_TC:
-        pos = size;                       /* 整圈完成 */
-        break;
-    case HAL_UART_RXEVENT_IDLE:
-    default:
-        /* 半区内已收到的尾部：用 DMA 剩余计数反推当前写指针 */
-        pos = (uint16_t)(size - __HAL_DMA_GET_COUNTER(huart->hdmarx));
-        break;
-    }
-
-    BSP_UART_RxPublish(rt, pos);
+    BSP_UART_RxAccumulate(huart, rt);
 }
 
 /**
- * @brief 接收完成回调（仅中断档）：一个字节到了就交出去，然后重新武装
- * @param huart HAL UART 句柄
- * @retval 无
- * @note 中断上下文。DMA 档不走这里（走 RxEventCallback），阻塞档不武装中断。
+ * @brief 中断档接收完成：取走 1 字节后重新武装
+ * @param huart     外设句柄
+ *
+ * @note 触发点：RXNE 中断，每次只来 1 字节；这里是唯一在中断里写接收缓冲的地方。
  */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-    bsp_uart_rt_t *rt = BSP_UART_FindByHal(huart);
+    bsp_uart_rt_t *rt = BSP_UART_Find(huart);
 
-    if ((rt == NULL) || (rt->ready == 0U) ||
-        (rt->rx_mode != BSP_UART_CAP_IT)) {
+    if ((rt == NULL) || (rt->rx_mode != BSP_UART_CAP_IT))
+    {
         return;
     }
 
-    BSP_UART_RxGive(rt, (const uint8_t *)&rt->rx_byte, 1U);
+    rt->rx_buf[rt->rx_total & (uint32_t)(rt->rx_size - 1U)] = rt->rx_byte;
+    rt->rx_total++;
     (void)HAL_UART_Receive_IT(huart, (uint8_t *)&rt->rx_byte, 1U);
 }
 
 /**
- * @brief 发送完成回调：清忙标志，接着从设备层取下一段
- * @param huart HAL UART 句柄
- * @retval 无
- * @note 中断上下文。HAL 在回调前已把 gState 与 DMA 状态复位成 READY，
- *       所以这里可以安全地再次启动发送。阻塞档不走这里。
+ * @brief 发送完成：归还上一段并启动下一段
+ * @param huart     外设句柄
+ *
+ * @note 触发点：中断 / DMA 方式下最后一线数据搬完；阻塞方式不经过。
  */
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
-    bsp_uart_rt_t *rt = BSP_UART_FindByHal(huart);
+    bsp_uart_rt_t *rt = BSP_UART_Find(huart);
 
-    if ((rt == NULL) || (rt->ready == 0U) ||
-        (rt->tx_mode == BSP_UART_CAP_BLOCKING)) {
+    if (rt == NULL)
+    {
         return;
     }
 
-    rt->tx_busy = 0U;
-    rt->tx_len  = 0U;
-    (void)BSP_UART_TxKick(rt->cfg);
+    BSP_UART_TxDone(huart, rt);
 }
 
 /**
- * @brief 错误回调：ORE / FE / NE 会终止接收，这里按当前档位原地重启
- * @param huart HAL UART 句柄
- * @retval 无
- * @note 上电时对端已在发、或线路干扰导致 ORE 是常态；不重启就永久收不到。
- *       重启失败不重试（反复失败只会更糟），ready 清零让上层能看到。
- *       阻塞档没有中断可重启，读 DR 已清掉标志，直接返回。
+ * @brief 通信错误：必要时重新武装接收
+ * @param huart     外设句柄
+ *
+ * @note 触发点：ORE / FE / NE / PE 等错误中断，以及 DMA 传输错误。
+ *       接收还在跑时只清错误不动它；接收已停才重装，避免把正在收的
+ *       DMA 重新起一遍而丢掉当前半区。
  */
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
-    bsp_uart_rt_t *rt = BSP_UART_FindByHal(huart);
+    bsp_uart_rt_t *rt = BSP_UART_Find(huart);
 
-    if ((rt == NULL) || (rt->ready == 0U)) {
-        return;
-    }
-    if (rt->rx_mode == BSP_UART_CAP_BLOCKING) {
+    if ((rt == NULL) || (rt->rx_mode == BSP_UART_CAP_BLOCKING))
+    {
         return;
     }
 
-    if (BSP_UART_RxArm(rt) != BSP_UART_OK) {
-        rt->ready = 0U;   /* 接收彻底停了，让查询接口能反映出来 */
+    if (huart->RxState == HAL_UART_STATE_BUSY_RX)
+    {
+        return;
+    }
+
+    if (BSP_UART_RxArm(huart, rt) != HAL_OK)
+    {
+        rt->ready = 0U;
     }
 }

@@ -1,600 +1,653 @@
 /**
- * @file dev_uart.c
- * @brief UART 虚拟外设：接收/发送队列、溢出记账、写入串行化、超时等待
- * @author Ricardo
- * @date 2026-11-21
+ * @file    dev_uart.c
+ * @brief   串口设备层实现：队列、溢出记账、加锁与超时。
+ * @author  Ricardo
+ * @date    2026-11-21
  *
- * @note 设计模型：
- *       1. 每个物理口一个设备对象（bsp 句柄 + 互斥量 + 运行块），对象本身
- *          不导出，上层只拿到设备句柄；
- *       2. 队列在本层：接收队列由中断侧写入、任务侧读取，发送队列由任务侧
- *          写入、中断侧取出；两个队列都是单生产者单消费者，索引只用无符号
- *          差值，不需要关中断也不用加锁；
- *       3. 本层把"取数据"和"推数据"两个钩子注入 bsp_uart，芯片层只负责把
- *          字节从寄存器搬到内存、再从内存搬回寄存器，不知道队列存在；
- *       4. 写：抢互斥量 → 往发送队列里塞 → 通知芯片层启动搬运 → 队列满就
- *          让出 CPU 等一拍，直到塞完或超时 → 放锁。一次 Write 的字节在队列
- *          里连续，不会被另一个任务插进去；
- *       5. 读：先等够 len 字节（或超时），再一次性取走；阻塞搬运档位下顺带
- *          轮询芯片层，让没有中断的裸机移植也能收到数据。
+ * 数据路径：
+ *  接收 DMA 直接写本层的 rx_buf，芯片层只报"总共收了多少字节"，
+ *  本层用绝对写指针与读指针的差算可读量，整条路径没有第二次拷贝。
  *
- *       本文件是唯一含 OS 调用的地方（互斥量、延时、节拍）；要移植到裸机，
- *       只改本文件的等待部分，bsp_uart 与上层接口都不用动。
+ *  发送队列的物理位置就在本层，芯片层通过 acquire 拿到队首连续区间的
+ *  指针直接外发，发完只归还长度，同样没有拷贝。
+ *
+ * 并发：
+ *  发送队列的写指针只在持锁的任务上下文里推进，读指针由芯片层在完成
+ *  中断里推进；接收读指针只有单消费者约束。
  */
 
-/*==============================================================================
- * 头文件包含
- *============================================================================*/
-// 固定包含
-#include <stddef.h>
-#include <stdint.h>
 #include "dev_uart.h"
-// 功能包含
+
 #include "bsp_uart.h"
+
 #include "FreeRTOS.h"
 #include "task.h"
 #include "cmsis_os.h"
 
+#include <stddef.h>
+#include <string.h>
+
 /*==============================================================================
- * 外部变量声明
+ * 外部声明
  *============================================================================*/
-/* ---- CubeMX 生成的互斥量：名字与 .ioc 里 FREERTOS.Mutexes01 一致 ---- */
+
+/**
+ * @brief USART1 的发送互斥量，由 CubeMX 在 RTOS_MUTEX 段里创建
+ */
 extern osMutexId_t UART1_LOCKHandle;
 
 /*==============================================================================
- * 宏定义与常量
+ * 配置
  *============================================================================*/
-/** @brief 写/读的默认超时（ms），调用者传 0 表示不等待（写）或取当前值（读） */
-#define DEV_UART_DEFAULT_TIMEOUT_MS  50U
 
-/** @brief 等待发完的默认超时（ms），调用者传 0 时使用 */
-#define DEV_UART_FLUSH_TIMEOUT_MS    100U
+/** @brief 发送等待队列空位时的单次让步时间 */
+#define DEV_UART_RETRY_MS       1U
 
-/** @brief USART1 接收队列容量，必须是 2 的幂（索引用掩码回卷）
- *  @note 队列满时新字节被丢弃并累加溢出计数，不覆盖旧数据。 */
-#define DEV_UART1_RX_BUF_SIZE        512U
-
-/** @brief USART1 发送队列容量，必须是 2 的幂
- *  @note 容量决定"一帧一次 Write"能有多长；满了 Write 会等或截断。 */
-#define DEV_UART1_TX_BUF_SIZE        512U
-
-/** @brief 编译器屏障：保证数据写入先于索引发布，防止中断侧读到半成品 */
-#define DEV_UART_BARRIER()          __asm volatile ("" : : : "memory")
+/** @brief 写接口在 timeout_ms 为 0 时不等待，这里只用来兜底除零 */
+#define DEV_UART_TIMEOUT_MS_DEF 50U
 
 /*==============================================================================
  * 类型定义
  *============================================================================*/
+
 /**
- * @brief 设备运行块
- * @note 队列、索引、计数器都在这里：每个设备实例一份，不共享。
+ * @brief 串口设备运行块：每个端口一份
  */
-typedef struct {
-    uint8_t          *rx_buf;        /* 接收队列缓冲 */
-    uint8_t          *tx_buf;        /* 发送队列缓冲 */
-    uint16_t          rx_size;       /* 接收队列容量（2 的幂） */
-    uint16_t          tx_size;       /* 发送队列容量（2 的幂） */
-    volatile uint16_t rx_head;       /* 中断侧写入位置 */
-    volatile uint16_t rx_tail;       /* 任务侧读取位置 */
-    volatile uint16_t tx_head;       /* 任务侧写入位置 */
-    volatile uint16_t tx_tail;       /* 中断侧取出位置 */
-    volatile uint32_t rx_overflow;   /* 因队列满而丢弃的字节数 */
-    volatile uint8_t  initialized;   /* 1: 已完成初始化 */
+typedef struct
+{
+    const bsp_uart_t *bsp;          /**< 芯片层句柄 */
+    osMutexId_t      *lock;         /**< 发送队列的互斥量 */
+    uint8_t          *rx_buf;       /**< 接收队列，同时是 DMA 目标 */
+    uint8_t          *tx_buf;       /**< 发送队列 */
+    uint16_t          rx_size;      /**< 接收队列字节数，2 的幂 */
+    uint16_t          tx_size;      /**< 发送队列字节数，2 的幂 */
+    uint32_t          rx_done;      /**< 已读到的绝对位置 */
+    uint32_t          rx_overflow;  /**< 因读得不够快而丢掉的字节数 */
+    uint16_t          tx_head;      /**< 写指针（相对队列） */
+    uint16_t          tx_tail;      /**< 读指针（相对队列） */
+    uint8_t           initialized;  /**< 1 = 已接管芯片层 */
 } dev_uart_rt_t;
 
 /**
- * @brief UART 设备对象（不出头文件）
+ * @brief 串口设备句柄：配置与运行块指针
  */
-struct dev_uart {
-    const bsp_uart_t *bsp;  /* 芯片侧 UART 句柄 */
-    osMutexId_t      *lock; /* 指向 CubeMX 生成的互斥量句柄 */
-    dev_uart_rt_t    *rt;   /* 运行块 */
+struct dev_uart
+{
+    const bsp_uart_t *bsp;      /**< 芯片层句柄 */
+    osMutexId_t      *lock;     /**< 发送队列互斥量 */
+    dev_uart_rt_t    *rt;       /**< 本实例的运行块 */
+    uint8_t          *rx_buf;   /**< 接收队列存储 */
+    uint8_t          *tx_buf;   /**< 发送队列存储 */
+    uint16_t          rx_size;  /**< 接收队列字节数 */
+    uint16_t          tx_size;  /**< 发送队列字节数 */
 };
 
 /*==============================================================================
  * 内部变量
  *============================================================================*/
-/** @brief USART1 接收队列缓冲 */
-static uint8_t s_dev_uart1_rx_buf[DEV_UART1_RX_BUF_SIZE];
 
-/** @brief USART1 发送队列缓冲 */
-static uint8_t s_dev_uart1_tx_buf[DEV_UART1_TX_BUF_SIZE];
+/** @brief USART1 的接收队列：DMA 直接写入，长度必须是 2 的幂 */
+static uint8_t s_uart1_rx_buf[512] __attribute__((aligned(4)));
 
-/** @brief USART1 的运行块 */
-static dev_uart_rt_t dev_uart1_rt = {
-    .rx_buf = s_dev_uart1_rx_buf,
-    .tx_buf = s_dev_uart1_tx_buf,
-    .rx_size = DEV_UART1_RX_BUF_SIZE,
-    .tx_size = DEV_UART1_TX_BUF_SIZE,
+/** @brief USART1 的发送队列：芯片层直接从这里取数外发 */
+static uint8_t s_uart1_tx_buf[512];
+
+/** @brief USART1 的运行块，与句柄实例成对定义 */
+static dev_uart_rt_t dev_uart1_rt;
+
+/**
+ * @brief USART1 的设备句柄
+ *
+ * @note 队列存储与容量在 dev_uart.c 里；句柄只登记"用哪个芯片层句柄、
+ *       用哪把锁、队列在哪"。
+ */
+const dev_uart_t dev_uart1 =
+{
+    .bsp     = &bsp_uart1,
+    .lock    = &UART1_LOCKHandle,
+    .rt      = &dev_uart1_rt,
+    .rx_buf  = s_uart1_rx_buf,
+    .tx_buf  = s_uart1_tx_buf,
+    .rx_size = sizeof(s_uart1_rx_buf),
+    .tx_size = sizeof(s_uart1_tx_buf)
 };
 
-/** @brief USART1 设备对象；不导出，只经设备句柄间接使用 */
-const dev_uart_t dev_uart1 = {
-    .bsp  = &bsp_uart1,
-    .lock = &UART1_LOCKHandle,
-    .rt   = &dev_uart1_rt,
-};
-
-/** @brief 设备表：初始化按它轮询 */
-static const dev_uart_t *const s_devs[] = {
+/** @brief 已注册的端口表 */
+static const dev_uart_t *const s_devs[] =
+{
     &dev_uart1,
 };
 
-/** @brief 设备表长度：由表的行数算出 */
+/** @brief 端口表长度 */
 static const size_t s_dev_count = sizeof(s_devs) / sizeof(s_devs[0]);
 
 /*==============================================================================
  * 内部函数
  *============================================================================*/
+
 /**
- * @brief 判断从 start 起是否已经用满 ticks 个节拍
- * @param start 起始节拍
- * @param ticks 预算节拍数
- * @retval 1: 已到或已超
- * @retval 0: 还没到
- * @note 用无符号差值比较，节拍计数回绕时仍然正确。
+ * @brief 计算时间差是否已经超过预算
+ * @param start     起始 tick
+ * @param ticks     预算 tick
+ * @return uint8_t
+ * @retval 1        已到期
+ * @retval 0        还没到
  */
-static uint8_t Dev_UART_Expired(TickType_t start, TickType_t ticks)
+static uint8_t Dev_UART_Expired(uint32_t start, uint32_t ticks)
 {
-    return (((TickType_t)(xTaskGetTickCount() - start) >= ticks) ? 1U : 0U);
+    return ((osKernelGetTickCount() - start) >= ticks) ? 1U : 0U;
 }
 
 /**
- * @brief 队列中已排队的字节数
- * @param head 写位置
- * @param tail 读位置
- * @param size 容量（2 的幂）
- * @retval 已用容量
- * @note 无符号减法天然处理回卷。
+ * @brief 把累计接收量与读指针对齐，顺带记溢出
+ * @param rt        运行块
+ * @return uint16_t 当前可读字节数
+ *
+ * @note 一旦累计量比读指针超出一整圈，说明最旧的数据已经被 DMA 覆盖，
+ *       把读指针推到最旧的有效字节并把差额记进溢出计数。
  */
-static uint16_t Dev_UART_Used(uint16_t head, uint16_t tail, uint16_t size)
+static uint16_t Dev_UART_RxSync(dev_uart_rt_t *rt)
 {
-    return (uint16_t)((uint16_t)(head - tail) & (uint16_t)(size - 1U));
+    uint32_t total = BSP_UART_RxCount(rt->bsp);
+    uint32_t pending = total - rt->rx_done;
+
+    if (pending > rt->rx_size)
+    {
+        rt->rx_overflow += pending - rt->rx_size;
+        rt->rx_done = total - rt->rx_size;
+        pending = rt->rx_size;
+    }
+
+    return (uint16_t)pending;
 }
 
 /**
- * @brief 接收钩子：中断侧把芯片层交来的字节压进接收队列
- * @param ctx 运行块（注册钩子时传的是 rt，不是设备句柄）
- * @param data 字节起始地址
- * @param len 字节数
- * @retval 无
- * @note 中断上下文调用。队列满时丢弃剩余字节并累加溢出计数，不覆盖旧数据；
- *       rx_head 只在最后发布一次，所以任务侧要么看到整段、要么看不到。
+ * @brief 发送队列已用字节数
+ * @param rt        运行块
+ * @return uint16_t 已用字节数
  */
-static void Dev_UART_OnRxPush(void *ctx, const uint8_t *data, uint16_t len)
+static uint16_t Dev_UART_TxUsed(const dev_uart_rt_t *rt)
+{
+    return (uint16_t)((rt->tx_head - rt->tx_tail) & (uint16_t)(rt->tx_size - 1U));
+}
+
+/**
+ * @brief 发送队列剩余空间
+ * @param rt        运行块
+ * @return uint16_t 可写字节数
+ *
+ * @note 留一个空位用来区分"空"与"满"。
+ */
+static uint16_t Dev_UART_TxRoom(const dev_uart_rt_t *rt)
+{
+    return (uint16_t)((rt->tx_size - 1U) - Dev_UART_TxUsed(rt));
+}
+
+/**
+ * @brief 把一段数据写进发送队列
+ * @param rt        运行块
+ * @param src       源数据
+ * @param len       字节数；调用方保证不超过剩余空间
+ */
+static void Dev_UART_TxCopy(dev_uart_rt_t *rt, const uint8_t *src, uint16_t len)
+{
+    uint16_t mask = (uint16_t)(rt->tx_size - 1U);
+    uint16_t pos = (uint16_t)(rt->tx_head & mask);
+    uint16_t first = (uint16_t)(rt->tx_size - pos);
+
+    if (first > len)
+    {
+        first = len;
+    }
+
+    (void)memcpy(&rt->tx_buf[pos], src, first);
+
+    if (len > first)
+    {
+        (void)memcpy(&rt->tx_buf[0], &src[first], (size_t)(len - first));
+    }
+
+    rt->tx_head = (uint16_t)((rt->tx_head + len) & mask);
+}
+
+/**
+ * @brief 芯片层取数回调：交出队首一段连续数据
+ * @param ctx       运行块
+ * @param data      输出：这段数据的起点
+ * @return uint16_t 这段的字节数；0 表示没有待发数据
+ *
+ * @note 只在索引上做运算，不做拷贝，可以被中断上下文调用。
+ */
+static uint16_t Dev_UART_OnTxAcquire(void *ctx, const uint8_t **data)
 {
     dev_uart_rt_t *rt = (dev_uart_rt_t *)ctx;
-    uint16_t head = rt->rx_head;
-    uint16_t tail = rt->rx_tail;
-    uint16_t size = rt->rx_size;
-    uint16_t space = (uint16_t)((uint16_t)(size - 1U) - Dev_UART_Used(head, tail, size));
-    uint16_t n = len;
-    uint16_t i;
+    uint16_t used;
+    uint16_t mask;
+    uint16_t first;
 
-    if (n > space) {
-        n = space;
+    if ((rt == NULL) || (data == NULL))
+    {
+        return 0U;
     }
 
-    for (i = 0U; i < n; i++) {
-        rt->rx_buf[head] = data[i];
-        head = (uint16_t)((uint16_t)(head + 1U) & (uint16_t)(size - 1U));
+    *data = NULL;
+    mask = (uint16_t)(rt->tx_size - 1U);
+    used = Dev_UART_TxUsed(rt);
+
+    if (used == 0U)
+    {
+        return 0U;
     }
 
-    DEV_UART_BARRIER();
-    rt->rx_head = head;
-
-    if (n < len) {
-        rt->rx_overflow += (uint32_t)(len - n);
+    first = (uint16_t)(rt->tx_size - (rt->tx_tail & mask));
+    if (first > used)
+    {
+        first = used;
     }
+
+    *data = &rt->tx_buf[rt->tx_tail & mask];
+
+    return first;
 }
 
 /**
- * @brief 发送钩子：中断侧从发送队列里取一段交给芯片层
- * @param ctx 运行块
- * @param buf 芯片层的暂存区
- * @param max 最多取多少字节
- * @retval 实际取出的字节数，0 表示队列空
- * @note 中断上下文与任务上下文都可能调用（阻塞档由任务直接取），所以索引
- *       更新只做一次保存；tail 只有消费侧写，不存在两个消费者。
+ * @brief 芯片层归还回调：推进读指针
+ * @param ctx       运行块
+ * @param len       已搬完的字节数
  */
-static uint16_t Dev_UART_OnTxFetch(void *ctx, uint8_t *buf, uint16_t max)
+static void Dev_UART_OnTxRelease(void *ctx, uint16_t len)
 {
     dev_uart_rt_t *rt = (dev_uart_rt_t *)ctx;
-    uint16_t head = rt->tx_head;
-    uint16_t tail = rt->tx_tail;
-    uint16_t size = rt->tx_size;
-    uint16_t n = Dev_UART_Used(head, tail, size);
-    uint16_t i;
+    uint16_t mask;
 
-    if (n > max) {
-        n = max;
+    if ((rt == NULL) || (len == 0U))
+    {
+        return;
     }
 
-    for (i = 0U; i < n; i++) {
-        buf[i] = rt->tx_buf[tail];
-        tail = (uint16_t)((uint16_t)(tail + 1U) & (uint16_t)(size - 1U));
-    }
-
-    DEV_UART_BARRIER();
-    rt->tx_tail = tail;
-    return n;
-}
-
-/**
- * @brief 从发送队列取走已入队的前 n 字节（不回读数据）
- * @param rt 运行块
- * @param n 已排入的字节数
- * @retval 无
- * @note 只在 Write 里调用：数据已拷进队列，这里只推进写位置并发布。
- */
-static void Dev_UART_TxCommit(dev_uart_rt_t *rt, uint16_t n)
-{
-    uint16_t head = rt->tx_head;
-
-    head = (uint16_t)((uint16_t)(head + n) & (uint16_t)(rt->tx_size - 1U));
-    DEV_UART_BARRIER();
-    rt->tx_head = head;
-}
-
-/**
- * @brief 把用户缓冲拷进发送队列的空位
- * @param rt 运行块
- * @param data 数据起始地址
- * @param len 数据长度
- * @retval 实际排入的字节数
- * @note 不推进写位置，由 Dev_UART_TxCommit() 统一发布，保证一次 Write 的
- *       字节对消费者是一整段。
- */
-static uint16_t Dev_UART_TxCopy(dev_uart_rt_t *rt, const uint8_t *data,
-                                uint16_t len)
-{
-    uint16_t head = rt->tx_head;
-    uint16_t size = rt->tx_size;
-    uint16_t i;
-
-    for (i = 0U; i < len; i++) {
-        rt->tx_buf[head] = data[i];
-        head = (uint16_t)((uint16_t)(head + 1U) & (uint16_t)(size - 1U));
-    }
-    return len;
+    mask = (uint16_t)(rt->tx_size - 1U);
+    rt->tx_tail = (uint16_t)((rt->tx_tail + len) & mask);
 }
 
 /*==============================================================================
- * 接口实现
+ * 对外接口
  *============================================================================*/
+
 /**
- * @brief 初始化本层：检查互斥量、注册钩子、启动芯片侧接收
- * @retval DEV_UART_OK: 全部实例就绪
- * @retval DEV_UART_ERR_STATE: 缺 bsp 句柄、互斥量尚未创建，或芯片层拒绝启动
- * @retval DEV_UART_ERR_PARAM: 实例配置非法（队列容量不是 2 的幂或缓冲为空）
- * @note 必须在 BSP_UART_Init() 之后调用；本函数把收/发钩子注入芯片层，
- *       所以之后芯片层的搬运不再经过队列以外的中间层。
+ * @brief 初始化设备层：登记队列、接管芯片层的收发缓冲
+ * @return dev_uart_status_t
+ * @retval DEV_UART_OK        就绪
+ * @retval DEV_UART_ERR_STATE 芯片层未初始化，或已经接管过
+ * @retval DEV_UART_ERR_HAL   芯片层启动失败
  */
 dev_uart_status_t Dev_UART_Init(void)
 {
     size_t i;
+    const dev_uart_t *dev;
+    dev_uart_rt_t *rt;
+    bsp_uart_tx_ops_t ops;
+    bsp_uart_status_t st;
 
-    for (i = 0U; i < s_dev_count; i++) {
-        const dev_uart_t *dev = s_devs[i];
-        dev_uart_rt_t *rt = dev->rt;
-        bsp_uart_hooks_t hooks;
-        bsp_uart_status_t st;
+    for (i = 0U; i < s_dev_count; i++)
+    {
+        dev = s_devs[i];
+        rt = (dev == NULL) ? NULL : (dev_uart_rt_t *)dev->rt;
 
-        if (rt->initialized != 0U) {
+        if ((dev == NULL) || (rt == NULL) || (dev->rx_buf == NULL) || (dev->tx_buf == NULL))
+        {
+            return DEV_UART_ERR_STATE;
+        }
+
+        if (rt->initialized != 0U)
+        {
             continue;
         }
-        if ((dev->bsp == NULL) || (dev->lock == NULL) || (*dev->lock == NULL)) {
-            return DEV_UART_ERR_STATE;
-        }
-        if ((rt->rx_buf == NULL) || (rt->tx_buf == NULL) ||
-            (rt->rx_size < 2U) || (rt->tx_size < 2U) ||
-            ((rt->rx_size & (uint16_t)(rt->rx_size - 1U)) != 0U) ||
-            ((rt->tx_size & (uint16_t)(rt->tx_size - 1U)) != 0U)) {
-            return DEV_UART_ERR_PARAM;
+
+        (void)memset(rt, 0, sizeof(*rt));
+        rt->bsp     = dev->bsp;
+        rt->lock    = dev->lock;
+        rt->rx_buf  = dev->rx_buf;
+        rt->tx_buf  = dev->tx_buf;
+        rt->rx_size = dev->rx_size;
+        rt->tx_size = dev->tx_size;
+
+        ops.acquire = Dev_UART_OnTxAcquire;
+        ops.release = Dev_UART_OnTxRelease;
+        ops.ctx     = rt;
+
+        st = BSP_UART_Start(dev->bsp, dev->rx_buf, dev->rx_size, &ops);
+        if (st != BSP_UART_OK)
+        {
+            return DEV_UART_ERR_HAL;
         }
 
-        hooks.rx_push = Dev_UART_OnRxPush;
-        hooks.tx_fetch = Dev_UART_OnTxFetch;
-        hooks.ctx = rt;
-
-        st = BSP_UART_Start(dev->bsp, &hooks);
-        if (st != BSP_UART_OK) {
-            return DEV_UART_ERR_STATE;
-        }
-
-        rt->rx_head = 0U;
-        rt->rx_tail = 0U;
-        rt->tx_head = 0U;
-        rt->tx_tail = 0U;
-        rt->rx_overflow = 0U;
         rt->initialized = 1U;
     }
+
     return DEV_UART_OK;
 }
 
 /**
- * @brief 查询设备是否可用
- * @param dev 设备句柄，可为 NULL
- * @retval 1: 已初始化且芯片层就绪
- * @retval 0: 否
+ * @brief 查询端口是否可用
+ * @param dev       设备句柄
+ * @return uint8_t
+ * @retval 1        已初始化且芯片层接收已武装
+ * @retval 0        未初始化或芯片层已停
  */
 uint8_t Dev_UART_IsReady(const dev_uart_t *dev)
 {
-    if ((dev == NULL) || (dev->rt->initialized == 0U)) {
+    if ((dev == NULL) || (dev->rt == NULL) || (dev->rt->initialized == 0U))
+    {
         return 0U;
     }
-    return BSP_UART_IsReady(dev->bsp);
+
+    return BSP_UART_IsReady(dev->rt->bsp);
 }
 
 /**
- * @brief 查询接收队列中已收未读的字节数
- * @param dev 设备句柄，可为 NULL
- * @retval 可读字节数，0 表示没有数据或句柄非法
- * @note 单消费者语义：同一口只允许一个任务调用。
+ * @brief 查询接收队列里可读的字节数
+ * @param dev       设备句柄
+ * @return uint16_t 可读字节数
  */
 uint16_t Dev_UART_Available(const dev_uart_t *dev)
 {
-    if (dev == NULL) {
+    if ((dev == NULL) || (dev->rt == NULL) || (dev->rt->initialized == 0U))
+    {
         return 0U;
     }
-    return Dev_UART_Used(dev->rt->rx_head, dev->rt->rx_tail, dev->rt->rx_size);
+
+    return Dev_UART_RxSync(dev->rt);
 }
 
 /**
- * @brief 窥视接收数据，不取走
- * @param dev 设备句柄，可为 NULL
- * @param buf 接收缓冲区，可为 NULL（此时只返回可窥视长度）
- * @param len 最多看多少字节，不能为 0
- * @retval 实际看到的字节数
- * @note 只读不推进读位置；与 Read 一样是单消费者语义。
+ * @brief 看一眼队首字节，不取走
+ * @param dev       设备句柄
+ * @param byte      输出：队首字节
+ * @return uint8_t
+ * @retval 1        取到了
+ * @retval 0        队列为空或参数非法
  */
-uint16_t Dev_UART_Peek(const dev_uart_t *dev, uint8_t *buf, uint16_t len)
+uint8_t Dev_UART_Peek(const dev_uart_t *dev, uint8_t *byte)
 {
     dev_uart_rt_t *rt;
-    uint16_t tail;
     uint16_t avail;
-    uint16_t n;
-    uint16_t i;
 
-    if ((dev == NULL) || (len == 0U)) {
+    if ((dev == NULL) || (dev->rt == NULL) || (byte == NULL) || (dev->rt->initialized == 0U))
+    {
         return 0U;
     }
 
     rt = dev->rt;
-    avail = Dev_UART_Used(rt->rx_head, rt->rx_tail, rt->rx_size);
-    n = (avail < len) ? avail : len;
+    avail = Dev_UART_RxSync(rt);
 
-    if (buf != NULL) {
-        tail = rt->rx_tail;
-        for (i = 0U; i < n; i++) {
-            buf[i] = rt->rx_buf[tail];
-            tail = (uint16_t)((uint16_t)(tail + 1U) & (uint16_t)(rt->rx_size - 1U));
-        }
+    if (avail == 0U)
+    {
+        return 0U;
     }
-    return n;
+
+    *byte = rt->rx_buf[rt->rx_done & (uint32_t)(rt->rx_size - 1U)];
+
+    return 1U;
 }
 
 /**
- * @brief 读取数据：等"够 len 字节"或超时，再取走当前可读的部分
- * @param dev        设备句柄，可为 NULL
- * @param buf        接收缓冲区，不可为 NULL
- * @param len        期望字节数，不能为 0
- * @param timeout_ms 最多等多少毫秒；0 表示不等，取当前可读的部分
- * @retval 实际取到的字节数（≤ len），0 表示超时且没有数据
- * @note 等待期间每 1 ms 让出一次 CPU，并顺带轮询芯片层——芯片层退到阻塞
- *       档位时没有中断可用，只能靠这次轮询把字节取上来。
- *       返回时可能不足 len：超时、或对端只发来这么多。
+ * @brief 读接收队列
+ * @param dev        设备句柄
+ * @param buf        目的缓冲
+ * @param len        期望字节数
+ * @param timeout_ms 最长等待时间
+ * @return uint16_t  实际读出的字节数
  */
-uint16_t Dev_UART_Read(const dev_uart_t *dev, uint8_t *buf, uint16_t len,
-                       uint32_t timeout_ms)
+uint16_t Dev_UART_Read(const dev_uart_t *dev, uint8_t *buf, uint16_t len, uint32_t timeout_ms)
 {
     dev_uart_rt_t *rt;
-    TickType_t ticks = 0U;
-    TickType_t start = 0U;
+    uint32_t start;
+    uint32_t ticks;
     uint16_t avail;
-    uint16_t tail;
     uint16_t n;
-    uint16_t i;
+    uint16_t mask;
+    uint16_t pos;
+    uint16_t first;
 
-    if ((dev == NULL) || (buf == NULL) || (len == 0U) ||
-        (dev->rt->initialized == 0U)) {
+    if ((dev == NULL) || (dev->rt == NULL) || (buf == NULL) || (len == 0U))
+    {
         return 0U;
     }
 
     rt = dev->rt;
 
-    if ((timeout_ms != 0U) &&
-        (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)) {
-        ticks = pdMS_TO_TICKS(timeout_ms);
-        start = xTaskGetTickCount();
-    }
-
-    for (;;) {
-        avail = Dev_UART_Used(rt->rx_head, rt->rx_tail, rt->rx_size);
-        if (avail >= len) {
-            break;
-        }
-        if (ticks == 0U) {
-            break;                       /* 不等待：取当前值 */
-        }
-        if (Dev_UART_Expired(start, ticks) != 0U) {
-            break;
-        }
-        (void)BSP_UART_Poll(dev->bsp);   /* 阻塞档位靠它取字节 */
-        (void)osDelay(1U);
-    }
-
-    avail = Dev_UART_Used(rt->rx_head, rt->rx_tail, rt->rx_size);
-    if ((avail == 0U) || (buf == NULL)) {
+    if (rt->initialized == 0U)
+    {
         return 0U;
     }
+
+    start = osKernelGetTickCount();
+    ticks = pdMS_TO_TICKS(timeout_ms);
+
+    for (;;)
+    {
+        avail = Dev_UART_RxSync(rt);
+
+        if (avail >= len)
+        {
+            break;
+        }
+
+        if (BSP_UART_IsReady(rt->bsp) == 0U)
+        {
+            break;
+        }
+
+        (void)BSP_UART_RxPoll(rt->bsp);
+
+        if ((timeout_ms == 0U) || (Dev_UART_Expired(start, ticks) != 0U))
+        {
+            break;
+        }
+
+        osDelay(DEV_UART_RETRY_MS);
+    }
+
+    avail = Dev_UART_RxSync(rt);
     n = (avail < len) ? avail : len;
 
-    tail = rt->rx_tail;
-    for (i = 0U; i < n; i++) {
-        buf[i] = rt->rx_buf[tail];
-        tail = (uint16_t)((uint16_t)(tail + 1U) & (uint16_t)(rt->rx_size - 1U));
+    if (n == 0U)
+    {
+        return 0U;
     }
-    DEV_UART_BARRIER();
-    rt->rx_tail = tail;
+
+    mask = (uint16_t)(rt->rx_size - 1U);
+    pos = (uint16_t)(rt->rx_done & mask);
+    first = (uint16_t)(rt->rx_size - pos);
+
+    if (first > n)
+    {
+        first = n;
+    }
+
+    (void)memcpy(buf, &rt->rx_buf[pos], first);
+
+    if (n > first)
+    {
+        (void)memcpy(&buf[first], &rt->rx_buf[0], (size_t)(n - first));
+    }
+
+    rt->rx_done += n;
+
     return n;
 }
 
 /**
- * @brief 写入数据：等发送队列腾出空间，最多等到超时
- * @param dev        设备句柄，可为 NULL
- * @param buf        待发送数据，不可为 NULL
- * @param len        请求发送的字节数，不能为 0
- * @param timeout_ms 最多等多少毫秒；0 表示用默认 50 ms
- * @retval 实际排入队列的字节数（≤ len）
- * @note 互斥量在整笔 Write 期间一直持有：既保证字节连续，也避免两个任务
- *       交替等待空间时互相插队。排入后立刻通知芯片层启动搬运。
- *       不得在中断中调用。
+ * @brief 写入发送队列并请求外发
+ * @param dev        设备句柄
+ * @param buf        源数据
+ * @param len        字节数
+ * @param timeout_ms 队列满时最长等待时间
+ * @return uint16_t  实际排入队列的字节数
  */
-uint16_t Dev_UART_Write(const dev_uart_t *dev, const uint8_t *buf, uint16_t len,
-                        uint32_t timeout_ms)
+uint16_t Dev_UART_Write(const dev_uart_t *dev, const uint8_t *buf, uint16_t len, uint32_t timeout_ms)
 {
     dev_uart_rt_t *rt;
-    TickType_t ticks;
-    TickType_t start;
+    uint32_t start;
+    uint32_t ticks;
     uint16_t done = 0U;
+    uint16_t room;
+    uint16_t chunk;
 
-    if ((dev == NULL) || (buf == NULL) || (len == 0U) ||
-        (dev->rt->initialized == 0U)) {
-        return 0U;
-    }
-    if (xTaskGetSchedulerState() != taskSCHEDULER_RUNNING) {
+    if ((dev == NULL) || (dev->rt == NULL) || (buf == NULL) || (len == 0U))
+    {
         return 0U;
     }
 
     rt = dev->rt;
-    ticks = pdMS_TO_TICKS((timeout_ms != 0U) ?
-                          timeout_ms : DEV_UART_DEFAULT_TIMEOUT_MS);
 
-    if (osMutexAcquire(*dev->lock, ticks) != osOK) {
+    if ((rt->initialized == 0U) || (rt->lock == NULL))
+    {
         return 0U;
     }
 
-    start = xTaskGetTickCount();
+    (void)osMutexAcquire(*rt->lock, osWaitForever);
 
-    while (done < len) {
-        uint16_t used = Dev_UART_Used(rt->tx_head, rt->tx_tail, rt->tx_size);
-        uint16_t space = (uint16_t)((uint16_t)(rt->tx_size - 1U) - used);
-        uint16_t chunk = (uint16_t)(len - done);
+    start = osKernelGetTickCount();
+    ticks = pdMS_TO_TICKS(timeout_ms);
 
-        if (chunk > space) {
-            chunk = space;
+    while (done < len)
+    {
+        room = Dev_UART_TxRoom(rt);
+
+        if (room == 0U)
+        {
+            (void)BSP_UART_TxKick(rt->bsp);
+
+            if ((timeout_ms == 0U) || (Dev_UART_Expired(start, ticks) != 0U))
+            {
+                break;
+            }
+
+            osDelay(DEV_UART_RETRY_MS);
+            continue;
         }
-        if (chunk > 0U) {
-            done = (uint16_t)(done + Dev_UART_TxCopy(rt, &buf[done], chunk));
-            Dev_UART_TxCommit(rt, chunk);
-            (void)BSP_UART_TxKick(dev->bsp);
+
+        chunk = (uint16_t)(len - done);
+        if (chunk > room)
+        {
+            chunk = room;
         }
-        if (done >= len) {
-            break;
-        }
-        if (Dev_UART_Expired(start, ticks) != 0U) {
-            break;
-        }
-        (void)osDelay(1U);
+
+        Dev_UART_TxCopy(rt, &buf[done], chunk);
+        done += chunk;
+        (void)BSP_UART_TxKick(rt->bsp);
     }
 
-    (void)osMutexRelease(*dev->lock);
+    (void)osMutexRelease(*rt->lock);
+
     return done;
 }
 
 /**
- * @brief 等待发送队列排空且最后一个字节移出移位寄存器
- * @param dev        设备句柄，可为 NULL
- * @param timeout_ms 超时预算（毫秒），0 表示用默认 100 ms
- * @retval DEV_UART_OK: 已发完
- * @retval DEV_UART_ERR_PARAM: 句柄非法
- * @retval DEV_UART_ERR_STATE: 未初始化，或当前不在任务上下文
- * @retval DEV_UART_ERR_TIMEOUT: 等锁或等发完超时
- * @note 等锁与等发完共用一份预算；持有互斥量期间其他写者会被挡住，
- *       这正是"把这条链路刷干净"的语义。
+ * @brief 等待发送彻底停下
+ * @param dev        设备句柄
+ * @param timeout_ms 最长等待时间
+ * @return dev_uart_status_t
+ * @retval DEV_UART_OK          已发完
+ * @retval DEV_UART_ERR_PARAM   dev 为空
+ * @retval DEV_UART_ERR_STATE   未初始化
+ * @retval DEV_UART_ERR_TIMEOUT 超时仍有数据
  */
 dev_uart_status_t Dev_UART_Flush(const dev_uart_t *dev, uint32_t timeout_ms)
 {
     dev_uart_rt_t *rt;
-    TickType_t ticks;
-    TickType_t start;
+    uint32_t start;
+    uint32_t ticks;
+    dev_uart_status_t ret = DEV_UART_ERR_TIMEOUT;
 
-    if (dev == NULL) {
+    if ((dev == NULL) || (dev->rt == NULL))
+    {
         return DEV_UART_ERR_PARAM;
-    }
-    if (dev->rt->initialized == 0U) {
-        return DEV_UART_ERR_STATE;
-    }
-    if (xTaskGetSchedulerState() != taskSCHEDULER_RUNNING) {
-        return DEV_UART_ERR_STATE;
     }
 
     rt = dev->rt;
-    ticks = pdMS_TO_TICKS((timeout_ms != 0U) ?
-                          timeout_ms : DEV_UART_FLUSH_TIMEOUT_MS);
 
-    if (osMutexAcquire(*dev->lock, ticks) != osOK) {
-        return DEV_UART_ERR_TIMEOUT;
+    if ((rt->initialized == 0U) || (rt->lock == NULL))
+    {
+        return DEV_UART_ERR_STATE;
     }
 
-    start = xTaskGetTickCount();
+    (void)osMutexAcquire(*rt->lock, osWaitForever);
 
-    for (;;) {
-        uint16_t used = Dev_UART_Used(rt->tx_head, rt->tx_tail, rt->tx_size);
+    start = osKernelGetTickCount();
+    ticks = pdMS_TO_TICKS((timeout_ms == 0U) ? DEV_UART_TIMEOUT_MS_DEF : timeout_ms);
 
-        if ((used == 0U) && (BSP_UART_TxIdle(dev->bsp) != 0U)) {
+    for (;;)
+    {
+        (void)BSP_UART_TxKick(rt->bsp);
+
+        if ((Dev_UART_TxUsed(rt) == 0U) && (BSP_UART_TxIdle(rt->bsp) != 0U))
+        {
+            ret = DEV_UART_OK;
             break;
         }
-        if (Dev_UART_Expired(start, ticks) != 0U) {
-            (void)osMutexRelease(*dev->lock);
-            return DEV_UART_ERR_TIMEOUT;
+
+        if (Dev_UART_Expired(start, ticks) != 0U)
+        {
+            break;
         }
-        (void)osDelay(1U);
+
+        osDelay(DEV_UART_RETRY_MS);
     }
 
-    (void)osMutexRelease(*dev->lock);
-    return DEV_UART_OK;
+    (void)osMutexRelease(*rt->lock);
+
+    return ret;
 }
 
 /**
- * @brief 查询发送队列剩余可写空间
- * @param dev 设备句柄，可为 NULL
- * @retval 还能排入多少字节
+ * @brief 查询发送队列剩余空间
+ * @param dev       设备句柄
+ * @return uint16_t 可写字节数
  */
 uint16_t Dev_UART_TxFree(const dev_uart_t *dev)
 {
-    if (dev == NULL) {
+    if ((dev == NULL) || (dev->rt == NULL) || (dev->rt->initialized == 0U))
+    {
         return 0U;
     }
-    return (uint16_t)((uint16_t)(dev->rt->tx_size - 1U) -
-                      Dev_UART_Used(dev->rt->tx_head, dev->rt->tx_tail,
-                                    dev->rt->tx_size));
+
+    return Dev_UART_TxRoom(dev->rt);
 }
 
 /**
  * @brief 读取接收溢出计数
- * @param dev 设备句柄，可为 NULL
- * @retval 上电以来因队列满而丢弃的字节数
+ * @param dev       设备句柄
+ * @return uint32_t 累计丢掉的字节数
  */
 uint32_t Dev_UART_RxOverflow(const dev_uart_t *dev)
 {
-    if (dev == NULL) {
+    if ((dev == NULL) || (dev->rt == NULL) || (dev->rt->initialized == 0U))
+    {
         return 0U;
     }
+
+    (void)Dev_UART_RxSync(dev->rt);
+
     return dev->rt->rx_overflow;
 }
 
 /**
- * @brief 清零接收溢出计数
- * @param dev 设备句柄，可为 NULL
- * @retval 无
- * @note 与中断侧的累加存在极小的竞争窗口：清零与"刚好又溢出"重叠时可能
- *       丢掉一次计入，只影响统计，不影响数据。
+ * @brief 把接收溢出计数清零
+ * @param dev       设备句柄
+ * @return dev_uart_status_t
+ * @retval DEV_UART_OK        已清零
+ * @retval DEV_UART_ERR_PARAM dev 为空
  */
-void Dev_UART_RxClearOverflow(const dev_uart_t *dev)
+dev_uart_status_t Dev_UART_RxClearOverflow(const dev_uart_t *dev)
 {
-    if (dev == NULL) {
-        return;
+    if ((dev == NULL) || (dev->rt == NULL))
+    {
+        return DEV_UART_ERR_PARAM;
     }
+
     dev->rt->rx_overflow = 0U;
+
+    return DEV_UART_OK;
 }
