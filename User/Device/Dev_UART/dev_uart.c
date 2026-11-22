@@ -1,653 +1,772 @@
 /**
  * @file    dev_uart.c
- * @brief   串口设备层实现：队列、溢出记账、加锁与超时。
+ * @brief   UART 虚拟外设缓冲、收发服务与线程同步。
  * @author  Ricardo
- * @date    2026-11-21
- *
- * 数据路径：
- *  接收 DMA 直接写本层的 rx_buf，芯片层只报"总共收了多少字节"，
- *  本层用绝对写指针与读指针的差算可读量，整条路径没有第二次拷贝。
- *
- *  发送队列的物理位置就在本层，芯片层通过 acquire 拿到队首连续区间的
- *  指针直接外发，发完只归还长度，同样没有拷贝。
- *
- * 并发：
- *  发送队列的写指针只在持锁的任务上下文里推进，读指针由芯片层在完成
- *  中断里推进；接收读指针只有单消费者约束。
+ * @date    2026-11-22
  */
 
 #include "dev_uart.h"
-
 #include "bsp_uart.h"
-
-#include "FreeRTOS.h"
-#include "task.h"
-#include "cmsis_os.h"
+#include "dev_uart_port.h"
 
 #include <stddef.h>
 #include <string.h>
 
 /*==============================================================================
- * 外部声明
+ * 宏定义与常量
  *============================================================================*/
 
-/**
- * @brief USART1 的发送互斥量，由 CubeMX 在 RTOS_MUTEX 段里创建
- */
-extern osMutexId_t UART1_LOCKHandle;
-
-/*==============================================================================
- * 配置
- *============================================================================*/
-
-/** @brief 发送等待队列空位时的单次让步时间 */
-#define DEV_UART_RETRY_MS       1U
-
-/** @brief 写接口在 timeout_ms 为 0 时不等待，这里只用来兜底除零 */
-#define DEV_UART_TIMEOUT_MS_DEF 50U
+/** @brief DMA 双节点接收缓冲区总字节数 */
+#define DEV_UART_RX_DMA_BYTES  256U
+/** @brief 接收 FIFO 的容量，必须是 2 的幂 */
+#define DEV_UART_RX_FIFO_BYTES 512U
+/** @brief 发送 FIFO 的容量，必须是 2 的幂 */
+#define DEV_UART_TX_FIFO_BYTES 512U
 
 /*==============================================================================
  * 类型定义
  *============================================================================*/
 
-/**
- * @brief 串口设备运行块：每个端口一份
- */
+/** @brief UART 虚拟外设的运行块 */
 typedef struct
 {
-    const bsp_uart_t *bsp;          /**< 芯片层句柄 */
-    osMutexId_t      *lock;         /**< 发送队列的互斥量 */
-    uint8_t          *rx_buf;       /**< 接收队列，同时是 DMA 目标 */
-    uint8_t          *tx_buf;       /**< 发送队列 */
-    uint16_t          rx_size;      /**< 接收队列字节数，2 的幂 */
-    uint16_t          tx_size;      /**< 发送队列字节数，2 的幂 */
-    uint32_t          rx_done;      /**< 已读到的绝对位置 */
-    uint32_t          rx_overflow;  /**< 因读得不够快而丢掉的字节数 */
-    uint16_t          tx_head;      /**< 写指针（相对队列） */
-    uint16_t          tx_tail;      /**< 读指针（相对队列） */
-    uint8_t           initialized;  /**< 1 = 已接管芯片层 */
+    volatile uint16_t rx_head;
+    volatile uint16_t rx_tail;
+    volatile uint16_t tx_head;
+    volatile uint16_t tx_tail;
+    volatile uint32_t rx_overflow;
+    volatile uint32_t rx_dma_lost;
+    uint32_t rx_done;
+    uint8_t ready;
+    uint8_t started;
 } dev_uart_rt_t;
 
-/**
- * @brief 串口设备句柄：配置与运行块指针
- */
+/** @brief UART 虚拟外设句柄布局 */
 struct dev_uart
 {
-    const bsp_uart_t *bsp;      /**< 芯片层句柄 */
-    osMutexId_t      *lock;     /**< 发送队列互斥量 */
-    dev_uart_rt_t    *rt;       /**< 本实例的运行块 */
-    uint8_t          *rx_buf;   /**< 接收队列存储 */
-    uint8_t          *tx_buf;   /**< 发送队列存储 */
-    uint16_t          rx_size;  /**< 接收队列字节数 */
-    uint16_t          tx_size;  /**< 发送队列字节数 */
+    const bsp_uart_t *bsp;
+    dev_uart_port_lock_t **lock_ref;
+    uint8_t *dma_buf;
+    uint8_t *rx_buf;
+    uint8_t *tx_buf;
+    uint16_t dma_node;
+    uint16_t rx_size;
+    uint16_t tx_size;
+    dev_uart_rt_t *rt;
 };
 
 /*==============================================================================
- * 内部变量
+ * 运行块与句柄实例
  *============================================================================*/
 
-/** @brief USART1 的接收队列：DMA 直接写入，长度必须是 2 的幂 */
-static uint8_t s_uart1_rx_buf[512] __attribute__((aligned(4)));
-
-/** @brief USART1 的发送队列：芯片层直接从这里取数外发 */
-static uint8_t s_uart1_tx_buf[512];
-
-/** @brief USART1 的运行块，与句柄实例成对定义 */
+/** @brief UART1 的 DMA 双节点接收缓冲 */
+static uint8_t s_uart1_dma[DEV_UART_RX_DMA_BYTES] __attribute__((aligned(4)));
+/** @brief UART1 的接收 FIFO */
+static uint8_t s_uart1_rx_buf[DEV_UART_RX_FIFO_BYTES] __attribute__((aligned(4)));
+/** @brief UART1 的发送 FIFO */
+static uint8_t s_uart1_tx_buf[DEV_UART_TX_FIFO_BYTES];
+/** @brief UART1 的运行块，与句柄实例成对定义 */
 static dev_uart_rt_t dev_uart1_rt;
 
-/**
- * @brief USART1 的设备句柄
- *
- * @note 队列存储与容量在 dev_uart.c 里；句柄只登记"用哪个芯片层句柄、
- *       用哪把锁、队列在哪"。
- */
+/** @brief UART1 虚拟外设配置句柄 */
 const dev_uart_t dev_uart1 =
 {
-    .bsp     = &bsp_uart1,
-    .lock    = &UART1_LOCKHandle,
-    .rt      = &dev_uart1_rt,
-    .rx_buf  = s_uart1_rx_buf,
-    .tx_buf  = s_uart1_tx_buf,
-    .rx_size = sizeof(s_uart1_rx_buf),
-    .tx_size = sizeof(s_uart1_tx_buf)
+    .bsp = &bsp_uart1,
+    .lock_ref = &UART1_LOCKHandle_port,
+    .dma_buf = s_uart1_dma,
+    .rx_buf = s_uart1_rx_buf,
+    .tx_buf = s_uart1_tx_buf,
+    .dma_node = DEV_UART_RX_DMA_BYTES / 2U,
+    .rx_size = DEV_UART_RX_FIFO_BYTES,
+    .tx_size = DEV_UART_TX_FIFO_BYTES,
+    .rt = &dev_uart1_rt
 };
-
-/** @brief 已注册的端口表 */
-static const dev_uart_t *const s_devs[] =
-{
-    &dev_uart1,
-};
-
-/** @brief 端口表长度 */
-static const size_t s_dev_count = sizeof(s_devs) / sizeof(s_devs[0]);
 
 /*==============================================================================
  * 内部函数
  *============================================================================*/
 
 /**
- * @brief 计算时间差是否已经超过预算
- * @param start     起始 tick
- * @param ticks     预算 tick
- * @return uint8_t
- * @retval 1        已到期
- * @retval 0        还没到
+ * @brief 计算接收 FIFO 中未消费的数据长度
+ * @param dev UART 虚拟外设句柄
+ * @return uint16_t
+ * @retval 0 至 FIFO 容量 未消费字节数
  */
-static uint8_t Dev_UART_Expired(uint32_t start, uint32_t ticks)
+static uint16_t Dev_UART_RxUsed(const dev_uart_t *dev)
 {
-    return ((osKernelGetTickCount() - start) >= ticks) ? 1U : 0U;
+    return (uint16_t)(dev->rt->rx_head - dev->rt->rx_tail);
 }
 
 /**
- * @brief 把累计接收量与读指针对齐，顺带记溢出
- * @param rt        运行块
- * @return uint16_t 当前可读字节数
- *
- * @note 一旦累计量比读指针超出一整圈，说明最旧的数据已经被 DMA 覆盖，
- *       把读指针推到最旧的有效字节并把差额记进溢出计数。
+ * @brief 计算发送 FIFO 中尚未完成的数据长度
+ * @param dev UART 虚拟外设句柄
+ * @return uint16_t
+ * @retval 0 至 FIFO 容量 尚未完成字节数
  */
-static uint16_t Dev_UART_RxSync(dev_uart_rt_t *rt)
+static uint16_t Dev_UART_TxUsed(const dev_uart_t *dev)
 {
-    uint32_t total = BSP_UART_RxCount(rt->bsp);
-    uint32_t pending = total - rt->rx_done;
-
-    if (pending > rt->rx_size)
-    {
-        rt->rx_overflow += pending - rt->rx_size;
-        rt->rx_done = total - rt->rx_size;
-        pending = rt->rx_size;
-    }
-
-    return (uint16_t)pending;
+    return (uint16_t)(dev->rt->tx_head - dev->rt->tx_tail);
 }
 
 /**
- * @brief 发送队列已用字节数
- * @param rt        运行块
- * @return uint16_t 已用字节数
+ * @brief 向环形缓冲写入一段连续输入数据
+ * @param buf 环形缓冲地址
+ * @param size 缓冲区容量，必须是 2 的幂
+ * @param head 当前写入序号
+ * @param data 输入数据地址
+ * @param len 输入数据长度
+ * @return uint16_t
+ * @retval 新的写入序号
  */
-static uint16_t Dev_UART_TxUsed(const dev_uart_rt_t *rt)
+static uint16_t Dev_UART_RingWrite(uint8_t *buf, uint16_t size, uint16_t head,
+                                   const uint8_t *data, uint16_t len)
 {
-    return (uint16_t)((rt->tx_head - rt->tx_tail) & (uint16_t)(rt->tx_size - 1U));
-}
-
-/**
- * @brief 发送队列剩余空间
- * @param rt        运行块
- * @return uint16_t 可写字节数
- *
- * @note 留一个空位用来区分"空"与"满"。
- */
-static uint16_t Dev_UART_TxRoom(const dev_uart_rt_t *rt)
-{
-    return (uint16_t)((rt->tx_size - 1U) - Dev_UART_TxUsed(rt));
-}
-
-/**
- * @brief 把一段数据写进发送队列
- * @param rt        运行块
- * @param src       源数据
- * @param len       字节数；调用方保证不超过剩余空间
- */
-static void Dev_UART_TxCopy(dev_uart_rt_t *rt, const uint8_t *src, uint16_t len)
-{
-    uint16_t mask = (uint16_t)(rt->tx_size - 1U);
-    uint16_t pos = (uint16_t)(rt->tx_head & mask);
-    uint16_t first = (uint16_t)(rt->tx_size - pos);
+    uint16_t offset = (uint16_t)(head & (uint16_t)(size - 1U));
+    uint16_t first = (uint16_t)(size - offset);
 
     if (first > len)
     {
         first = len;
     }
-
-    (void)memcpy(&rt->tx_buf[pos], src, first);
-
+    (void)memcpy(&buf[offset], data, first);
     if (len > first)
     {
-        (void)memcpy(&rt->tx_buf[0], &src[first], (size_t)(len - first));
+        (void)memcpy(buf, &data[first], (size_t)(len - first));
     }
-
-    rt->tx_head = (uint16_t)((rt->tx_head + len) & mask);
+    return (uint16_t)(head + len);
 }
 
 /**
- * @brief 芯片层取数回调：交出队首一段连续数据
- * @param ctx       运行块
- * @param data      输出：这段数据的起点
- * @return uint16_t 这段的字节数；0 表示没有待发数据
+ * @brief 将 BSP 中断事件转换为服务任务通知
+ * @param ctx 回调上下文
+ * @param events BSP 事件位
+ * @retval 无
  *
- * @note 只在索引上做运算，不做拷贝，可以被中断上下文调用。
+ * @note 此回调运行于中断上下文，只发出 ISR 安全通知，不搬运数据。
  */
-static uint16_t Dev_UART_OnTxAcquire(void *ctx, const uint8_t **data)
+static void Dev_UART_OnEvent(void *ctx, uint32_t events)
 {
-    dev_uart_rt_t *rt = (dev_uart_rt_t *)ctx;
-    uint16_t used;
-    uint16_t mask;
-    uint16_t first;
+    const dev_uart_t *dev = (const dev_uart_t *)ctx;
 
-    if ((rt == NULL) || (data == NULL))
+    (void)events;
+    if ((dev != NULL) && (dev->rt != NULL) &&
+        (dev_uart_port_ops.signal_isr != NULL))
+    {
+        dev_uart_port_ops.signal_isr();
+    }
+}
+
+/**
+ * @brief 获取发送 FIFO 队首连续区间
+ * @param ctx 回调上下文
+ * @param data 输出数据地址；错误或队列为空时写入 NULL
+ * @return uint16_t
+ * @retval 连续可发送长度；参数无效或队列为空时为 0
+ */
+static uint16_t Dev_UART_TxAcquire(void *ctx, const uint8_t **data)
+{
+    const dev_uart_t *dev = (const dev_uart_t *)ctx;
+    uint16_t used;
+    uint16_t offset;
+    uint16_t len;
+    uint32_t state;
+
+    if ((data == NULL) || (dev == NULL) || (dev->rt == NULL) ||
+        (dev_uart_port_ops.critical_enter == NULL) ||
+        (dev_uart_port_ops.critical_exit == NULL))
     {
         return 0U;
     }
-
     *data = NULL;
-    mask = (uint16_t)(rt->tx_size - 1U);
-    used = Dev_UART_TxUsed(rt);
-
+    state = dev_uart_port_ops.critical_enter();
+    used = Dev_UART_TxUsed(dev);
+    offset = (uint16_t)(dev->rt->tx_tail & (uint16_t)(dev->tx_size - 1U));
+    dev_uart_port_ops.critical_exit(state);
     if (used == 0U)
     {
         return 0U;
     }
 
-    first = (uint16_t)(rt->tx_size - (rt->tx_tail & mask));
-    if (first > used)
+
+    len = (uint16_t)(dev->tx_size - offset);
+    if (len > used)
     {
-        first = used;
+        len = used;
     }
-
-    *data = &rt->tx_buf[rt->tx_tail & mask];
-
-    return first;
+    *data = &dev->tx_buf[offset];
+    return len;
 }
 
 /**
- * @brief 芯片层归还回调：推进读指针
- * @param ctx       运行块
- * @param len       已搬完的字节数
+ * @brief 释放已经完成发送的 FIFO 队首区间
+ * @param ctx 回调上下文
+ * @param len 已发送字节数
+ * @retval 无
  */
-static void Dev_UART_OnTxRelease(void *ctx, uint16_t len)
+static void Dev_UART_TxRelease(void *ctx, uint16_t len)
 {
-    dev_uart_rt_t *rt = (dev_uart_rt_t *)ctx;
-    uint16_t mask;
+    const dev_uart_t *dev = (const dev_uart_t *)ctx;
+    uint32_t state;
 
-    if ((rt == NULL) || (len == 0U))
+    if ((dev == NULL) || (dev->rt == NULL) ||
+        (dev_uart_port_ops.critical_enter == NULL) ||
+        (dev_uart_port_ops.critical_exit == NULL))
     {
         return;
     }
+    state = dev_uart_port_ops.critical_enter();
+    dev->rt->tx_tail = (uint16_t)(dev->rt->tx_tail + len);
+    dev_uart_port_ops.critical_exit(state);
+}
 
-    mask = (uint16_t)(rt->tx_size - 1U);
-    rt->tx_tail = (uint16_t)((rt->tx_tail + len) & mask);
+/**
+ * @brief 将 BSP 返回码映射为设备层状态码
+ * @param status BSP 返回码
+ * @return dev_uart_status_t
+ * @retval DEV_UART_OK BSP 操作成功
+ * @retval DEV_UART_ERR_PARAM BSP 参数非法
+ * @retval DEV_UART_ERR_STATE BSP 状态不允许
+ * @retval DEV_UART_ERR_TIMEOUT BSP 阻塞操作超时
+ * @retval DEV_UART_ERR_HAL BSP HAL 操作失败
+ */
+static dev_uart_status_t Dev_UART_Map(bsp_uart_status_t status)
+{
+    if (status == BSP_UART_OK)
+    {
+        return DEV_UART_OK;
+    }
+    if (status == BSP_UART_ERR_PARAM)
+    {
+        return DEV_UART_ERR_PARAM;
+    }
+    if (status == BSP_UART_ERR_STATE)
+    {
+        return DEV_UART_ERR_STATE;
+    }
+    if (status == BSP_UART_ERR_TIMEOUT)
+    {
+        return DEV_UART_ERR_TIMEOUT;
+    }
+    return DEV_UART_ERR_HAL;
 }
 
 /*==============================================================================
- * 对外接口
+ * 接口实现
  *============================================================================*/
 
 /**
- * @brief 初始化设备层：登记队列、接管芯片层的收发缓冲
+ * @brief 初始化 UART1 虚拟外设并启动 BSP 接收
  * @return dev_uart_status_t
- * @retval DEV_UART_OK        就绪
- * @retval DEV_UART_ERR_STATE 芯片层未初始化，或已经接管过
- * @retval DEV_UART_ERR_HAL   芯片层启动失败
+ * @retval DEV_UART_OK 初始化成功或已完成
+ * @retval DEV_UART_ERR_PARAM 端口绑定或配置非法
+ * @retval DEV_UART_ERR_HAL BSP 启动失败
  */
 dev_uart_status_t Dev_UART_Init(void)
 {
-    size_t i;
-    const dev_uart_t *dev;
-    dev_uart_rt_t *rt;
-    bsp_uart_tx_ops_t ops;
-    bsp_uart_status_t st;
+    bsp_uart_port_t port;
+    bsp_uart_status_t status;
+    const dev_uart_t *dev = &dev_uart1;
 
-    for (i = 0U; i < s_dev_count; i++)
+    if ((dev->bsp == NULL) || (dev->rt == NULL) || (dev->dma_buf == NULL) ||
+        (dev->rx_buf == NULL) || (dev->tx_buf == NULL))
     {
-        dev = s_devs[i];
-        rt = (dev == NULL) ? NULL : (dev_uart_rt_t *)dev->rt;
-
-        if ((dev == NULL) || (rt == NULL) || (dev->rx_buf == NULL) || (dev->tx_buf == NULL))
-        {
-            return DEV_UART_ERR_STATE;
-        }
-
-        if (rt->initialized != 0U)
-        {
-            continue;
-        }
-
-        (void)memset(rt, 0, sizeof(*rt));
-        rt->bsp     = dev->bsp;
-        rt->lock    = dev->lock;
-        rt->rx_buf  = dev->rx_buf;
-        rt->tx_buf  = dev->tx_buf;
-        rt->rx_size = dev->rx_size;
-        rt->tx_size = dev->tx_size;
-
-        ops.acquire = Dev_UART_OnTxAcquire;
-        ops.release = Dev_UART_OnTxRelease;
-        ops.ctx     = rt;
-
-        st = BSP_UART_Start(dev->bsp, dev->rx_buf, dev->rx_size, &ops);
-        if (st != BSP_UART_OK)
-        {
-            return DEV_UART_ERR_HAL;
-        }
-
-        rt->initialized = 1U;
+        return DEV_UART_ERR_PARAM;
     }
-
-    return DEV_UART_OK;
-}
-
-/**
- * @brief 查询端口是否可用
- * @param dev       设备句柄
- * @return uint8_t
- * @retval 1        已初始化且芯片层接收已武装
- * @retval 0        未初始化或芯片层已停
- */
-uint8_t Dev_UART_IsReady(const dev_uart_t *dev)
-{
-    if ((dev == NULL) || (dev->rt == NULL) || (dev->rt->initialized == 0U))
+    if ((dev->rx_size == 0U) || ((dev->rx_size & (dev->rx_size - 1U)) != 0U) ||
+        (dev->tx_size == 0U) || ((dev->tx_size & (dev->tx_size - 1U)) != 0U) ||
+        (dev->dma_node < 16U) || ((dev->dma_node & (dev->dma_node - 1U)) != 0U))
     {
-        return 0U;
+        return DEV_UART_ERR_PARAM;
     }
-
-    return BSP_UART_IsReady(dev->rt->bsp);
-}
-
-/**
- * @brief 查询接收队列里可读的字节数
- * @param dev       设备句柄
- * @return uint16_t 可读字节数
- */
-uint16_t Dev_UART_Available(const dev_uart_t *dev)
-{
-    if ((dev == NULL) || (dev->rt == NULL) || (dev->rt->initialized == 0U))
+    if (dev->rt->started != 0U)
     {
-        return 0U;
+        return (dev->rt->ready != 0U) ? DEV_UART_OK : DEV_UART_ERR_STATE;
     }
-
-    return Dev_UART_RxSync(dev->rt);
-}
-
-/**
- * @brief 看一眼队首字节，不取走
- * @param dev       设备句柄
- * @param byte      输出：队首字节
- * @return uint8_t
- * @retval 1        取到了
- * @retval 0        队列为空或参数非法
- */
-uint8_t Dev_UART_Peek(const dev_uart_t *dev, uint8_t *byte)
-{
-    dev_uart_rt_t *rt;
-    uint16_t avail;
-
-    if ((dev == NULL) || (dev->rt == NULL) || (byte == NULL) || (dev->rt->initialized == 0U))
-    {
-        return 0U;
-    }
-
-    rt = dev->rt;
-    avail = Dev_UART_RxSync(rt);
-
-    if (avail == 0U)
-    {
-        return 0U;
-    }
-
-    *byte = rt->rx_buf[rt->rx_done & (uint32_t)(rt->rx_size - 1U)];
-
-    return 1U;
-}
-
-/**
- * @brief 读接收队列
- * @param dev        设备句柄
- * @param buf        目的缓冲
- * @param len        期望字节数
- * @param timeout_ms 最长等待时间
- * @return uint16_t  实际读出的字节数
- */
-uint16_t Dev_UART_Read(const dev_uart_t *dev, uint8_t *buf, uint16_t len, uint32_t timeout_ms)
-{
-    dev_uart_rt_t *rt;
-    uint32_t start;
-    uint32_t ticks;
-    uint16_t avail;
-    uint16_t n;
-    uint16_t mask;
-    uint16_t pos;
-    uint16_t first;
-
-    if ((dev == NULL) || (dev->rt == NULL) || (buf == NULL) || (len == 0U))
-    {
-        return 0U;
-    }
-
-    rt = dev->rt;
-
-    if (rt->initialized == 0U)
-    {
-        return 0U;
-    }
-
-    start = osKernelGetTickCount();
-    ticks = pdMS_TO_TICKS(timeout_ms);
-
-    for (;;)
-    {
-        avail = Dev_UART_RxSync(rt);
-
-        if (avail >= len)
-        {
-            break;
-        }
-
-        if (BSP_UART_IsReady(rt->bsp) == 0U)
-        {
-            break;
-        }
-
-        (void)BSP_UART_RxPoll(rt->bsp);
-
-        if ((timeout_ms == 0U) || (Dev_UART_Expired(start, ticks) != 0U))
-        {
-            break;
-        }
-
-        osDelay(DEV_UART_RETRY_MS);
-    }
-
-    avail = Dev_UART_RxSync(rt);
-    n = (avail < len) ? avail : len;
-
-    if (n == 0U)
-    {
-        return 0U;
-    }
-
-    mask = (uint16_t)(rt->rx_size - 1U);
-    pos = (uint16_t)(rt->rx_done & mask);
-    first = (uint16_t)(rt->rx_size - pos);
-
-    if (first > n)
-    {
-        first = n;
-    }
-
-    (void)memcpy(buf, &rt->rx_buf[pos], first);
-
-    if (n > first)
-    {
-        (void)memcpy(&buf[first], &rt->rx_buf[0], (size_t)(n - first));
-    }
-
-    rt->rx_done += n;
-
-    return n;
-}
-
-/**
- * @brief 写入发送队列并请求外发
- * @param dev        设备句柄
- * @param buf        源数据
- * @param len        字节数
- * @param timeout_ms 队列满时最长等待时间
- * @return uint16_t  实际排入队列的字节数
- */
-uint16_t Dev_UART_Write(const dev_uart_t *dev, const uint8_t *buf, uint16_t len, uint32_t timeout_ms)
-{
-    dev_uart_rt_t *rt;
-    uint32_t start;
-    uint32_t ticks;
-    uint16_t done = 0U;
-    uint16_t room;
-    uint16_t chunk;
-
-    if ((dev == NULL) || (dev->rt == NULL) || (buf == NULL) || (len == 0U))
-    {
-        return 0U;
-    }
-
-    rt = dev->rt;
-
-    if ((rt->initialized == 0U) || (rt->lock == NULL))
-    {
-        return 0U;
-    }
-
-    (void)osMutexAcquire(*rt->lock, osWaitForever);
-
-    start = osKernelGetTickCount();
-    ticks = pdMS_TO_TICKS(timeout_ms);
-
-    while (done < len)
-    {
-        room = Dev_UART_TxRoom(rt);
-
-        if (room == 0U)
-        {
-            (void)BSP_UART_TxKick(rt->bsp);
-
-            if ((timeout_ms == 0U) || (Dev_UART_Expired(start, ticks) != 0U))
-            {
-                break;
-            }
-
-            osDelay(DEV_UART_RETRY_MS);
-            continue;
-        }
-
-        chunk = (uint16_t)(len - done);
-        if (chunk > room)
-        {
-            chunk = room;
-        }
-
-        Dev_UART_TxCopy(rt, &buf[done], chunk);
-        done += chunk;
-        (void)BSP_UART_TxKick(rt->bsp);
-    }
-
-    (void)osMutexRelease(*rt->lock);
-
-    return done;
-}
-
-/**
- * @brief 等待发送彻底停下
- * @param dev        设备句柄
- * @param timeout_ms 最长等待时间
- * @return dev_uart_status_t
- * @retval DEV_UART_OK          已发完
- * @retval DEV_UART_ERR_PARAM   dev 为空
- * @retval DEV_UART_ERR_STATE   未初始化
- * @retval DEV_UART_ERR_TIMEOUT 超时仍有数据
- */
-dev_uart_status_t Dev_UART_Flush(const dev_uart_t *dev, uint32_t timeout_ms)
-{
-    dev_uart_rt_t *rt;
-    uint32_t start;
-    uint32_t ticks;
-    dev_uart_status_t ret = DEV_UART_ERR_TIMEOUT;
-
-    if ((dev == NULL) || (dev->rt == NULL))
+    if ((dev->lock_ref == NULL) || (*dev->lock_ref == NULL) ||
+        (dev_uart_port_ops.lock == NULL) || (dev_uart_port_ops.unlock == NULL) ||
+        (dev_uart_port_ops.signal_isr == NULL) || (dev_uart_port_ops.valid == NULL) ||
+        (dev_uart_port_ops.critical_enter == NULL) ||
+        (dev_uart_port_ops.critical_exit == NULL) ||
+        (dev_uart_port_ops.valid(*dev->lock_ref) == 0U))
     {
         return DEV_UART_ERR_PARAM;
     }
 
-    rt = dev->rt;
+    (void)memset(dev->rt, 0, sizeof(*dev->rt));
+    port.dma_buf = dev->dma_buf;
+    port.dma_node = dev->dma_node;
+    port.on_event = Dev_UART_OnEvent;
+    port.tx_acquire = Dev_UART_TxAcquire;
+    port.tx_release = Dev_UART_TxRelease;
+    port.ctx = (void *)dev;
 
-    if ((rt->initialized == 0U) || (rt->lock == NULL))
+    status = BSP_UART_Start(dev->bsp, &port);
+    if (status != BSP_UART_OK)
+    {
+        return Dev_UART_Map(status);
+    }
+    dev->rt->rx_done = BSP_UART_RxTotal(dev->bsp);
+    dev->rt->started = 1U;
+    dev->rt->ready = 1U;
+    return DEV_UART_OK;
+}
+
+/**
+ * @brief 搬运已完成接收节点并推进发送队列
+ * @param dev UART 虚拟外设句柄
+ * @return dev_uart_status_t
+ * @retval DEV_UART_OK 服务完成
+ * @retval DEV_UART_ERR_PARAM 句柄或接收服务配置非法
+ * @retval DEV_UART_ERR_STATE UART 未就绪或接收数据丢失
+ * @retval DEV_UART_ERR_TIMEOUT 阻塞接收服务超时
+ * @retval DEV_UART_ERR_HAL 接收服务或发送队列启动失败
+ *
+ * @note 必须由单一任务或主循环调用。DMA 中断每完成一个节点即覆盖前一节点，
+ *       因此处理落后超过一个节点时只复制最新完整节点并累计丢失量。
+ */
+dev_uart_status_t Dev_UART_Service(const dev_uart_t *dev)
+{
+    uint32_t total;
+    uint32_t delta;
+    uint32_t ring_size;
+    uint32_t start;
+    uint16_t head;
+    uint16_t tail;
+    uint16_t used;
+    uint16_t space;
+    uint16_t copy_len;
+    uint16_t offset;
+    uint16_t first;
+    dev_uart_status_t result = DEV_UART_OK;
+
+    if ((dev == NULL) || (dev->rt == NULL) || (dev->bsp == NULL) ||
+        (dev_uart_port_ops.critical_enter == NULL) ||
+        (dev_uart_port_ops.critical_exit == NULL))
+    {
+        return DEV_UART_ERR_PARAM;
+    }
+    if (dev->rt->ready == 0U)
     {
         return DEV_UART_ERR_STATE;
     }
 
-    (void)osMutexAcquire(*rt->lock, osWaitForever);
-
-    start = osKernelGetTickCount();
-    ticks = pdMS_TO_TICKS((timeout_ms == 0U) ? DEV_UART_TIMEOUT_MS_DEF : timeout_ms);
-
-    for (;;)
     {
-        (void)BSP_UART_TxKick(rt->bsp);
-
-        if ((Dev_UART_TxUsed(rt) == 0U) && (BSP_UART_TxIdle(rt->bsp) != 0U))
+        bsp_uart_status_t rx_status = BSP_UART_RxService(dev->bsp);
+        if (rx_status != BSP_UART_OK)
         {
-            ret = DEV_UART_OK;
-            break;
+            return Dev_UART_Map(rx_status);
         }
+    }
 
-        if (Dev_UART_Expired(start, ticks) != 0U)
+    total = BSP_UART_RxTotal(dev->bsp);
+    delta = total - dev->rt->rx_done;
+    ring_size = (uint32_t)dev->dma_node * 2U;
+    start = dev->rt->rx_done;
+    if (delta > dev->dma_node)
+    {
+        uint32_t state = dev_uart_port_ops.critical_enter();
+        dev->rt->rx_dma_lost += delta - dev->dma_node;
+        dev_uart_port_ops.critical_exit(state);
+        start = total - dev->dma_node;
+        delta = dev->dma_node;
+        result = DEV_UART_ERR_STATE;
+    }
+
+    {
+        uint32_t state = dev_uart_port_ops.critical_enter();
+        head = dev->rt->rx_head;
+        tail = dev->rt->rx_tail;
+        dev_uart_port_ops.critical_exit(state);
+    }
+    used = (uint16_t)(head - tail);
+    space = (used < dev->rx_size) ? (uint16_t)(dev->rx_size - used) : 0U;
+    copy_len = (delta > space) ? space : (uint16_t)delta;
+    if (copy_len < delta)
+    {
+        uint32_t state = dev_uart_port_ops.critical_enter();
+        dev->rt->rx_overflow += delta - copy_len;
+        dev_uart_port_ops.critical_exit(state);
+        result = DEV_UART_ERR_STATE;
+    }
+
+    if (copy_len != 0U)
+    {
+        offset = (uint16_t)(start & (ring_size - 1U));
+        first = (uint16_t)(ring_size - offset);
+        if (first > copy_len)
         {
-            break;
+            first = copy_len;
         }
-
-        osDelay(DEV_UART_RETRY_MS);
+        head = Dev_UART_RingWrite(dev->rx_buf, dev->rx_size, head,
+                                  &dev->dma_buf[offset], first);
+        if (copy_len > first)
+        {
+            head = Dev_UART_RingWrite(dev->rx_buf, dev->rx_size, head,
+                                      dev->dma_buf, (uint16_t)(copy_len - first));
+        }
+        dev->rt->rx_head = head;
     }
-
-    (void)osMutexRelease(*rt->lock);
-
-    return ret;
-}
-
-/**
- * @brief 查询发送队列剩余空间
- * @param dev       设备句柄
- * @return uint16_t 可写字节数
- */
-uint16_t Dev_UART_TxFree(const dev_uart_t *dev)
-{
-    if ((dev == NULL) || (dev->rt == NULL) || (dev->rt->initialized == 0U))
+    dev->rt->rx_done = total;
     {
-        return 0U;
+        bsp_uart_status_t tx_status = BSP_UART_TxKick(dev->bsp);
+        if ((tx_status != BSP_UART_OK) && (result == DEV_UART_OK))
+        {
+            result = Dev_UART_Map(tx_status);
+        }
     }
-
-    return Dev_UART_TxRoom(dev->rt);
+    return result;
 }
 
 /**
- * @brief 读取接收溢出计数
- * @param dev       设备句柄
- * @return uint32_t 累计丢掉的字节数
- */
-uint32_t Dev_UART_RxOverflow(const dev_uart_t *dev)
-{
-    if ((dev == NULL) || (dev->rt == NULL) || (dev->rt->initialized == 0U))
-    {
-        return 0U;
-    }
-
-    (void)Dev_UART_RxSync(dev->rt);
-
-    return dev->rt->rx_overflow;
-}
-
-/**
- * @brief 把接收溢出计数清零
- * @param dev       设备句柄
+ * @brief 等待 UART 服务任务收到传输事件
+ * @param dev UART 虚拟外设句柄
+ * @param timeout_ms 最大等待时间，单位毫秒
  * @return dev_uart_status_t
- * @retval DEV_UART_OK        已清零
- * @retval DEV_UART_ERR_PARAM dev 为空
+ * @retval DEV_UART_OK 收到通知
+ * @retval DEV_UART_ERR_PARAM 句柄或等待端口非法
+ * @retval DEV_UART_ERR_TIMEOUT 等待超时
+ *
+ * @note 仅由注册为该 UART 服务任务的线程调用。
  */
-dev_uart_status_t Dev_UART_RxClearOverflow(const dev_uart_t *dev)
+dev_uart_status_t Dev_UART_Wait(const dev_uart_t *dev, uint32_t timeout_ms)
 {
-    if ((dev == NULL) || (dev->rt == NULL))
+    if ((dev == NULL) || (dev->lock_ref == NULL) || (*dev->lock_ref == NULL) ||
+        (dev->rt == NULL) || (dev_uart_port_ops.wait == NULL))
     {
         return DEV_UART_ERR_PARAM;
     }
+    return (dev_uart_port_ops.wait(timeout_ms) != 0U) ? DEV_UART_OK :
+           DEV_UART_ERR_TIMEOUT;
+}
 
-    dev->rt->rx_overflow = 0U;
+/**
+ * @brief 查询 UART 是否就绪
+ * @param dev UART 虚拟外设句柄
+ * @return uint8_t
+ * @retval 1 UART 已就绪
+ * @retval 0 句柄无效、BSP 未就绪或设备未就绪
+ */
+uint8_t Dev_UART_IsReady(const dev_uart_t *dev)
+{
+    return ((dev != NULL) && (dev->rt != NULL) && (dev->rt->ready != 0U) &&
+            (BSP_UART_IsReady(dev->bsp) != 0U)) ? 1U : 0U;
+}
 
-    return DEV_UART_OK;
+/**
+ * @brief 查询接收 FIFO 中未消费的字节数
+ * @param dev UART 虚拟外设句柄
+ * @return uint16_t
+ * @retval 0 至 FIFO 容量 未消费字节数；句柄无效时为 0
+ */
+uint16_t Dev_UART_Available(const dev_uart_t *dev)
+{
+    uint16_t used;
+
+    if ((dev == NULL) || (dev->rt == NULL) ||
+        (dev_uart_port_ops.critical_enter == NULL) ||
+        (dev_uart_port_ops.critical_exit == NULL))
+    {
+        return 0U;
+    }
+    {
+        uint32_t state = dev_uart_port_ops.critical_enter();
+        used = Dev_UART_RxUsed(dev);
+        dev_uart_port_ops.critical_exit(state);
+    }
+
+    return used;
+}
+
+/**
+ * @brief 查看接收 FIFO 队首的连续数据而不消费
+ * @param dev UART 虚拟外设句柄
+ * @param data 输出队首地址；无连续数据时写入空指针
+ * @return uint16_t
+ * @retval 0 至 FIFO 容量 连续可读字节数
+ *
+ * @note 指针仅在对应数据被读取前有效，调用者不得修改缓冲内容。
+ */
+uint16_t Dev_UART_Peek(const dev_uart_t *dev, const uint8_t **data)
+{
+    uint16_t used;
+    uint16_t offset;
+    uint16_t len;
+
+    if (data == NULL)
+    {
+        return 0U;
+    }
+    *data = NULL;
+    if ((dev == NULL) || (dev->rt == NULL) ||
+        (dev_uart_port_ops.critical_enter == NULL) ||
+        (dev_uart_port_ops.critical_exit == NULL))
+    {
+        return 0U;
+    }
+    {
+        uint32_t state = dev_uart_port_ops.critical_enter();
+        used = Dev_UART_RxUsed(dev);
+        offset = (uint16_t)(dev->rt->rx_tail & (uint16_t)(dev->rx_size - 1U));
+        dev_uart_port_ops.critical_exit(state);
+    }
+    if (used == 0U)
+    {
+        return 0U;
+    }
+    len = (uint16_t)(dev->rx_size - offset);
+    if (len > used)
+    {
+        len = used;
+    }
+    *data = &dev->rx_buf[offset];
+    return len;
+}
+
+/**
+ * @brief 消费接收 FIFO 队首指定数量的字节
+ * @param dev UART 虚拟外设句柄
+ * @param len 请求消费数量
+ * @return uint16_t
+ * @retval 0 至请求长度 实际消费字节数
+ */
+uint16_t Dev_UART_Read(const dev_uart_t *dev, uint16_t len)
+{
+    if ((dev == NULL) || (dev->rt == NULL) ||
+        (dev_uart_port_ops.critical_enter == NULL) ||
+        (dev_uart_port_ops.critical_exit == NULL))
+    {
+        return 0U;
+    }
+    {
+        uint32_t state = dev_uart_port_ops.critical_enter();
+        uint16_t current = Dev_UART_RxUsed(dev);
+        if (len > current)
+        {
+            len = current;
+        }
+        dev->rt->rx_tail = (uint16_t)(dev->rt->rx_tail + len);
+        dev_uart_port_ops.critical_exit(state);
+    }
+    return len;
+}
+
+/**
+ * @brief 将完整数据帧串行化写入发送 FIFO
+ * @param dev UART 虚拟外设句柄
+ * @param data 帧数据地址
+ * @param len 帧数据长度
+ * @param timeout_ms 等待空间和锁的超时，单位毫秒
+ * @return dev_uart_status_t
+ * @retval DEV_UART_OK 全帧已入队
+ * @retval DEV_UART_ERR_PARAM 参数非法
+ * @retval DEV_UART_ERR_STATE UART 未就绪
+ * @retval DEV_UART_ERR_TIMEOUT 未能在期限内完整入队
+ * @retval DEV_UART_ERR_HAL BSP 启动发送失败；完整帧仍保留在队列中
+ *
+ * @note 一个调用对应一个不可交错的帧；FIFO 空间不足时不入队任何字节。
+ */
+dev_uart_status_t Dev_UART_Write(const dev_uart_t *dev, const uint8_t *data,
+                                 uint16_t len, uint32_t timeout_ms)
+{
+    uint32_t start;
+    uint16_t head;
+    uint16_t tail;
+    uint16_t used;
+    uint16_t space;
+
+    if ((dev == NULL) || (dev->rt == NULL) || (data == NULL) || (len == 0U))
+    {
+        return DEV_UART_ERR_PARAM;
+    }
+    if ((dev->rt->ready == 0U) || (dev->lock_ref == NULL) ||
+        (*dev->lock_ref == NULL))
+    {
+        return DEV_UART_ERR_STATE;
+    }
+    if ((dev_uart_port_ops.lock == NULL) || (dev_uart_port_ops.unlock == NULL) ||
+        (dev_uart_port_ops.ticks == NULL) || (dev_uart_port_ops.delay == NULL) ||
+        (dev_uart_port_ops.critical_enter == NULL) ||
+        (dev_uart_port_ops.critical_exit == NULL))
+    {
+        return DEV_UART_ERR_STATE;
+    }
+    if (dev_uart_port_ops.lock(*dev->lock_ref, timeout_ms) == 0U)
+    {
+        return DEV_UART_ERR_TIMEOUT;
+    }
+
+    start = dev_uart_port_ops.ticks();
+    for (;;)
+    {
+        {
+            uint32_t state = dev_uart_port_ops.critical_enter();
+            head = dev->rt->tx_head;
+            tail = dev->rt->tx_tail;
+            dev_uart_port_ops.critical_exit(state);
+        }
+        used = (uint16_t)(head - tail);
+        space = (used < dev->tx_size) ? (uint16_t)(dev->tx_size - used) : 0U;
+        if (space >= len)
+        {
+            head = Dev_UART_RingWrite(dev->tx_buf, dev->tx_size, head, data, len);
+            {
+                uint32_t state = dev_uart_port_ops.critical_enter();
+                dev->rt->tx_head = head;
+                dev_uart_port_ops.critical_exit(state);
+            }
+            {
+                bsp_uart_status_t tx_status = BSP_UART_TxKick(dev->bsp);
+                dev_uart_port_ops.unlock(*dev->lock_ref);
+                return Dev_UART_Map(tx_status);
+            }
+        }
+        if ((timeout_ms == 0U) ||
+            ((dev_uart_port_ops.ticks() - start) >= timeout_ms))
+        {
+            break;
+        }
+        dev_uart_port_ops.unlock(*dev->lock_ref);
+        dev_uart_port_ops.delay(1U);
+        {
+            uint32_t elapsed = dev_uart_port_ops.ticks() - start;
+            if (elapsed >= timeout_ms)
+            {
+                return DEV_UART_ERR_TIMEOUT;
+            }
+            if (dev_uart_port_ops.lock(*dev->lock_ref, timeout_ms - elapsed) == 0U)
+            {
+                return DEV_UART_ERR_TIMEOUT;
+            }
+        }
+    }
+    dev_uart_port_ops.unlock(*dev->lock_ref);
+    return DEV_UART_ERR_TIMEOUT;
+}
+
+/**
+ * @brief 等待发送 FIFO 与硬件发送器全部空闲
+ * @param dev UART 虚拟外设句柄
+ * @param timeout_ms 最大等待时间，单位毫秒
+ * @return dev_uart_status_t
+ * @retval DEV_UART_OK 全部数据发送完成
+ * @retval DEV_UART_ERR_PARAM 参数非法
+ * @retval DEV_UART_ERR_STATE UART 未就绪或端口操作未绑定
+ * @retval DEV_UART_ERR_TIMEOUT 等待发送互斥量、发送完成或期限超时
+ * @retval DEV_UART_ERR_HAL BSP 启动发送失败；队列数据保留以便后续重试
+ *
+ * @note 调用期间持有发送互斥量，避免后续帧并入本次冲刷范围。
+ */
+dev_uart_status_t Dev_UART_Flush(const dev_uart_t *dev, uint32_t timeout_ms)
+{
+    uint32_t start;
+
+    if ((dev == NULL) || (dev->rt == NULL) || (dev->bsp == NULL) ||
+        (dev->lock_ref == NULL) || (*dev->lock_ref == NULL))
+    {
+        return DEV_UART_ERR_PARAM;
+    }
+    if (dev->rt->ready == 0U)
+    {
+        return DEV_UART_ERR_STATE;
+    }
+    if ((dev_uart_port_ops.lock == NULL) || (dev_uart_port_ops.unlock == NULL) ||
+        (dev_uart_port_ops.ticks == NULL) || (dev_uart_port_ops.delay == NULL) ||
+        (dev_uart_port_ops.critical_enter == NULL) ||
+        (dev_uart_port_ops.critical_exit == NULL))
+    {
+        return DEV_UART_ERR_STATE;
+    }
+    if (dev_uart_port_ops.lock(*dev->lock_ref, timeout_ms) == 0U)
+    {
+        return DEV_UART_ERR_TIMEOUT;
+    }
+
+    start = dev_uart_port_ops.ticks();
+    for (;;)
+    {
+        bsp_uart_status_t tx_status = BSP_UART_TxKick(dev->bsp);
+        if (tx_status != BSP_UART_OK)
+        {
+            dev_uart_port_ops.unlock(*dev->lock_ref);
+            return Dev_UART_Map(tx_status);
+        }
+        if ((Dev_UART_TxFree(dev) == dev->tx_size) &&
+            (BSP_UART_TxIdle(dev->bsp) != 0U))
+        {
+            dev_uart_port_ops.unlock(*dev->lock_ref);
+            return DEV_UART_OK;
+        }
+        if ((timeout_ms == 0U) || ((dev_uart_port_ops.ticks() - start) >= timeout_ms))
+        {
+            break;
+        }
+        dev_uart_port_ops.delay(1U);
+    }
+    dev_uart_port_ops.unlock(*dev->lock_ref);
+    return DEV_UART_ERR_TIMEOUT;
+}
+
+/**
+ * @brief 查询发送 FIFO 的剩余容量
+ * @param dev UART 虚拟外设句柄
+ * @return uint16_t
+ * @retval 0 至 FIFO 容量 可写字节数；句柄无效时为 0
+ */
+uint16_t Dev_UART_TxFree(const dev_uart_t *dev)
+{
+    uint16_t used;
+
+    if ((dev == NULL) || (dev->rt == NULL) ||
+        (dev_uart_port_ops.critical_enter == NULL) ||
+        (dev_uart_port_ops.critical_exit == NULL))
+    {
+        return 0U;
+    }
+    {
+        uint32_t state = dev_uart_port_ops.critical_enter();
+        used = Dev_UART_TxUsed(dev);
+        dev_uart_port_ops.critical_exit(state);
+    }
+    return (used < dev->tx_size) ? (uint16_t)(dev->tx_size - used) : 0U;
+}
+
+/**
+ * @brief 查询接收 DMA 覆盖与 FIFO 丢弃的累计字节数
+ * @param dev UART 虚拟外设句柄
+ * @return uint32_t
+ * @retval 0 至 UINT32_MAX 累计丢失字节数；句柄无效时为 0
+ */
+uint32_t Dev_UART_RxOverflow(const dev_uart_t *dev)
+{
+    uint32_t state;
+    uint32_t total;
+
+    if ((dev == NULL) || (dev->rt == NULL) ||
+        (dev_uart_port_ops.critical_enter == NULL) ||
+        (dev_uart_port_ops.critical_exit == NULL))
+    {
+        return 0U;
+    }
+    state = dev_uart_port_ops.critical_enter();
+    total = dev->rt->rx_overflow + dev->rt->rx_dma_lost;
+    dev_uart_port_ops.critical_exit(state);
+    return total;
+}
+
+/**
+ * @brief 清零接收 DMA 覆盖与 FIFO 丢弃计数
+ * @param dev UART 虚拟外设句柄
+ * @retval 无
+ */
+void Dev_UART_RxClearOverflow(const dev_uart_t *dev)
+{
+    if ((dev != NULL) && (dev->rt != NULL) &&
+        (dev_uart_port_ops.critical_enter != NULL) &&
+        (dev_uart_port_ops.critical_exit != NULL))
+    {
+        uint32_t state = dev_uart_port_ops.critical_enter();
+        dev->rt->rx_overflow = 0U;
+        dev->rt->rx_dma_lost = 0U;
+        dev_uart_port_ops.critical_exit(state);
+    }
 }

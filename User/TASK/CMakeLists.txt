@@ -33,6 +33,7 @@ add_library(task_objects OBJECT
     task_key_scan.c
     task_key_cmd.c
     task_lvgl.c
+    task_uart.c
 )
 
 target_link_libraries(task_objects
@@ -42,6 +43,7 @@ target_link_libraries(task_objects
             svc_key_logic
             svc_lvgl
             app_screen
+            dev_uart
 )
 
 target_compile_options(task_objects PRIVATE ${USER_WARN_FLAGS})

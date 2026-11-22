@@ -32,6 +32,7 @@
 #include "dev_spi.h"
 #include "dev_iic.h"
 #include "dev_uart.h"
+void Task_UART(void *argument);
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -89,6 +90,13 @@ const osThreadAttr_t LVGL_T_attributes = {
   .stack_size = 2048 * 4,
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
+/* Definitions for UART_T */
+osThreadId_t UART_THandle;
+const osThreadAttr_t UART_T_attributes = {
+  .name = "UART_T",
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
 /* Definitions for KEY_EVT_Q */
 osMessageQueueId_t KEY_EVT_QHandle;
 uint8_t KEY_EVT_QBuffer[ 8 * sizeof( key_event_msg_t ) ];
@@ -134,6 +142,7 @@ void StartDefaultTask(void *argument);
 void Task_Key_Scan(void *argument);
 void Task_Key_Cmd(void *argument);
 void Task_LVGL(void *argument);
+void Task_UART(void *argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
@@ -198,6 +207,9 @@ void MX_FREERTOS_Init(void) {
 
   /* creation of LVGL_T */
   LVGL_THandle = osThreadNew(Task_LVGL, NULL, &LVGL_T_attributes);
+
+  /* creation of UART_T */
+  UART_THandle = osThreadNew(Task_UART, NULL, &UART_T_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */

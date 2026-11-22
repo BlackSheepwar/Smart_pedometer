@@ -1,15 +1,8 @@
 /**
  * @file    dev_uart.h
- * @brief   串口设备层：收发队列、溢出记账、串行化与超时。
+ * @brief   UART 虚拟外设公共接口。
  * @author  Ricardo
- * @date    2026-11-21
- *
- * 队列在本层，芯片层只搬字节：
- *  - 接收队列就是芯片层的 DMA 目标缓冲，本层只维护"读到哪里"；
- *  - 发送队列由本层写入，芯片层通过取数 / 归还回调直接读这块内存，不复制。
- *
- * 换芯片只改 bsp_uart.c；本层的等待、加锁与超时在裸机下只需替换成
- * 对应的任务 / 临界区实现，接口不变。
+ * @date    2026-11-22
  */
 
 #ifndef __DEV_UART_H__
@@ -17,149 +10,156 @@
 
 #include <stdint.h>
 
-/*==============================================================================
- * 返回码
- *
- * 数值即契约：已经发布的数值不再重排，新增错误一律往后加。
- *============================================================================*/
-
 /**
- * @brief 串口设备层返回码
+ * @brief UART 设备层状态码。
+ * @note 数值即接口契约，已发布值不得重排。
  */
-typedef enum {
-    DEV_UART_OK          = 0,   /* 成功 */
-    DEV_UART_ERR_PARAM   = -1,  /* 参数非法：空指针、长度为 0 */
-    DEV_UART_ERR_STATE   = -2,  /* 状态不对：未初始化、句柄不匹配 */
-    DEV_UART_ERR_TIMEOUT = -3,  /* 等待超时 */
-    DEV_UART_ERR_HAL     = -4   /* 芯片层失败 */
+typedef enum
+{
+    DEV_UART_OK          =  0, /**< 操作成功 */
+    DEV_UART_ERR_PARAM   = -1, /**< 参数非法 */
+    DEV_UART_ERR_STATE   = -2, /**< 状态不允许 */
+    DEV_UART_ERR_TIMEOUT = -3, /**< 操作超时 */
+    DEV_UART_ERR_HAL     = -4  /**< 芯片层操作失败 */
 } dev_uart_status_t;
 
-/*==============================================================================
- * 类型定义
- *============================================================================*/
-
 /**
- * @brief 串口设备句柄（不透明：布局在 dev_uart.c）
+ * @brief UART 虚拟外设句柄；布局定义于 dev_uart.c。
  */
 typedef struct dev_uart dev_uart_t;
 
-/*==============================================================================
- * 外部声明
- *============================================================================*/
-
 /**
- * @brief USART1 的设备句柄
- *
- * @note 一个端口一个句柄：端口没有"挂在一条总线上"的寻址概念，
- *       所以只有设备句柄这一层，没有总线句柄。
+ * @brief UART1 虚拟外设配置句柄。
  */
 extern const dev_uart_t dev_uart1;
 
-/*==============================================================================
- * 函数声明
- *============================================================================*/
-
 /**
- * @brief 初始化设备层：登记队列、接管芯片层的收发缓冲
+ * @brief 初始化 UART1 虚拟外设。
  * @return dev_uart_status_t
- * @retval DEV_UART_OK        队列与芯片层都已就绪
- * @retval DEV_UART_ERR_STATE 已经初始化过，或芯片层未初始化
- * @retval DEV_UART_ERR_HAL   芯片层启动失败
- *
- * @note 队列容量在 dev_uart.c 里，必须是 2 的幂且不小于 16。
+ * @retval DEV_UART_OK 成功或已就绪
+ * @retval DEV_UART_ERR_PARAM 配置参数非法
+ * @retval DEV_UART_ERR_STATE 已启动但不可用
+ * @retval DEV_UART_ERR_HAL 芯片层启动失败
  */
 dev_uart_status_t Dev_UART_Init(void);
 
 /**
- * @brief 查询端口是否可用
- * @param dev       设备句柄
+ * @brief 在任务或主循环上下文处理接收并推进发送。
+ * @param dev UART 句柄
+ * @return dev_uart_status_t
+ * @retval DEV_UART_OK 本轮服务完成
+ * @retval DEV_UART_ERR_PARAM 句柄或接收服务配置非法
+ * @retval DEV_UART_ERR_STATE UART 未就绪或接收发生数据丢失
+ * @retval DEV_UART_ERR_TIMEOUT 阻塞接收服务超时
+ * @retval DEV_UART_ERR_HAL 接收服务或发送队列启动失败
+ *
+ * @note DMA 只交付完整节点；服务延迟超过节点保留窗口时，仅保留最新节点，
+ *       丢弃量由 Dev_UART_RxOverflow() 查询。
+ */
+dev_uart_status_t Dev_UART_Service(const dev_uart_t *dev);
+
+/**
+ * @brief 等待 UART 服务任务收到事件。
+ * @param dev UART 句柄
+ * @param timeout_ms 最大等待时间，单位毫秒
+ * @return dev_uart_status_t
+ * @retval DEV_UART_OK 收到通知
+ * @retval DEV_UART_ERR_PARAM 句柄或等待端口非法
+ * @retval DEV_UART_ERR_TIMEOUT 等待超时
+ *
+ * @note 仅由注册为 UART 服务任务的线程调用；裸机主循环不调用此接口。
+ */
+dev_uart_status_t Dev_UART_Wait(const dev_uart_t *dev, uint32_t timeout_ms);
+
+/**
+ * @brief 查询 UART 是否就绪。
+ * @param dev UART 句柄
  * @return uint8_t
- * @retval 1        已初始化且芯片层接收已武装
- * @retval 0        未初始化或芯片层已停
+ * @retval 1 UART 已就绪
+ * @retval 0 句柄无效、BSP 未就绪或设备未就绪
  */
 uint8_t Dev_UART_IsReady(const dev_uart_t *dev);
 
 /**
- * @brief 查询接收队列里可读的字节数
- * @param dev       设备句柄
- * @return uint16_t 可读字节数（不超过队列容量）
- *
- * @note 顺带做一次溢出记账：如果累计收到的字节比读指针超出一整圈，
- *       多出来的部分计入 Dev_UART_RxOverflow()，读指针跳到最旧的有效字节。
+ * @brief 查询接收 FIFO 可读字节数，不触发硬件轮询。
+ * @param dev UART 句柄
+ * @return uint16_t
+ * @retval 0 至 FIFO 容量 未消费字节数；句柄无效时为 0
  */
 uint16_t Dev_UART_Available(const dev_uart_t *dev);
 
 /**
- * @brief 看一眼队首字节，不取走
- * @param dev       设备句柄
- * @param byte      输出：队首字节
- * @return uint8_t
- * @retval 1        取到了
- * @retval 0        队列为空或参数非法
- */
-uint8_t Dev_UART_Peek(const dev_uart_t *dev, uint8_t *byte);
-
-/**
- * @brief 读接收队列
- * @param dev       设备句柄
- * @param buf       目的缓冲
- * @param len       期望字节数
- * @param timeout_ms 等够 len 个字节的最长时间；0 表示不等待
- * @return uint16_t 实际读出的字节数（可能小于 len）
+ * @brief 查看接收 FIFO 队首连续数据，不消费数据。
+ * @param dev UART 句柄
+ * @param data 输出队首地址；无数据或参数非法时写入 NULL
+ * @return uint16_t
+ * @retval 0 至 FIFO 容量 连续可读字节数；参数非法时为 0
  *
- * @note 只有单消费者：同一端口不要在两个任务里同时读。
- *       阻塞档下等待期间会驱动芯片层轮询接收。
+ * @note 仅在对应数据被 Dev_UART_Read() 消费前有效；同一 FIFO 只允许一个消费者。
  */
-uint16_t Dev_UART_Read(const dev_uart_t *dev, uint8_t *buf, uint16_t len, uint32_t timeout_ms);
+uint16_t Dev_UART_Peek(const dev_uart_t *dev, const uint8_t **data);
 
 /**
- * @brief 写入发送队列并请求外发
- * @param dev       设备句柄
- * @param buf       源数据
- * @param len       字节数
- * @param timeout_ms 队列满时最多等多久；0 表示不等待
- * @return uint16_t 实际排入队列的字节数
- *
- * @note 本接口是"送进队列"而不是"已经发上线"：中断 / DMA 档返回时
- *       可能还有数据在途，需要等发完时再调用 Dev_UART_Flush()。
+ * @brief 消费接收 FIFO 队首字节。
+ * @param dev UART 句柄
+ * @param len 请求消费数量
+ * @return uint16_t
+ * @retval 0 至请求长度 实际消费数量；句柄无效时为 0
  */
-uint16_t Dev_UART_Write(const dev_uart_t *dev, const uint8_t *buf, uint16_t len, uint32_t timeout_ms);
+uint16_t Dev_UART_Read(const dev_uart_t *dev, uint16_t len);
 
 /**
- * @brief 等待发送彻底停下
- * @param dev       设备句柄
- * @param timeout_ms 最长等待时间
+ * @brief 将完整数据帧串行化写入发送 FIFO。
+ * @param dev UART 句柄
+ * @param data 数据起点
+ * @param len 数据长度
+ * @param timeout_ms FIFO 空间等待上限，单位毫秒；0 表示只尝试一次
  * @return dev_uart_status_t
- * @retval DEV_UART_OK         队列空且在途数据已发完
- * @retval DEV_UART_ERR_PARAM  dev 为空
- * @retval DEV_UART_ERR_STATE  未初始化
- * @retval DEV_UART_ERR_TIMEOUT 超时仍有数据
+ * @retval DEV_UART_OK 全部写入
+ * @retval DEV_UART_ERR_PARAM 参数非法
+ * @retval DEV_UART_ERR_STATE UART 未就绪或端口操作未绑定
+ * @retval DEV_UART_ERR_TIMEOUT FIFO 空间、互斥量或期限等待超时
+ * @retval DEV_UART_ERR_HAL BSP 启动发送失败；完整帧仍保留在队列中
  *
- * @note 等待期间会持续请求芯片层外发，所以不会因为"上一次启动失败"而空等。
+ * @note 多个写者由 UART 互斥量串行化；帧空间不足时不会部分入队。
+ */
+dev_uart_status_t Dev_UART_Write(const dev_uart_t *dev, const uint8_t *data,
+                                 uint16_t len, uint32_t timeout_ms);
+
+/**
+ * @brief 等待发送 FIFO 和硬件发送状态全部空闲。
+ * @param dev UART 句柄
+ * @param timeout_ms 最大等待时间，单位毫秒；0 表示只查询一次
+ * @return dev_uart_status_t
+ * @retval DEV_UART_OK 当前数据全部发送完成
+ * @retval DEV_UART_ERR_PARAM 句柄或端口配置非法
+ * @retval DEV_UART_ERR_STATE UART 未就绪或端口操作未绑定
+ * @retval DEV_UART_ERR_TIMEOUT 等待互斥量、发送完成或期限超时
+ * @retval DEV_UART_ERR_HAL BSP 发送启动失败；队列数据保留以便后续重试
  */
 dev_uart_status_t Dev_UART_Flush(const dev_uart_t *dev, uint32_t timeout_ms);
 
 /**
- * @brief 查询发送队列剩余空间
- * @param dev       设备句柄
- * @return uint16_t 还能写入的字节数
+ * @brief 查询发送 FIFO 剩余空间。
+ * @param dev UART 句柄
+ * @return uint16_t
+ * @retval 0 至 FIFO 容量 可写字节数；句柄无效时为 0
  */
 uint16_t Dev_UART_TxFree(const dev_uart_t *dev);
 
 /**
- * @brief 读取接收溢出计数
- * @param dev       设备句柄
- * @return uint32_t 由于读得不够快而丢掉的累计字节数
+ * @brief 查询 DMA 覆盖与接收 FIFO 丢弃的累计字节数。
+ * @param dev UART 句柄
+ * @return uint32_t
+ * @retval 0 至 UINT32_MAX 累计丢失字节数；句柄无效时为 0
  */
 uint32_t Dev_UART_RxOverflow(const dev_uart_t *dev);
 
 /**
- * @brief 把接收溢出计数清零
- * @param dev       设备句柄
- * @return dev_uart_status_t
- * @retval DEV_UART_OK        已清零
- * @retval DEV_UART_ERR_PARAM dev 为空
+ * @brief 清零 DMA 覆盖与接收 FIFO 丢弃计数。
+ * @param dev UART 句柄
+ * @retval 无
  */
-dev_uart_status_t Dev_UART_RxClearOverflow(const dev_uart_t *dev);
+void Dev_UART_RxClearOverflow(const dev_uart_t *dev);
 
-#endif /* __DEV_UART_H__ */
+#endif
