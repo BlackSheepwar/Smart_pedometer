@@ -46,3 +46,24 @@ target_include_directories(lvgl
 target_compile_features(lvgl PRIVATE c_std_99)
 
 target_compile_options(lvgl PRIVATE -w)
+
+# -----------------------------------------------------------------------------
+# ringbuffer：镜像索引环形缓冲（上游 W-Okaka/ringbuffer，public domain）
+#
+#   保持上游源码与目录名不变：第三方代码只读，改由本文件替它建静态库。
+#   头文件里的 ringbuffer_status() 声明与 .c 里的 static inline 定义不一致，
+#   外部翻译单元调用会链接失败；本工程不使用该函数，靠 -w 让上游自身
+#   编译通过。NDEBUG 关掉库内的 assert，避免把 assert/printf 拉进固件。
+# -----------------------------------------------------------------------------
+add_library(ringbuffer STATIC
+    ringbuffer/ringbuffer.c
+)
+
+target_include_directories(ringbuffer
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/ringbuffer
+)
+
+target_compile_features(ringbuffer PRIVATE c_std_99)
+target_compile_definitions(ringbuffer PRIVATE NDEBUG)
+target_compile_options(ringbuffer PRIVATE -w)

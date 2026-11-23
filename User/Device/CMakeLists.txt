@@ -46,14 +46,13 @@ target_link_libraries(dev_iic PRIVATE bsp_iic stm32cubemx)
 target_compile_options(dev_iic PRIVATE ${USER_WARN_FLAGS})
 
 # -----------------------------------------------------------------------------
-# dev_uart：UART 虚拟外设与可替换 OS 端口
+# dev_uart：UART 虚拟外设（OS 能力暂内联，OSAL 重建后抽回端口实现）
 # -----------------------------------------------------------------------------
 add_library(dev_uart STATIC
     Dev_UART/dev_uart.c
-    Dev_UART/dev_uart_port_freertos.c
 )
 target_include_directories(dev_uart PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/Dev_UART)
-target_link_libraries(dev_uart PRIVATE bsp_uart stm32cubemx)
+target_link_libraries(dev_uart PRIVATE bsp_uart ringbuffer stm32cubemx)
 target_compile_options(dev_uart PRIVATE ${USER_WARN_FLAGS})
 
 # -----------------------------------------------------------------------------

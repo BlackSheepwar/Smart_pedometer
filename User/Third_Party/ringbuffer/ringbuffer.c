@@ -29,9 +29,10 @@ void ringbuffer_init(ringbuffer_t *rb, uint8_t *pool, uint16_t size)
  * Status / Length Queries
  * --------------------------------------------------------------------------- */
 
-/* Fix #2: 'static inline' confines the inline definition to this translation
- * unit, avoiding the C99 requirement for a separate external definition. */
-static inline ringbuffer_state_t ringbuffer_status(ringbuffer_t *rb)
+/* Fix #2: 原实现写成 `static inline`，与 ringbuffer.h 的公开声明冲突（C 不允许
+ * 在外部声明之后再给 static 定义），外部翻译单元调用会链接失败。这里去掉
+ * static inline，使定义与公开原型一致；语义不变。 */
+ringbuffer_state_t ringbuffer_status(ringbuffer_t *rb)
 {
     assert(rb != NULL);
 
