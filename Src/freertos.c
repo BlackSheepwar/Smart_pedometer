@@ -32,7 +32,6 @@
 #include "dev_spi.h"
 #include "dev_iic.h"
 #include "dev_uart.h"
-void Task_UART(void *argument);
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -108,6 +107,17 @@ const osMessageQueueAttr_t KEY_EVT_Q_attributes = {
   .mq_mem = &KEY_EVT_QBuffer,
   .mq_size = sizeof(KEY_EVT_QBuffer)
 };
+/* Definitions for UART_EVT_Q */
+osMessageQueueId_t UART_EVT_QHandle;
+uint8_t UART_EVT_QBuffer[ 4 * sizeof( dev_uart_t* ) ];
+osStaticMessageQDef_t UART_EVT_QControlBlock;
+const osMessageQueueAttr_t UART_EVT_Q_attributes = {
+  .name = "UART_EVT_Q",
+  .cb_mem = &UART_EVT_QControlBlock,
+  .cb_size = sizeof(UART_EVT_QControlBlock),
+  .mq_mem = &UART_EVT_QBuffer,
+  .mq_size = sizeof(UART_EVT_QBuffer)
+};
 /* Definitions for IIC_LOCK */
 osMutexId_t IIC_LOCKHandle;
 osStaticMutexDef_t IIC_LOCKControlBlock;
@@ -175,8 +185,6 @@ void MX_FREERTOS_Init(void) {
   Dev_IIC_Init();
   BSP_SPI_Init();
   Dev_SPI_Init();
-  BSP_UART_Init();
-  Dev_UART_Init();
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
@@ -191,8 +199,14 @@ void MX_FREERTOS_Init(void) {
   /* creation of KEY_EVT_Q */
   KEY_EVT_QHandle = osMessageQueueNew (8, sizeof(key_event_msg_t), &KEY_EVT_Q_attributes);
 
+  /* creation of UART_EVT_Q */
+  UART_EVT_QHandle = osMessageQueueNew (4, sizeof(dev_uart_t*), &UART_EVT_Q_attributes);
+
   /* USER CODE BEGIN RTOS_QUEUES */
-  /* add queues, ... */
+  /* UART 的接收事件投在 CubeMX 刚建好的 UART_EVT_Q 里，所以武装 DMA 必须
+     放到建队之后：建队前来的字节没有队列可投，事件会丢。发送互斥量在上面
+     已经建好，Dev_UART_Write 可以直接用 UART1_LOCK。 */
+  Dev_UART_Init(&dev_uart1);
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -291,6 +305,24 @@ __weak void Task_LVGL(void *argument)
     osDelay(1);
   }
   /* USER CODE END Task_LVGL */
+}
+
+/* USER CODE BEGIN Header_Task_UART */
+/**
+* @brief Function implementing the UART_T thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_Task_UART */
+__weak void Task_UART(void *argument)
+{
+  /* USER CODE BEGIN Task_UART */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END Task_UART */
 }
 
 /* Private application code --------------------------------------------------*/
