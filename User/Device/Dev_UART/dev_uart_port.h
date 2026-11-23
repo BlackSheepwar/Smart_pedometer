@@ -21,7 +21,6 @@ typedef struct dev_uart_port_lock dev_uart_port_lock_t;
 
 /**
  * @brief 读取单调递增的系统节拍。
- * @return uint32_t
  * @retval 当前系统 tick
  */
 typedef uint32_t (*dev_uart_port_ticks_fn)(void);
@@ -30,7 +29,6 @@ typedef uint32_t (*dev_uart_port_ticks_fn)(void);
  * @brief 在超时内获取互斥量。
  * @param lock 不透明互斥句柄
  * @param timeout_ms 等待上限，单位毫秒
- * @return uint8_t
  * @retval 1 成功获取
  * @retval 0 获取失败或超时
  */
@@ -47,7 +45,6 @@ typedef void (*dev_uart_port_unlock_fn)(dev_uart_port_lock_t *lock);
 /**
  * @brief 等待服务任务事件。
  * @param timeout_ms 等待上限，单位毫秒
- * @return uint8_t
  * @retval 1 收到事件
  * @retval 0 等待超时
  */
@@ -74,7 +71,6 @@ typedef void (*dev_uart_port_signal_isr_fn)(void);
 
 /**
  * @brief 进入短临界区并保存恢复状态。
- * @return uint32_t
  * @retval 0 端口定义的初始状态或已恢复状态；其它值由端口实现解释
  */
 typedef uint32_t (*dev_uart_port_critical_enter_fn)(void);
@@ -89,7 +85,6 @@ typedef void (*dev_uart_port_critical_exit_fn)(uint32_t state);
 /**
  * @brief 检查互斥端口句柄是否已经绑定。
  * @param lock 不透明互斥句柄
- * @return uint8_t
  * @retval 1 端口对象已绑定
  * @retval 0 端口对象无效
  */

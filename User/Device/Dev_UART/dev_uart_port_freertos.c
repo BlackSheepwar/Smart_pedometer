@@ -66,7 +66,6 @@ dev_uart_port_register_fn Dev_UART_PortRegisterTask = Dev_UART_PortRegisterTaskI
 
 /**
  * @brief 读取 FreeRTOS 系统节拍。
- * @return uint32_t
  * @retval 当前系统 tick 数
  */
 static uint32_t Dev_UART_PortTicks(void)
@@ -76,7 +75,6 @@ static uint32_t Dev_UART_PortTicks(void)
 
 /**
  * @brief 进入 FreeRTOS 端口短临界区。
- * @return uint32_t
  * @retval 进入前的中断屏蔽状态
  */
 static uint32_t Dev_UART_PortCriticalEnter(void)
@@ -102,7 +100,6 @@ static void Dev_UART_PortCriticalExit(uint32_t state)
 /**
  * @brief 检查 UART 互斥量是否已经由 CubeMX 创建。
  * @param lock 不透明互斥句柄
- * @return uint8_t
  * @retval 1 互斥量可用
  * @retval 0 互斥量尚未创建或句柄无效
  */
@@ -115,7 +112,6 @@ static uint8_t Dev_UART_PortValid(dev_uart_port_lock_t *lock)
  * @brief 在限定时间内获取 CubeMX 创建的 UART 互斥量。
  * @param lock 不透明互斥句柄
  * @param timeout_ms 等待上限，单位毫秒
- * @return uint8_t
  * @retval 1 成功获取互斥量
  * @retval 0 获取失败或等待超时
  */
@@ -144,7 +140,6 @@ static void Dev_UART_PortUnlock(dev_uart_port_lock_t *lock)
 /**
  * @brief 等待当前服务任务的直接通知。
  * @param timeout_ms 等待上限，单位毫秒
- * @return uint8_t
  * @retval 1 收到通知
  * @retval 0 等待超时
  */

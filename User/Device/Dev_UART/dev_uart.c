@@ -89,8 +89,7 @@ const dev_uart_t dev_uart1 =
 /**
  * @brief 计算接收 FIFO 中未消费的数据长度
  * @param dev UART 虚拟外设句柄
- * @return uint16_t
- * @retval 0 至 FIFO 容量 未消费字节数
+ * @retval 0 至 FIFO 容量 未消费字节数；成立条件为容量不超过无符号序号半区间
  */
 static uint16_t Dev_UART_RxUsed(const dev_uart_t *dev)
 {
@@ -100,8 +99,7 @@ static uint16_t Dev_UART_RxUsed(const dev_uart_t *dev)
 /**
  * @brief 计算发送 FIFO 中尚未完成的数据长度
  * @param dev UART 虚拟外设句柄
- * @return uint16_t
- * @retval 0 至 FIFO 容量 尚未完成字节数
+ * @retval 0 至 FIFO 容量 尚未完成字节数；成立条件为容量不超过无符号序号半区间
  */
 static uint16_t Dev_UART_TxUsed(const dev_uart_t *dev)
 {
@@ -115,7 +113,6 @@ static uint16_t Dev_UART_TxUsed(const dev_uart_t *dev)
  * @param head 当前写入序号
  * @param data 输入数据地址
  * @param len 输入数据长度
- * @return uint16_t
  * @retval 新的写入序号
  */
 static uint16_t Dev_UART_RingWrite(uint8_t *buf, uint16_t size, uint16_t head,
@@ -160,7 +157,6 @@ static void Dev_UART_OnEvent(void *ctx, uint32_t events)
  * @brief 获取发送 FIFO 队首连续区间
  * @param ctx 回调上下文
  * @param data 输出数据地址；错误或队列为空时写入 NULL
- * @return uint16_t
  * @retval 连续可发送长度；参数无效或队列为空时为 0
  */
 static uint16_t Dev_UART_TxAcquire(void *ctx, const uint8_t **data)
@@ -222,7 +218,6 @@ static void Dev_UART_TxRelease(void *ctx, uint16_t len)
 /**
  * @brief 将 BSP 返回码映射为设备层状态码
  * @param status BSP 返回码
- * @return dev_uart_status_t
  * @retval DEV_UART_OK BSP 操作成功
  * @retval DEV_UART_ERR_PARAM BSP 参数非法
  * @retval DEV_UART_ERR_STATE BSP 状态不允许
@@ -256,10 +251,10 @@ static dev_uart_status_t Dev_UART_Map(bsp_uart_status_t status)
 
 /**
  * @brief 初始化 UART1 虚拟外设并启动 BSP 接收
- * @return dev_uart_status_t
  * @retval DEV_UART_OK 初始化成功或已完成
- * @retval DEV_UART_ERR_PARAM 端口绑定或配置非法
- * @retval DEV_UART_ERR_HAL BSP 启动失败
+ * @retval DEV_UART_ERR_PARAM 端口绑定、运行块或同步操作非法
+ * @retval DEV_UART_ERR_STATE 启动后运行块已不可用
+ * @retval DEV_UART_ERR_HAL BSP 接收启动失败
  */
 dev_uart_status_t Dev_UART_Init(void)
 {
@@ -314,7 +309,6 @@ dev_uart_status_t Dev_UART_Init(void)
 /**
  * @brief 搬运已完成接收节点并推进发送队列
  * @param dev UART 虚拟外设句柄
- * @return dev_uart_status_t
  * @retval DEV_UART_OK 服务完成
  * @retval DEV_UART_ERR_PARAM 句柄或接收服务配置非法
  * @retval DEV_UART_ERR_STATE UART 未就绪或接收数据丢失
@@ -421,7 +415,6 @@ dev_uart_status_t Dev_UART_Service(const dev_uart_t *dev)
  * @brief 等待 UART 服务任务收到传输事件
  * @param dev UART 虚拟外设句柄
  * @param timeout_ms 最大等待时间，单位毫秒
- * @return dev_uart_status_t
  * @retval DEV_UART_OK 收到通知
  * @retval DEV_UART_ERR_PARAM 句柄或等待端口非法
  * @retval DEV_UART_ERR_TIMEOUT 等待超时
@@ -442,7 +435,6 @@ dev_uart_status_t Dev_UART_Wait(const dev_uart_t *dev, uint32_t timeout_ms)
 /**
  * @brief 查询 UART 是否就绪
  * @param dev UART 虚拟外设句柄
- * @return uint8_t
  * @retval 1 UART 已就绪
  * @retval 0 句柄无效、BSP 未就绪或设备未就绪
  */
@@ -455,7 +447,6 @@ uint8_t Dev_UART_IsReady(const dev_uart_t *dev)
 /**
  * @brief 查询接收 FIFO 中未消费的字节数
  * @param dev UART 虚拟外设句柄
- * @return uint16_t
  * @retval 0 至 FIFO 容量 未消费字节数；句柄无效时为 0
  */
 uint16_t Dev_UART_Available(const dev_uart_t *dev)
@@ -481,7 +472,6 @@ uint16_t Dev_UART_Available(const dev_uart_t *dev)
  * @brief 查看接收 FIFO 队首的连续数据而不消费
  * @param dev UART 虚拟外设句柄
  * @param data 输出队首地址；无连续数据时写入空指针
- * @return uint16_t
  * @retval 0 至 FIFO 容量 连续可读字节数
  *
  * @note 指针仅在对应数据被读取前有效，调用者不得修改缓冲内容。
@@ -526,7 +516,6 @@ uint16_t Dev_UART_Peek(const dev_uart_t *dev, const uint8_t **data)
  * @brief 消费接收 FIFO 队首指定数量的字节
  * @param dev UART 虚拟外设句柄
  * @param len 请求消费数量
- * @return uint16_t
  * @retval 0 至请求长度 实际消费字节数
  */
 uint16_t Dev_UART_Read(const dev_uart_t *dev, uint16_t len)
@@ -556,7 +545,6 @@ uint16_t Dev_UART_Read(const dev_uart_t *dev, uint16_t len)
  * @param data 帧数据地址
  * @param len 帧数据长度
  * @param timeout_ms 等待空间和锁的超时，单位毫秒
- * @return dev_uart_status_t
  * @retval DEV_UART_OK 全帧已入队
  * @retval DEV_UART_ERR_PARAM 参数非法
  * @retval DEV_UART_ERR_STATE UART 未就绪
@@ -647,7 +635,6 @@ dev_uart_status_t Dev_UART_Write(const dev_uart_t *dev, const uint8_t *data,
  * @brief 等待发送 FIFO 与硬件发送器全部空闲
  * @param dev UART 虚拟外设句柄
  * @param timeout_ms 最大等待时间，单位毫秒
- * @return dev_uart_status_t
  * @retval DEV_UART_OK 全部数据发送完成
  * @retval DEV_UART_ERR_PARAM 参数非法
  * @retval DEV_UART_ERR_STATE UART 未就绪或端口操作未绑定
@@ -709,7 +696,6 @@ dev_uart_status_t Dev_UART_Flush(const dev_uart_t *dev, uint32_t timeout_ms)
 /**
  * @brief 查询发送 FIFO 的剩余容量
  * @param dev UART 虚拟外设句柄
- * @return uint16_t
  * @retval 0 至 FIFO 容量 可写字节数；句柄无效时为 0
  */
 uint16_t Dev_UART_TxFree(const dev_uart_t *dev)
@@ -733,7 +719,6 @@ uint16_t Dev_UART_TxFree(const dev_uart_t *dev)
 /**
  * @brief 查询接收 DMA 覆盖与 FIFO 丢弃的累计字节数
  * @param dev UART 虚拟外设句柄
- * @return uint32_t
  * @retval 0 至 UINT32_MAX 累计丢失字节数；句柄无效时为 0
  */
 uint32_t Dev_UART_RxOverflow(const dev_uart_t *dev)
