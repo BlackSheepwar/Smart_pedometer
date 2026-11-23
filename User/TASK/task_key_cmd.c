@@ -9,8 +9,9 @@
  *         Task_Key_Cmd   睡在事件队列上，来一条处理一条。
  *       队列把两级解耦：业务 handler 慢一点，采样节拍不会跟着慢。
  *
- *       取事件的代码写在这里，不在按键服务里：服务只负责消抖和投递，
- *       一旦把"怎么取、等多久"塞进服务，服务就被绑在 RTOS 上了。
+ *       取事件的等待不在本文件：Svc_Key_Logic_Wait() 把"睡在队列上"包在服务
+ *       里，队列句柄不出服务层，本线程只写"等一条 → 分发一条"的流程。
+ *       换投递方式（队列换信号量、换邮箱）只改服务那一处，本线程不动。
  *
  *       本线程是"表"与"机制"的唯一接合点：表由 APP 导出
  *       （APP_KEY_CMD_TABLE），查表执行由 Svc_Key_Cmd 提供，两者在这里
@@ -32,21 +33,10 @@
  *============================================================================*/
 // 固定包含
 #include <stddef.h>
-#include "FreeRTOS.h"
-#include "cmsis_os2.h"
 // 功能包含
 #include "app_key_cmd.h"
 #include "svc_key_cmd.h"
 #include "svc_key_logic.h"
-
-/*==============================================================================
- * 外部声明
- *============================================================================*/
-/**
- * @brief 事件队列句柄：由 CubeMX 在 freertos.c 里创建
- * @note 元素 key_event_msg_t、深度 8、静态分配；生产者是按键服务，消费者是本线程。
- */
-extern osMessageQueueId_t KEY_EVT_QHandle;
 
 /*==============================================================================
  * 接口实现
@@ -55,8 +45,8 @@ extern osMessageQueueId_t KEY_EVT_QHandle;
  * @brief 按键命令线程体
  * @param argument 未使用
  * @retval 无
- * @note 一直阻塞在队列上，被投递唤醒后执行一条命令；
- *       没有事件时线程不占 CPU（由内核挂起，直到队列非空）。
+ * @note 一直阻塞在事件上，被投递唤醒后执行一条命令；没有事件时线程
+ *       不占 CPU（由内核挂起，直到服务层收到事件）。
  *       分发返回值（命中与否）本线程不关心：表里没列的组合按设计就是
  *       静默丢弃，不需要在这里分支。
  */
@@ -68,9 +58,8 @@ void Task_Key_Cmd(void *argument)
 
     /* ---------- 阻塞收事件，来一条处理一条 ---------- */
     for (;;) {
-        if (osMessageQueueGet(KEY_EVT_QHandle, &msg, NULL, osWaitForever) == osOK) {
-            Svc_Key_Cmd_Dispatch(APP_KEY_CMD_TABLE, APP_KEY_CMD_COUNT,
-                                 msg.key, msg.event);
-        }
+        Svc_Key_Logic_Wait(&msg);
+        Svc_Key_Cmd_Dispatch(APP_KEY_CMD_TABLE, APP_KEY_CMD_COUNT,
+                             msg.key, msg.event);
     }
 }

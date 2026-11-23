@@ -45,21 +45,39 @@ typedef enum {
 } dev_iic_status_t;
 
 /**
+ * @brief IIC 总线句柄（不透明，定义在 dev_iic.c）
+ * @note 只描述"用哪条 BSP 总线、哪把互斥量"，不含任何引脚或从机地址。
+ */
+typedef struct dev_iic dev_iic_t;
+
+/**
  * @brief IIC 从机设备句柄（不透明，定义在 dev_iic.c）
  * @note 一个实例对应一颗器件：总线、7 bit 地址、总线时钟、子地址宽度。
  */
 typedef struct dev_iic_dev dev_iic_dev_t;
 
 /*==============================================================================
+ * 外部变量
+ *============================================================================*/
+/**
+ * @brief I2C1 总线：BSP 总线句柄 + 互斥量句柄 + 运行块
+ * @note Init 一次登记一条总线；同一条总线上的从机由 dev_iic_dev_* 携带。
+ */
+extern const dev_iic_t dev_iic1;
+
+/*==============================================================================
  * 函数声明
  *============================================================================*/
 /**
- * @brief 初始化 IIC 虚拟外设：逐路检查总线、互斥量并探测 BSP 就绪
- * @retval DEV_IIC_OK: 全部总线就绪
+ * @brief 初始化一路 IIC 总线：检查总线、互斥量并探测 BSP 就绪
+ * @param bus 总线句柄
+ * @retval DEV_IIC_OK: 总线就绪；已初始化的总线直接返回
  * @retval DEV_IIC_ERR_STATE: 缺总线句柄、互斥量尚未创建，或 bsp_iic 未初始化
- * @note 必须在 osMutexNew() 之后、bsp_iic 初始化之后调用。
+ *
+ * @note 必须在 osMutexNew() 之后、bsp_iic 初始化之后调用。每条总线调一次，
+ *       多路总线各调各的；本层不再持有总线表。
  */
-dev_iic_status_t Dev_IIC_Init(void);
+dev_iic_status_t Dev_IIC_Init(const dev_iic_t *bus);
 
 /**
  * @brief 向从机直接写数据（RAW 模式，无寄存器子地址）

@@ -68,13 +68,13 @@ typedef struct {
 /**
  * @brief SPI 总线对象
  * @note 指向 BSP 的总线句柄与 freertos.c 生成的互斥量；两者都在 .rodata，
- *       可变状态在 rt 里。
+ *       可变状态在 rt 里。布局只在本文件，头文件拿到的只有不透明标签。
  */
-typedef struct {
+struct dev_spi {
     const bsp_spi_t *bsp;  /* BSP 总线：速率与字节搬运由它完成 */
     osMutexId_t     *lock; /* 指向 freertos.c 生成的互斥量句柄 */
     dev_spi_rt_t    *rt;   /* 运行块，定义在本文件内 */
-} dev_spi_t;
+};
 
 /**
  * @brief SPI 设备对象
@@ -119,14 +119,6 @@ const dev_spi_dev_t dev_spi_dev_lcd = {
     .cs_active_level = 0U,
     .sck_hz          = 21000000U,
 };
-
-/** @brief 本层管理的总线表，仅 Init 轮询用 */
-static const dev_spi_t *const s_buses[] = {
-    &dev_spi1,
-};
-
-/** @brief 总线表长度：由表的行数算出 */
-static const size_t s_bus_count = sizeof(s_buses) / sizeof(s_buses[0]);
 
 /*==============================================================================
  * 内部函数
@@ -187,43 +179,42 @@ static void Dev_SPI_OnDone(void *ctx, bsp_spi_status_t status)
  * 接口实现
  *============================================================================*/
 /**
- * @brief 初始化本层：检查总线互斥量与 BSP 是否就绪，登记总线表
- * @retval DEV_SPI_OK: 初始化成功（已初始化的总线会被跳过）
+ * @brief 初始化一路 SPI 总线：检查互斥量与 BSP 是否就绪
+ * @param bus 总线句柄
+ * @retval DEV_SPI_OK: 初始化成功；已初始化的总线直接返回
  * @retval DEV_SPI_ERR_STATE: BSP 未初始化，或总线互斥量句柄仍为 NULL
- * @note 必须在 BSP_SPI_Init() 与 CubeMX 的互斥量创建之后调用，
- *       即 USER CODE BEGIN RTOS_MUTEX 段内。不能在中断里调用。
+ *
+ * @note 在 BSP_SPI_Init() 与 CubeMX 的互斥量创建之后调用，即 USER CODE
+ *       BEGIN RTOS_MUTEX 段内。每条总线调一次，多路总线各调各的；
+ *       本层不再持有总线表，"登记几条"由工程决定。不能在中断里调用。
  */
-dev_spi_status_t Dev_SPI_Init(void)
+dev_spi_status_t Dev_SPI_Init(const dev_spi_t *bus)
 {
-    size_t           i;
+    dev_spi_rt_t    *rt = bus->rt;
     bsp_spi_status_t bsp;
 
-    for (i = 0U; i < s_bus_count; i++) {
-        const dev_spi_t *bus = s_buses[i];
-        dev_spi_rt_t    *rt  = bus->rt;
-
-        if (rt->initialized != 0U) {
-            continue;
-        }
-        if (bus->bsp == NULL || bus->lock == NULL || *bus->lock == NULL) {
-            return DEV_SPI_ERR_STATE;
-        }
-
-        /* 用"回落到 CubeMX 档位"确认 BSP 已初始化：此刻还没有人改过速率，
-           所以这是一次零开销的查询；没初始化会返回 BSP_SPI_ERR_STATE。
-           直接读 BSP 的总线内部状态是越层，本层不该知道它有没有就绪标志 */
-        bsp = BSP_SPI_SetRate(bus->bsp, 0U);
-        if (bsp != BSP_SPI_OK) {
-            return Dev_SPI_Map(bsp);
-        }
-
-        rt->frame_owner = NULL;
-        rt->frame_dev   = NULL;
-        rt->result      = DEV_SPI_ERR_STATE;
-        rt->done        = 0U;
-        rt->abandoned   = 0U;
-        rt->initialized = 1U;
+    if (rt->initialized != 0U) {
+        return DEV_SPI_OK;
     }
+    if (bus->bsp == NULL || bus->lock == NULL || *bus->lock == NULL) {
+        return DEV_SPI_ERR_STATE;
+    }
+
+    /* 用"回落到 CubeMX 档位"确认 BSP 已初始化：此刻还没有人改过速率，
+       所以这是一次零开销的查询；没初始化会返回 BSP_SPI_ERR_STATE。
+       直接读 BSP 的总线内部状态是越层，本层不该知道它有没有就绪标志 */
+    bsp = BSP_SPI_SetRate(bus->bsp, 0U);
+    if (bsp != BSP_SPI_OK) {
+        return Dev_SPI_Map(bsp);
+    }
+
+    rt->frame_owner = NULL;
+    rt->frame_dev   = NULL;
+    rt->result      = DEV_SPI_ERR_STATE;
+    rt->done        = 0U;
+    rt->abandoned   = 0U;
+    rt->initialized = 1U;
+
     return DEV_SPI_OK;
 }
 

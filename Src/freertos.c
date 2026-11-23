@@ -182,9 +182,9 @@ void MX_FREERTOS_Init(void) {
    SPI1 / IIC 这把锁，并把片选、换速、超时这些"总线使用规则"接在
    BSP_SPI / BSP_IIC 之上。 */
   BSP_IIC_Init();
-  Dev_IIC_Init();
+  Dev_IIC_Init(&dev_iic1);
   BSP_SPI_Init();
-  Dev_SPI_Init();
+  Dev_SPI_Init(&dev_spi1);
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */

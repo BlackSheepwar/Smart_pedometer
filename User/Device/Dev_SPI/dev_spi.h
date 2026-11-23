@@ -58,6 +58,12 @@ typedef enum {
 } dev_spi_status_t;
 
 /**
+ * @brief SPI 总线句柄（不透明类型，成员定义在 dev_spi.c）
+ * @note 只描述"用哪条 BSP 总线、哪把互斥量"，不含任何引脚。
+ */
+typedef struct dev_spi dev_spi_t;
+
+/**
  * @brief SPI 设备句柄（不透明类型，成员定义在 dev_spi.c）
  * @note 描述"挂在哪条总线上、用哪根片选、片选什么极性、SCK 要多快"，
  *       不含引脚号（片选引脚由 BSP_GPIO 的句柄携带）。
@@ -68,6 +74,12 @@ typedef struct dev_spi_dev dev_spi_dev_t;
  * 外部变量
  *============================================================================*/
 /**
+ * @brief SPI1 总线：BSP 总线句柄 + 互斥量句柄 + 运行块
+ * @note Init 一次登记一条总线；同一条总线上的设备由 dev_spi_dev_* 携带。
+ */
+extern const dev_spi_t dev_spi1;
+
+/**
  * @brief 挂在 SPI1 上的显示面板：片选引脚、片选极性、SCK 速率
  * @note 每多一台挂在同一条总线上的设备，在 .c 的设备表里登记一份并在本处声明。
  */
@@ -77,13 +89,16 @@ extern const dev_spi_dev_t dev_spi_dev_lcd;
  * 函数声明
  *============================================================================*/
 /**
- * @brief 初始化本层：检查总线互斥量与 BSP 是否就绪，登记总线表
- * @retval DEV_SPI_OK: 初始化成功（已初始化的总线会被跳过）
+ * @brief 初始化一路 SPI 总线：检查总线互斥量与 BSP 是否就绪
+ * @param bus 总线句柄
+ * @retval DEV_SPI_OK: 初始化成功；已初始化的总线直接返回
  * @retval DEV_SPI_ERR_STATE: BSP 未初始化，或总线互斥量句柄仍为 NULL
+ *
  * @note 必须在 BSP_SPI_Init() 之后、且互斥量已由 freertos.c 建好之后调用
- *       （CubeMX 生成的 USER CODE BEGIN RTOS_MUTEX 段内）。不能在中断里调用。
+ *       （CubeMX 生成的 USER CODE BEGIN RTOS_MUTEX 段内）。每条总线调一次，
+ *       多路总线各调各的。不能在中断里调用。
  */
-dev_spi_status_t Dev_SPI_Init(void);
+dev_spi_status_t Dev_SPI_Init(const dev_spi_t *bus);
 
 /**
  * @brief 取得总线所有权并拉有效片选（帧开始）

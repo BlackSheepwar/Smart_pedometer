@@ -14,10 +14,10 @@
  *                            ──(每 repeat_ms)──> REPEAT …
  *                            ──(松开)──> LONG_UP
  *
- *       本层的职责到"把数据塞进队列"为止：
- *         - 不阻塞、不等待、不睡眠；
- *         - 不提供取事件的函数，消费者（TASK 层的取事件线程）自己
- *           osMessageQueueGet(KEY_EVT_QHandle, ...) 去睡、去唤醒。
+ *       本层的职责是"判定 + 投递 + 提供唯一的取事件入口"：
+ *         - 扫描路径不阻塞、不等待、不睡眠（Tick 投递用零超时）；
+ *         - 取事件只走 Svc_Key_Logic_Wait()，队列句柄不出本层，
+ *           TASK 层不写 osMessageQueueGet()。
  */
 
 #ifndef __SVC_KEY_LOGIC_H__
@@ -79,5 +79,15 @@ void Svc_Key_Logic_Init(void);
  *       队列满就丢一条并计数，不会让扫描线程停在这里。
  */
 void Svc_Key_Logic_Tick(uint16_t elapsed_ms);
+
+/**
+ * @brief 阻塞等待一条按键事件
+ * @param out 输出：事件
+ * @retval 无
+ *
+ * @note 只由消费线程调用；没有事件时线程由内核挂起，不占 CPU。
+ *       一条队列只允许一个消费者，多线程并行取会互相抢事件。
+ */
+void Svc_Key_Logic_Wait(key_event_msg_t *out);
 
 #endif /* __SVC_KEY_LOGIC_H__ */

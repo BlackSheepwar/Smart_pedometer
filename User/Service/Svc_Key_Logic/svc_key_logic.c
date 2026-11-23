@@ -19,7 +19,9 @@
  *
  *       投递出口只有一个：Svc_Key_Logic_SendEvent()。它投的是 CubeMX 生成的
  *       消息队列（.ioc 里配：元素 key_event_msg_t、静态分配，深度以 .ioc 为准）。
- *       想换投递方式，只改这个函数的函数体，本层其余代码不需要知道事件去了哪。
+ *       取出也只有一条路：Svc_Key_Logic_Wait()。投递与等待成对留在本层，
+ *       TASK 层因此不认识队列句柄，也不写 osMessageQueueGet()。
+ *       想换投递方式，只改这两个函数的函数体。
  */
 
 /*==============================================================================
@@ -37,29 +39,13 @@
  *============================================================================*/
 /**
  * @brief 事件队列句柄：由 CubeMX 按 .ioc 的队列配置在 freertos.c 里创建
- * @note 元素类型 key_event_msg_t、静态分配；本文件只负责投递，取出由消费者自己做。
+ * @note 元素类型 key_event_msg_t、静态分配；投递与等待都在本文件，
+ *       消费者只调 Svc_Key_Logic_Wait()。
  */
 extern osMessageQueueId_t KEY_EVT_QHandle;
 
 /*==============================================================================
- * 内部类型
- *============================================================================*/
-/**
- * @brief 一个按键的运行块
- * @note reading 是"这一拍读到什么"，pressed 是"确认下来是什么"：
- *       前者一直在变（抖），后者只在前者稳定够久之后才跟着变。
- */
-typedef struct {
-    uint16_t stable_ms;     /* 当前读数已经稳定了多久（判消抖用） */
-    uint16_t hold_ms;       /* 确认按住之后，累计按了多久（判长按用） */
-    uint16_t repeat_ms;     /* 距上一次连发过了多久 */
-    uint8_t  reading;       /* 这一拍的读数：1 = 按下，0 = 松开 */
-    uint8_t  pressed;       /* 确认后的状态：1 = 按住，0 = 松开 */
-    uint8_t  long_fired;    /* 本次按住是否已经报过 LONG */
-} svc_key_rt_t;
-
-/*==============================================================================
- * 配置表
+ * 类型定义
  *============================================================================*/
 /**
  * @brief 一个按键的全部可调参数
@@ -75,7 +61,24 @@ typedef struct {
 } svc_key_cfg_t;
 
 /**
- * @brief 按键参数表：一行一颗键
+ * @brief 一个按键的运行块
+ * @note reading 是"这一拍读到什么"，pressed 是"确认下来是什么"：
+ *       前者一直在变（抖），后者只在前者稳定够久之后才跟着变。
+ */
+typedef struct {
+    uint16_t stable_ms;     /* 当前读数已经稳定了多久（判消抖用） */
+    uint16_t hold_ms;       /* 确认按住之后，累计按了多久（判长按用） */
+    uint16_t repeat_ms;     /* 距上一次连发过了多久 */
+    uint8_t  reading;       /* 这一拍的读数：1 = 按下，0 = 松开 */
+    uint8_t  pressed;       /* 确认后的状态：1 = 按住，0 = 松开 */
+    uint8_t  long_fired;    /* 本次按住是否已经报过 LONG */
+} svc_key_rt_t;
+
+/*==============================================================================
+ * 内部变量
+ *============================================================================*/
+/**
+ * @brief 按键参数表：一行一颗键（换工程只改这一张表）
  * @note 只在本文件里用，所以是 static：整张表进 .rodata，不占 RAM。
  *       按键数量只由这张表决定，扫描循环不感知个数。
  *       表里只有"物理事实 + 手感参数"，按键做什么由 APP 层的命令表决定。
@@ -84,23 +87,12 @@ static const svc_key_cfg_t s_key_cfg_table[] = {
     { &dev_key_led,    20u, 200u, 100u },
 };
 
-/**
- * @brief 表里有多少个键
- * @note 运行块数组按这个数分配，加键不需要改实现。
- */
-#define SVC_KEY_CFG_COUNT   (sizeof(s_key_cfg_table) / sizeof(*s_key_cfg_table))
-
-/*==============================================================================
- * 静态数据
- *============================================================================*/
-/**
- * @brief 每个按键的运行块，个数跟配置表一致
- * @note 配置表是 const（进 .rodata），只有这里会变，RAM 占用只跟键数有关。
- */
-static svc_key_rt_t s_key_rt[SVC_KEY_CFG_COUNT];
+/** @brief 每个按键的运行块，个数与参数表一致（表是 const，只有这里会变） */
+static svc_key_rt_t s_key_rt[sizeof(s_key_cfg_table) / sizeof(s_key_cfg_table[0])];
 
 /** @brief 表里的键数，供循环比较 */
-static const uint8_t s_key_count = (uint8_t)SVC_KEY_CFG_COUNT;
+static const uint8_t s_key_count =
+    (uint8_t)(sizeof(s_key_cfg_table) / sizeof(s_key_cfg_table[0]));
 
 /**
  * @brief 队列满导致丢弃的次数
@@ -289,4 +281,18 @@ void Svc_Key_Logic_Tick(uint16_t elapsed_ms)
     for (index = 0u; index < s_key_count; ++index) {
         Svc_Key_Logic_Step(&s_key_rt[index], &s_key_cfg_table[index], elapsed_ms);
     }
+}
+
+/**
+ * @brief 阻塞等待一条按键事件
+ * @param out 输出：事件
+ * @retval 无
+ *
+ * @note 队列由 CubeMX 创建，本层是唯一生产者，也是唯一取出入口：投递与
+ *       等待成对写在同一个文件里，TASK 层因此不需要认识队列句柄。
+ *       没有事件时调用线程由内核挂起，不占 CPU。
+ */
+void Svc_Key_Logic_Wait(key_event_msg_t *out)
+{
+    (void)osMessageQueueGet(KEY_EVT_QHandle, out, NULL, osWaitForever);
 }

@@ -59,12 +59,13 @@ typedef struct {
 
 /**
  * @brief IIC 总线对象
+ * @note 布局只在本文件，头文件拿到的只有不透明标签。
  */
-typedef struct {
+struct dev_iic {
     const bsp_iic_t *bsp;  /* 芯片侧总线句柄 */
     osMutexId_t     *lock; /* 指向 CubeMX 生成的互斥量句柄 */
     dev_iic_rt_t    *rt;   /* 运行块 */
-} dev_iic_t;
+};
 
 /**
  * @brief 从机设备句柄
@@ -82,21 +83,12 @@ struct dev_iic_dev {
 /** @brief I2C1 的运行块 */
 static dev_iic_rt_t dev_iic1_rt;
 
-/** @brief I2C1 总线对象；不导出，只经设备句柄间接使用 */
+/** @brief I2C1 总线对象；Init 一次登记一条 */
 const dev_iic_t dev_iic1 = {
     .bsp  = &bsp_iic1,
     .lock = &IIC_LOCKHandle,
     .rt   = &dev_iic1_rt,
 };
-
-/** @brief 总线表：初始化按它轮询
- *  @note 表长由行数算出，不需要终止符。 */
-static const dev_iic_t *const s_buses[] = {
-    &dev_iic1,
-};
-
-/** @brief 总线表长度：由表的行数算出 */
-static const size_t s_bus_count = sizeof(s_buses) / sizeof(s_buses[0]);
 
 /*==============================================================================
  * 内部函数
@@ -232,41 +224,38 @@ static dev_iic_status_t Dev_IIC_Run(const dev_iic_dev_t *dev,
  * 接口实现
  *============================================================================*/
 /**
- * @brief 初始化 IIC 虚拟外设：逐路检查总线、互斥量并探测 BSP 就绪
- * @retval DEV_IIC_OK: 全部总线就绪
+ * @brief 初始化一路 IIC 总线：检查总线、互斥量并探测 BSP 就绪
+ * @param bus 总线句柄
+ * @retval DEV_IIC_OK: 总线就绪；已初始化的总线直接返回
  * @retval DEV_IIC_ERR_STATE: 缺总线句柄、互斥量尚未创建，或 bsp_iic 未初始化
+ *
  * @note 探测走 BSP_IIC_SetSpeed(bus, 0)：目标值 0 表示回落到初始化登记的
  *       时钟，未初始化时直接返回 ERR_STATE，所以这个调用是零副作用的
- *       就绪探针，不需要去读 BSP 句柄的内部字段。
+ *       就绪探针，不需要去读 BSP 句柄的内部字段。每条总线调一次。
  */
-dev_iic_status_t Dev_IIC_Init(void)
+dev_iic_status_t Dev_IIC_Init(const dev_iic_t *bus)
 {
-    size_t i;
+    bsp_iic_status_t st;
+    dev_iic_rt_t *rt = bus->rt;
 
-    for (i = 0U; i < s_bus_count; i++) {
-        const dev_iic_t *bus = s_buses[i];
-        bsp_iic_status_t st;
-        dev_iic_rt_t *rt;
-
-        rt = bus->rt;
-        if (rt->initialized != 0U) {
-            continue;
-        }
-        if (bus->bsp == NULL || bus->lock == NULL || *bus->lock == NULL) {
-            return DEV_IIC_ERR_STATE;
-        }
-
-        st = BSP_IIC_SetSpeed(bus->bsp, 0U);
-        if (st != BSP_IIC_OK) {
-            return Dev_IIC_Map(st);
-        }
-
-        rt->owner       = NULL;
-        rt->result      = DEV_IIC_ERR_HAL;
-        rt->done        = 0U;
-        rt->abandoned   = 0U;
-        rt->initialized = 1U;
+    if (rt->initialized != 0U) {
+        return DEV_IIC_OK;
     }
+    if (bus->bsp == NULL || bus->lock == NULL || *bus->lock == NULL) {
+        return DEV_IIC_ERR_STATE;
+    }
+
+    st = BSP_IIC_SetSpeed(bus->bsp, 0U);
+    if (st != BSP_IIC_OK) {
+        return Dev_IIC_Map(st);
+    }
+
+    rt->owner       = NULL;
+    rt->result      = DEV_IIC_ERR_HAL;
+    rt->done        = 0U;
+    rt->abandoned   = 0U;
+    rt->initialized = 1U;
+
     return DEV_IIC_OK;
 }
 
