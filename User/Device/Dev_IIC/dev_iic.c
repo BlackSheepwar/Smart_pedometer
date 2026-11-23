@@ -25,10 +25,10 @@
 #include <stdint.h>
 #include "dev_iic.h"
 // 功能包含
-#include "bsp_iic.h"
 #include "FreeRTOS.h"
 #include "task.h"
-#include "cmsis_os.h"
+#include "cmsis_os2.h"
+#include "bsp_iic.h"
 
 /*==============================================================================
  * 外部变量声明

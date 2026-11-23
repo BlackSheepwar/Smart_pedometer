@@ -34,7 +34,7 @@
 // 固定包含
 #include <stdint.h>
 // 功能包含
-#include "svc_key_logic.h"      /* key_event_t / dev_key_t：表项的两个匹配键 */
+#include "svc_key_logic.h"
 
 /*==============================================================================
  * 类型定义

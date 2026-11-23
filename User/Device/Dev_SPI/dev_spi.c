@@ -29,11 +29,11 @@
 #include <stdint.h>
 #include "dev_spi.h"
 // 功能包含
-#include "bsp_spi.h"
-#include "bsp_gpio.h"
 #include "FreeRTOS.h"
 #include "task.h"
-#include "cmsis_os.h"
+#include "cmsis_os2.h"
+#include "bsp_spi.h"
+#include "bsp_gpio.h"
 
 /*==============================================================================
  * 外部变量声明

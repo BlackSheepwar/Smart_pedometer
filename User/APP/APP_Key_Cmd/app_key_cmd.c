@@ -47,11 +47,11 @@
  *============================================================================*/
 // 固定包含
 #include <stdint.h>
-// 功能包含
 #include "app_key_cmd.h"
-#include "app_screen.h"         /* APP_Screen_ToggleMode()：请求换面板，只翻标志 */
+// 功能包含
+#include "app_screen.h"
 #include "dev_led.h"
-#include "svc_key_cmd.h"        /* svc_key_cmd_entry_t：表的元素类型 */
+#include "svc_key_cmd.h"
 
 /*==============================================================================
  * 按键事件处理函数

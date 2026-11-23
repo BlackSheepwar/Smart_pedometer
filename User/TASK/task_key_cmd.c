@@ -35,9 +35,9 @@
 #include "FreeRTOS.h"
 #include "cmsis_os2.h"
 // 功能包含
-#include "app_key_cmd.h"        /* APP_KEY_CMD_TABLE：本工程的动作表 */
-#include "svc_key_cmd.h"        /* Svc_Key_Cmd_Dispatch：查表机制 */
-#include "svc_key_logic.h"      /* key_event_msg_t：队列元素类型 */
+#include "app_key_cmd.h"
+#include "svc_key_cmd.h"
+#include "svc_key_logic.h"
 
 /*==============================================================================
  * 外部声明

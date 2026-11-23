@@ -67,6 +67,8 @@ target_include_directories(svc_lvgl
 target_link_libraries(svc_lvgl
     PRIVATE dev_st7789
     PRIVATE lvgl
-    PRIVATE stm32cubemx
 )
+# 不链 stm32cubemx：本库一行 HAL / OS 头都不引，时基与延时都由 TASK 注入。
+# 链上它只会把 Inc / Drivers 的搜索路径带进来，"Service 看不见 HAL"就从
+# 纪律退化成一个还没被用到的许可。
 target_compile_options(svc_lvgl PRIVATE ${USER_WARN_FLAGS})

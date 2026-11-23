@@ -132,7 +132,6 @@ static uint8_t BSP_IIC_ActualTx(const I2C_HandleTypeDef *hi2c)
  * @param hi2c HAL 句柄
  * @retval BSP_IIC_CAP_DMA: 接收 DMA 流已挂上
  * @retval BSP_IIC_CAP_IT: 没有接收 DMA 流，走事件中断
- * @retval 无
  */
 static uint8_t BSP_IIC_ActualRx(const I2C_HandleTypeDef *hi2c)
 {

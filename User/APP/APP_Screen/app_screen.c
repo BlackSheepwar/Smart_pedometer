@@ -29,7 +29,7 @@
 #include <stdint.h>
 #include "app_screen.h"
 // 功能包含
-#include "app_ui_port.h"         /* 界面适配层：Init / Set_* / 模式常量 */
+#include "app_ui_port.h"
 
 /*==============================================================================
  * 宏定义与常量

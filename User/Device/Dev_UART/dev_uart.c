@@ -31,10 +31,11 @@
 #include "dev_uart.h"
 // 功能包含
 #include "FreeRTOS.h"
+#include "task.h"
+#include "cmsis_os2.h"
 #include "bsp_uart.h"
-#include "cmsis_os.h"
+#include "main.h"
 #include "ringbuffer.h"
-#include "stm32f4xx.h"
 
 /*==============================================================================
  * 外部变量声明
@@ -254,10 +255,12 @@ static uint8_t Dev_UART_NotifyWait(uint32_t timeout_ms)
  * @brief 延时当前调用任务
  * @param timeout_ms 延时时间，单位毫秒
  * @retval 无
+ * @note osDelay 的参数是 tick 而不是毫秒，这里用 pdMS_TO_TICKS 换算：
+ *       本文件不假设 1 tick = 1 ms，改 tick 频率不需要回头改这一行。
  */
 static void Dev_UART_Delay(uint32_t timeout_ms)
 {
-    (void)osDelay(timeout_ms);
+    (void)osDelay(pdMS_TO_TICKS(timeout_ms));
 }
 
 /**

@@ -28,7 +28,7 @@
 #include <stddef.h>
 #include "app_ui_port.h"
 // 功能包含
-#include "lvgl_ui_project.h"     /* 生成代码的聚合头：init + screen_hud + subjects */
+#include "lvgl_ui_project.h"
 
 /*==============================================================================
  * 静态变量

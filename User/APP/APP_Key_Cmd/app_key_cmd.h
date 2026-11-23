@@ -43,7 +43,7 @@
 // 固定包含
 #include <stdint.h>
 // 功能包含
-#include "svc_key_cmd.h"        /* svc_key_cmd_entry_t：表的元素类型 */
+#include "svc_key_cmd.h"
 
 /*==============================================================================
  * 外部声明
