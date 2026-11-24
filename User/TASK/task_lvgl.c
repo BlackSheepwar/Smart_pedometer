@@ -37,9 +37,8 @@
 // 固定包含
 #include <stddef.h>
 #include <stdint.h>
-#include "FreeRTOS.h"
-#include "cmsis_os2.h"
 // 功能包含
+#include "osal.h"
 #include "svc_lvgl.h"
 #include "app_screen.h"
 

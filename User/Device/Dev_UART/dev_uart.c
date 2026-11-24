@@ -17,6 +17,9 @@
  *       4. 零拷贝：FIFO 队首连续段直接交给 DMA，TC 后才 consume。
  *       5. 新增一路 UART 只需登记实例与缓冲；回调和任务都不用改，也不需要
  *          在任何一张表里再补一行。
+ *
+ *       OS 对象归属：接收事件队列与发送互斥量由 .ioc 配置、freertos.c 创建，
+ *       本文件只从 osal.h 取它们的地址（extern 收在 User/OSAL）。
  */
 
 /*==============================================================================
@@ -27,18 +30,9 @@
 #include <stdint.h>
 #include "dev_uart.h"
 // 功能包含
-#include "FreeRTOS.h"
-#include "cmsis_os2.h"
+#include "osal.h"
 #include "bsp_uart.h"
 #include "ringbuffer.h"
-
-/*==============================================================================
- * 外部变量声明
- *============================================================================*/
-/** @brief CubeMX 生成的 UART 事件队列，元素是待服务的实例句柄 */
-extern osMessageQueueId_t UART_EVT_QHandle;
-/** @brief CubeMX 生成的 UART1 发送互斥量 */
-extern osMutexId_t UART1_LOCKHandle;
 
 /*==============================================================================
  * 类型定义

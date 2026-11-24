@@ -32,7 +32,7 @@ add_library(dev_spi STATIC
     Dev_SPI/dev_spi.c
 )
 target_include_directories(dev_spi PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/Dev_SPI)
-target_link_libraries(dev_spi PRIVATE bsp_spi bsp_gpio stm32cubemx)
+target_link_libraries(dev_spi PRIVATE bsp_spi bsp_gpio stm32cubemx osal)
 target_compile_options(dev_spi PRIVATE ${USER_WARN_FLAGS})
 
 # -----------------------------------------------------------------------------
@@ -42,17 +42,19 @@ add_library(dev_iic STATIC
     Dev_IIC/dev_iic.c
 )
 target_include_directories(dev_iic PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/Dev_IIC)
-target_link_libraries(dev_iic PRIVATE bsp_iic stm32cubemx)
+target_link_libraries(dev_iic PRIVATE bsp_iic stm32cubemx osal)
 target_compile_options(dev_iic PRIVATE ${USER_WARN_FLAGS})
 
 # -----------------------------------------------------------------------------
-# dev_uart：UART 虚拟外设（OS 能力暂内联，OSAL 重建后抽回端口实现）
+# dev_uart：UART 虚拟外设
+#   OS 原语（队列、互斥量）由 osal.h 转出，本库链 osal 取头文件路径；
+#   FreeRTOS 本体仍来自 stm32cubemx（生成器的 include 路径）。
 # -----------------------------------------------------------------------------
 add_library(dev_uart STATIC
     Dev_UART/dev_uart.c
 )
 target_include_directories(dev_uart PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/Dev_UART)
-target_link_libraries(dev_uart PRIVATE bsp_uart ringbuffer stm32cubemx)
+target_link_libraries(dev_uart PRIVATE bsp_uart ringbuffer stm32cubemx osal)
 target_compile_options(dev_uart PRIVATE ${USER_WARN_FLAGS})
 
 # -----------------------------------------------------------------------------

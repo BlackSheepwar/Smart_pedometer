@@ -21,7 +21,7 @@ target_include_directories(svc_key_logic
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/Svc_Key_Logic
 )
 target_link_libraries(svc_key_logic
-    PRIVATE stm32cubemx
+    PRIVATE stm32cubemx osal
     PUBLIC  dev_key
 )
 target_compile_options(svc_key_logic PRIVATE ${USER_WARN_FLAGS})

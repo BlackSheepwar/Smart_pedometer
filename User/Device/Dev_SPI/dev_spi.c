@@ -16,9 +16,9 @@
  *       4. 运行块（帧主、帧设备、就绪标志）放在内部 rt 对象里，
  *          总线句柄本身 const，与框架的配置型句柄约定一致。
  *
- *       OS 对象归属：总线互斥量由 .ioc 配置、freertos.c 生成，本文件只
- *       extern 其地址。Dev_SPI_Init() 必须放在 USER CODE BEGIN RTOS_MUTEX，
- *       那里句柄才建好。
+ *       OS 对象归属：总线互斥量由 .ioc 配置、freertos.c 生成并创建，本文件
+ *       只从 osal.h 取它的地址（extern 收在 User/OSAL）。
+ *       Dev_SPI_Init() 必须放在 USER CODE BEGIN RTOS_MUTEX，那里句柄才建好。
  */
 
 /*==============================================================================
@@ -29,18 +29,9 @@
 #include <stdint.h>
 #include "dev_spi.h"
 // 功能包含
-#include "FreeRTOS.h"
-#include "task.h"
-#include "cmsis_os2.h"
+#include "osal.h"
 #include "bsp_spi.h"
 #include "bsp_gpio.h"
-
-/*==============================================================================
- * 外部变量声明
- *============================================================================*/
-/** @brief SPI1 总线互斥量：用于总线所有权排队
- *  @note 由 .ioc 生成、freertos.c 定义；同总线上的设备互相排队。 */
-extern osMutexId_t SPI1_LOCKHandle;
 
 /*==============================================================================
  * 宏定义与常量

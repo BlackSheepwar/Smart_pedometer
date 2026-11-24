@@ -9,6 +9,11 @@
 #   APP     第 4 层  应用层        界面生命周期、模式面板与数据同步
 #   TASK    任务层   线程体        一个任务一个 .c，覆盖 CubeMX 的 __weak 入口
 #
+# OSAL 不是第 8 层：它是 OS 访问的归口目录，与 Third_Party 同级、不进层间
+# DAG。句柄声明（osal.h）与对象台账都在里面；只有直接碰 OS 的模块
+# （Device 的虚拟外设、Service 的 svc_key_logic、TASK、Src/freertos.c）
+# 以 PRIVATE 链它。BSP 一律不链：芯片驱动不认识 OS。
+#
 # 分层规则由"链接关系"保证，不靠自觉：
 #   每层的模块都是一个静态库，只链接下一层的模块。
 #   Device 头文件里出现 bsp_gpio_t 指针，所以 bsp_gpio 是 PUBLIC 传递的，
@@ -28,6 +33,8 @@ set(USER_WARN_FLAGS -Wall -Wextra -Werror)
 # 目标必须先存在；CMake 的目标解析虽然允许后置定义，但把依赖方写在
 # 被依赖方之前会让"谁依赖谁"在文件里读不出来。
 add_subdirectory(Third_Party)
+# OSAL 紧跟 Third_Party：两者都是"给全工程提供东西"的基础设施，不是层。
+add_subdirectory(OSAL)
 add_subdirectory(BSP)
 add_subdirectory(Device)
 add_subdirectory(Service)
@@ -41,6 +48,8 @@ add_subdirectory(TASK)
 #   要么就是你真的在 freertos.c / main.c 里直接 include 了它。
 # -----------------------------------------------------------------------------
 target_link_libraries(${CMAKE_PROJECT_NAME}
+    # OSAL（Src/freertos.c 只含 osal_types.h 取元素类型；跑在 OS 上的模块才含 osal.h）
+    osal
     # TASK 层
     task_objects
     # BSP 层

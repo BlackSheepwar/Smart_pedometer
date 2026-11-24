@@ -25,13 +25,11 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "svc_key_logic.h"
+#include "osal_types.h"
 #include "bsp_iic.h"
 #include "bsp_spi.h"
-#include "bsp_uart.h"
 #include "dev_spi.h"
 #include "dev_iic.h"
-#include "dev_uart.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
