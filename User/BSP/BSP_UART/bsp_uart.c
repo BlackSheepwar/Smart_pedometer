@@ -9,7 +9,7 @@
  *       2. 接收进度：HT / TC / IDLE 给的 Size 是"自本次武装以来"的窗口
  *          位置，统一用 (pos - last) & (2N - 1) 求增量，三种事件一条路径，
  *          短帧、回绕、TC 之后补报的 IDLE 都不丢。
- *       3. 中断只发布：只更新 rx_total 并回传本实例句柄，不复制字节。
+ *       3. 中断只发布：只更新 rx_total 并回传上层登记的上下文，不复制字节。
  *       4. 错误恢复：线路错误把接收标记为停止，重装在任务上下文的
  *          BSP_UART_RxRearm() 里做；中断不调用 HAL 收尾接口。
  *       5. DMA 配置只读：只校验 .ioc 把接收 DMA 配成了 circular，不改配置。
@@ -98,7 +98,8 @@ static bsp_uart_status_t BSP_UART_MapHal(HAL_StatusTypeDef st)
  * @retval 非空: 已登记的实例
  * @retval NULL: 未登记
  *
- * @note 中断上下文调用；只做指针比较，结果原样回传给上层。
+ * @note 中断上下文调用；只做指针比较，拿到运行块后由端口绑定回传上层
+ *       登记的上下文。
  */
 static const bsp_uart_t *BSP_UART_Find(const UART_HandleTypeDef *hal)
 {
@@ -316,7 +317,7 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 
     if (rt->port.on_rx != NULL)
     {
-        rt->port.on_rx(uart);
+        rt->port.on_rx(rt->port.ctx);
     }
 }
 
@@ -343,7 +344,7 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 
     if (rt->port.on_tx_done != NULL)
     {
-        rt->port.on_tx_done(uart, 1U);
+        rt->port.on_tx_done(rt->port.ctx, 1U);
     }
 }
 
@@ -378,7 +379,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
         rt->tx_busy = 0U;
         if (rt->port.on_tx_done != NULL)
         {
-            rt->port.on_tx_done(uart, 0U);
+            rt->port.on_tx_done(rt->port.ctx, 0U);
         }
     }
 
@@ -390,7 +391,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
         rt->rx_on = 0U;
         if (rt->port.on_rx != NULL)
         {
-            rt->port.on_rx(uart);
+            rt->port.on_rx(rt->port.ctx);
         }
     }
 }

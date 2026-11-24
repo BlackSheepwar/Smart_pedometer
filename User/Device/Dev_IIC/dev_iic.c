@@ -7,11 +7,13 @@
  * @note 设计模型：
  *       1. 每路总线一个总线对象（bsp 句柄 + 互斥量 + 运行块），总线对象
  *          不导出，上层只看得到设备句柄；
- *       2. 一次读写 = 抢总线互斥量 → 按设备句柄换总线时钟 → 启动一笔 DMA
+ *       2. 单笔读写 = 抢总线互斥量 → 按设备句柄换总线时钟 → 启动一笔 DMA
  *          → 睡在任务通知上等完成 → 超时就中止并复位；
- *       3. bsp_iic 的完成回调在中断里只做三件事：写结果、置完成标志、
+ *       3. 一次会话 = Select() 一次 → 任意多笔读写 → Deselect() 一次：
+ *          需要连续跟同一颗器件交换多组信息时，锁与换速只做一遍；
+ *       4. bsp_iic 的完成回调在中断里只做三件事：写结果、置完成标志、
  *          唤醒还在这笔传输上等着的任务；
- *       4. 超时后置放弃标志再中止，迟到的完成中断不会再唤醒任何人。
+ *       5. 超时后置放弃标志再中止，迟到的完成中断不会再唤醒任何人。
  *
  *       等待、超时、片内地址宽度这些"多器件共用一条总线"的规则全在本层；
  *       bsp_iic 只负责把一笔搬运交给外设并在中断里回调。
@@ -47,10 +49,14 @@ extern osMutexId_t IIC_LOCKHandle;
  *============================================================================*/
 /**
  * @brief 总线运行块
- * @note 记着谁在等、结果是什么、这一笔是否已被放弃。
+ * @note owner 同时表示两件事：谁持有总线（会话期间），以及这一笔完成时该
+ *       唤醒谁。frame_dev 让"会话里换了设备"变成可查的错误码，而不是悄悄
+ *       沿用上一台设备的时钟。
  */
 typedef struct {
-    TaskHandle_t volatile     owner;     /* 正在等这笔完成的任务 */
+    TaskHandle_t volatile     owner;     /* 持有总线并等待本次完成的任务 */
+    const dev_iic_dev_t      *frame_dev; /* 当前会话对应的从机，空闲为 NULL */
+    bsp_iic_wait_t            wait;      /* 交给芯片层的接收方：任务 + 设备 */
     volatile dev_iic_status_t result;    /* 本笔结果，由中断写入 */
     volatile uint8_t          done;      /* 1: 本笔已完成（中断置位） */
     volatile uint8_t          abandoned; /* 1: 调用者已放弃，不再唤醒 */
@@ -114,22 +120,25 @@ static dev_iic_status_t Dev_IIC_Map(bsp_iic_status_t status)
 
 /**
  * @brief 搬运完成回调（中断上下文）
- * @param ctx    总线运行块
+ * @param ctx    本次传输的从机设备句柄
  * @param status 本次结果
  * @retval 无
  * @note 先写结果与完成标志、再读 owner 与放弃标志：任务被唤醒后看到的
  *       一定是已经落盘的结果。已放弃的一笔只留结果，不再唤醒任何人。
+ *       结果与 owner 都在总线运行块上：一次持锁只有一台从机在传，从设备
+ *       句柄一步就能定位到那条总线。
  */
-static void Dev_IIC_OnDone(void *ctx, bsp_iic_status_t status)
+static void Dev_IIC_OnDone(const bsp_iic_wait_t *wait, bsp_iic_status_t status)
 {
-    dev_iic_rt_t *rt = (dev_iic_rt_t *)ctx;
+    const dev_iic_dev_t *dev = (const dev_iic_dev_t *)wait->ctx;
+    dev_iic_rt_t *rt = dev->bus->rt;
     TaskHandle_t owner;
     BaseType_t woken = pdFALSE;
 
     rt->result = Dev_IIC_Map(status);
     rt->done   = 1U;
 
-    owner = rt->owner;
+    owner = (TaskHandle_t)wait->task;
     if (owner != NULL && rt->abandoned == 0U) {
         vTaskNotifyGiveFromISR(owner, &woken);
     }
@@ -137,38 +146,83 @@ static void Dev_IIC_OnDone(void *ctx, bsp_iic_status_t status)
 }
 
 /**
- * @brief 执行一笔传输：抢总线 → 按本设备登记的速度改总线时钟 → 启动 → 等完成
+ * @brief 在当前已持有的总线上搬一笔：启动、等完成、超时中止
+ * @param dev       设备句柄，帧必须已由本任务、为这台设备开好
+ * @param msg       传输命令
+ * @param budget_ms 本笔的时间预算（ms），已按默认值折算
+ * @retval DEV_IIC_OK: 成功
+ * @retval DEV_IIC_ERR_TIMEOUT: 搬运超时（已中止并复位）
+ * @retval 其他: 芯片层返回码翻译后的失败原因
+ *
+ * @note 不加锁、不换速、不判初始化：那些是帧开始时的职责。先清残留令牌
+ *       再启动，避免上一笔迟到的通知把这一笔误判成已完成。阻塞档在启动
+ *       函数里已经搬完，此时没有通知可等。
+ */
+static dev_iic_status_t Dev_IIC_Push(const dev_iic_dev_t *dev,
+                                     const bsp_iic_msg_t *msg,
+                                     uint32_t budget_ms)
+{
+    dev_iic_rt_t *rt = dev->bus->rt;
+    bsp_iic_status_t st;
+    TickType_t ticks = pdMS_TO_TICKS(budget_ms);
+
+    rt->result    = DEV_IIC_ERR_HAL;
+    rt->done      = 0U;
+    rt->abandoned = 0U;
+    (void)ulTaskNotifyTake(pdTRUE, 0U); /* 清掉上一笔残留的令牌 */
+
+    /* 接收方打包成一份描述交给芯片层：任务用于唤醒，上下文用于定位实例 */
+    rt->wait.task = xTaskGetCurrentTaskHandle();
+    rt->wait.ctx  = (void *)dev;
+
+    st = BSP_IIC_StartTransfer(dev->bus->bsp, msg, budget_ms, Dev_IIC_OnDone,
+                               &rt->wait);
+    if (st != BSP_IIC_OK) {
+        return Dev_IIC_Map(st);
+    }
+
+    /* 阻塞方式在启动函数里已经搬完、没有回调可等；异步方式才睡等通知。 */
+    if (BSP_IIC_IsBusy(dev->bus->bsp) == 0U) {
+        return (rt->done != 0U) ? rt->result : DEV_IIC_OK;
+    }
+
+    if (ulTaskNotifyTake(pdTRUE, ticks) == 0U) {
+        rt->abandoned = 1U;
+        (void)BSP_IIC_Abort(dev->bus->bsp);
+        return DEV_IIC_ERR_TIMEOUT;
+    }
+
+    return rt->result;
+}
+
+/**
+ * @brief 执行一笔传输：会话内直接搬，会话外自带开关
  * @param dev        设备句柄
  * @param msg        传输命令
- * @param timeout_ms 总预算（ms），0 表示用默认值
+ * @param timeout_ms 等锁与本笔搬运各自的预算（ms），0 表示用默认值
  * @retval DEV_IIC_OK: 成功
  * @retval 其他: 失败原因
- * @note 进入前已校验句柄；本函数负责加锁与解锁，任何出口都不漏锁。
- *       换速改的是整条总线的 SCL，不是这颗器件自己的时钟：上一笔可能是
- *       另一颗器件、另一个速率，所以每次开口前都要把总线恢复到本设备的
- *       速率；目标值与当前值相同的时候 BSP 直接返回，不重写分频。
- *       阻塞方式在启动函数里已经搬完，此时没有通知可等。
+ *
+ * @note 进入前已校验句柄：四个包装函数都先读过 dev->addr，所以这里不再重复
+ *       判 dev；msg 是包装函数栈上的结构体，取其地址也不可能为空。
+ *       两种走法：调用者已用 Dev_IIC_Select() 开了会话，就直接 Push，不再
+ *       动锁与速率；否则自带 Select → Push → Deselect，任何出口都不漏锁。
+ *       会话里换成别的设备属于误用：那次会话的速率是按前一台设的，这里
+ *       直接拒绝，不悄悄改总线时钟。
  */
 static dev_iic_status_t Dev_IIC_Run(const dev_iic_dev_t *dev,
                                     const bsp_iic_msg_t *msg,
                                     uint32_t timeout_ms)
 {
-    const dev_iic_t *bus;
     dev_iic_rt_t *rt;
-    TickType_t ticks;
+    dev_iic_status_t st;
     uint32_t budget_ms;
-    bsp_iic_status_t st;
-    dev_iic_status_t out;
 
-    if (dev == NULL || dev->bus == NULL || msg == NULL) {
-        return DEV_IIC_ERR_PARAM;
-    }
-    if (msg->data == NULL || msg->len == 0U) {
+    if (dev->bus == NULL || msg->data == NULL || msg->len == 0U) {
         return DEV_IIC_ERR_PARAM;
     }
 
-    bus = dev->bus;
-    rt  = bus->rt;
+    rt = dev->bus->rt;
     if (rt->initialized == 0U) {
         return DEV_IIC_ERR_STATE;
     }
@@ -178,46 +232,22 @@ static dev_iic_status_t Dev_IIC_Run(const dev_iic_dev_t *dev,
     }
 
     budget_ms = (timeout_ms != 0U) ? timeout_ms : DEV_IIC_DEFAULT_TIMEOUT_MS;
-    ticks = pdMS_TO_TICKS(budget_ms);
 
-    if (osMutexAcquire(*bus->lock, ticks) != osOK) {
-        return DEV_IIC_ERR_TIMEOUT;
+    /* 会话内：锁与速率已由 Select 备好，直接搬 */
+    if (rt->owner == xTaskGetCurrentTaskHandle()) {
+        return (rt->frame_dev == dev) ? Dev_IIC_Push(dev, msg, budget_ms)
+                                      : DEV_IIC_ERR_STATE;
     }
 
-    st = BSP_IIC_SetSpeed(bus->bsp, dev->speed_hz);
-    if (st != BSP_IIC_OK) {
-        (void)osMutexRelease(*bus->lock);
-        return Dev_IIC_Map(st);
+    st = Dev_IIC_Select(dev, timeout_ms);
+    if (st != DEV_IIC_OK) {
+        return st;
     }
 
-    rt->result    = DEV_IIC_ERR_HAL;
-    rt->done      = 0U;
-    rt->abandoned = 0U;
-    rt->owner     = xTaskGetCurrentTaskHandle();
+    st = Dev_IIC_Push(dev, msg, budget_ms);
+    Dev_IIC_Deselect(dev);
 
-    (void)ulTaskNotifyTake(pdTRUE, 0U); /* 清掉上一笔残留的令牌 */
-
-    st = BSP_IIC_StartTransfer(bus->bsp, msg, budget_ms, Dev_IIC_OnDone, rt);
-    if (st != BSP_IIC_OK) {
-        rt->owner = NULL;
-        (void)osMutexRelease(*bus->lock);
-        return Dev_IIC_Map(st);
-    }
-
-    /* 阻塞方式在启动函数里已经搬完、没有回调可等；异步方式才睡等通知。 */
-    if (BSP_IIC_IsBusy(bus->bsp) == 0U) {
-        out = (rt->done != 0U) ? rt->result : DEV_IIC_OK;
-    } else if (ulTaskNotifyTake(pdTRUE, ticks) == 0U) {
-        rt->abandoned = 1U;
-        (void)BSP_IIC_Abort(bus->bsp);
-        out = DEV_IIC_ERR_TIMEOUT;
-    } else {
-        out = rt->result;
-    }
-
-    rt->owner = NULL;
-    (void)osMutexRelease(*bus->lock);
-    return out;
+    return st;
 }
 
 /*==============================================================================
@@ -250,6 +280,7 @@ dev_iic_status_t Dev_IIC_Init(const dev_iic_t *bus)
         return Dev_IIC_Map(st);
     }
 
+    rt->frame_dev   = NULL;
     rt->owner       = NULL;
     rt->result      = DEV_IIC_ERR_HAL;
     rt->done        = 0U;
@@ -257,6 +288,94 @@ dev_iic_status_t Dev_IIC_Init(const dev_iic_t *bus)
     rt->initialized = 1U;
 
     return DEV_IIC_OK;
+}
+
+/**
+ * @brief 取得总线所有权并切换到本设备的总线时钟（会话开始）
+ * @param dev        设备句柄，不能为 NULL
+ * @param timeout_ms 排队等锁的预算（ms），0 表示用默认 50 ms
+ * @retval DEV_IIC_OK: 已持有总线，总线时钟已切到本设备
+ * @retval DEV_IIC_ERR_PARAM: 句柄或总线为空
+ * @retval DEV_IIC_ERR_STATE: 未初始化、调度器未运行，或本任务已在会话中
+ * @retval DEV_IIC_ERR_TIMEOUT: 等锁超时
+ * @retval 其他: 换速失败
+ *
+ * @note 换速改的是整条总线的 SCL，不是这颗器件自己的时钟：上一笔可能是
+ *       另一颗器件、另一个速率，所以每次开口前都要把总线恢复到本设备的
+ *       速率。换速点在拿到锁之后、任何数据传输之前，此时总线空闲。
+ *       与 Deselect() 成对；一次会话里可以夹任意多笔读写。
+ */
+dev_iic_status_t Dev_IIC_Select(const dev_iic_dev_t *dev, uint32_t timeout_ms)
+{
+    const dev_iic_t *bus;
+    dev_iic_rt_t *rt;
+    bsp_iic_status_t st;
+    TaskHandle_t self;
+
+    if ((dev == NULL) || (dev->bus == NULL)) {
+        return DEV_IIC_ERR_PARAM;
+    }
+    bus = dev->bus;
+    rt  = bus->rt;
+
+    if (rt->initialized == 0U) {
+        return DEV_IIC_ERR_STATE;
+    }
+    if (xTaskGetSchedulerState() != taskSCHEDULER_RUNNING) {
+        return DEV_IIC_ERR_STATE;
+    }
+
+    self = xTaskGetCurrentTaskHandle();
+    /* 同一任务重复开帧是调用错误；别的任务持帧则照常排队等锁 */
+    if (rt->owner == self) {
+        return DEV_IIC_ERR_STATE;
+    }
+    if (timeout_ms == 0U) {
+        timeout_ms = DEV_IIC_DEFAULT_TIMEOUT_MS;
+    }
+    if (osMutexAcquire(*bus->lock, pdMS_TO_TICKS(timeout_ms)) != osOK) {
+        return DEV_IIC_ERR_TIMEOUT;
+    }
+
+    st = BSP_IIC_SetSpeed(bus->bsp, dev->speed_hz);
+    if (st != BSP_IIC_OK) {
+        (void)osMutexRelease(*bus->lock);
+        return Dev_IIC_Map(st);
+    }
+
+    /* 锁到手之后才登记：两步之间不会有别的任务插进来 */
+    rt->frame_dev = dev;
+    rt->owner     = self;
+
+    return DEV_IIC_OK;
+}
+
+/**
+ * @brief 归还总线（会话结束）
+ * @param dev 设备句柄，不能为 NULL
+ * @retval 无
+ *
+ * @note 与 Select() 配对。只对"本任务、本设备"开的会话生效：任务不是持有者、
+ *       或 dev 不是本次会话选中的那台，都直接返回，避免放掉别人的锁。
+ */
+void Dev_IIC_Deselect(const dev_iic_dev_t *dev)
+{
+    const dev_iic_t *bus;
+    dev_iic_rt_t *rt;
+
+    if ((dev == NULL) || (dev->bus == NULL)) {
+        return;
+    }
+    bus = dev->bus;
+    rt  = bus->rt;
+
+    if ((rt->owner != xTaskGetCurrentTaskHandle()) || (rt->frame_dev != dev)) {
+        return;
+    }
+
+    rt->frame_dev = NULL;
+    rt->owner     = NULL;
+    (void)osMutexRelease(*bus->lock);
 }
 
 /**

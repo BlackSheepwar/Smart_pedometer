@@ -17,7 +17,7 @@
  *       DMA 流），结果记在运行块里，句柄本身不写能力值——能力是
  *       CubeMX 的配置结果，不是靠人手抄进代码的常量。
  *       可以用的那几档对外契约相同：BSP_SPI_StartTransfer() 启动即返回
- *       BSP_SPI_OK，完成或出错时在中断里回调 done(ctx, status)，也可以用
+ *       BSP_SPI_OK，完成或出错时在中断里回调 done(wait, status)，也可以用
  *       BSP_SPI_IsBusy() 查是否还在进行；阻塞档在函数里同步搬完，返回即结束，
  *       done 不会被调用。
  *
@@ -91,8 +91,18 @@ typedef enum {
 typedef struct bsp_spi bsp_spi_t;
 
 /**
+ * @brief 完成通知的接收方：谁在等、属于谁
+ * @note 两个指针本层都不解释，只在完成回调里原样回传。task 由上层决定怎么
+ *       用（通常是唤醒它），本层不认识任何 OS 类型。
+ */
+typedef struct {
+    void *task;  /* 上层要唤醒的任务句柄 */
+    void *ctx;   /* 上层上下文，通常是设备句柄 */
+} bsp_spi_wait_t;
+
+/**
  * @brief 一次异步传输的完成回调
- * @param ctx    启动时原样传回的上下文指针
+ * @param wait   启动时传入的接收方描述，原样回传
  * @param status 传输结果，取值同 bsp_spi_status_t
  * @retval 无
  * @note 在中断里被调用，实现必须 ISR 安全：只能做"记结果 + 唤醒等待者"
@@ -100,7 +110,8 @@ typedef struct bsp_spi bsp_spi_t;
  *       的 FreeRTOS API。调用 BSP_SPI_Abort() 之后本回调不会被再调用；
  *       阻塞方式下本回调永远不会被调用。
  */
-typedef void (*bsp_spi_done_t)(void *ctx, bsp_spi_status_t status);
+typedef void (*bsp_spi_done_t)(const bsp_spi_wait_t *wait,
+                               bsp_spi_status_t status);
 
 /*==============================================================================
  * 外部变量
@@ -152,7 +163,7 @@ bsp_spi_status_t BSP_SPI_SetRate(const bsp_spi_t *bus, uint32_t sck_hz);
  * @param len        传输字节数，不能为 0
  * @param timeout_ms 超时预算（毫秒），0 表示用默认 50 ms；只对阻塞方式生效
  * @param done       异步完成回调，可为 NULL（此时只能轮询 IsBusy）
- * @param ctx        回调上下文，原样传回 done
+ * @param wait       接收方描述（任务 + 上下文），原样回传给 done
  * @retval BSP_SPI_OK: 异步方式已启动（尚未完成）；阻塞方式已搬完且成功
  * @retval BSP_SPI_ERR_PARAM: 句柄或长度非法，或两个缓冲区都为 NULL
  * @retval BSP_SPI_ERR_STATE: 驱动未初始化，或上一笔异步传输还没收尾
@@ -173,7 +184,8 @@ bsp_spi_status_t BSP_SPI_SetRate(const bsp_spi_t *bus, uint32_t sck_hz);
 bsp_spi_status_t BSP_SPI_StartTransfer(const bsp_spi_t *bus,
                                        const uint8_t *tx, uint8_t *rx,
                                        uint16_t len, uint32_t timeout_ms,
-                                       bsp_spi_done_t done, void *ctx);
+                                       bsp_spi_done_t done,
+                                       const bsp_spi_wait_t *wait);
 
 /**
  * @brief 查询总线上是否还有未完成的传输

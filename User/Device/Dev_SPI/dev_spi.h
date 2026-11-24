@@ -15,11 +15,12 @@
  *                  与芯片无关，换 MCU 一个字都不用改。
  *       两条职责分开之后，"移植只改 BSP、且 BSP 保持极简"才能同时成立。
  *
- *       两种用法，按事务长度选：
- *         单段  Dev_SPI_Transfer()，一次调用走完 选→发→放；
- *         多段  Select() + TransferLocked() × N + Deselect()，锁与片选同
- *               生命周期，整帧独占总线。命令与参数不能跨帧的器件必须用
- *               这种，否则别的设备能在帧中间插进来，字节会被本设备误收。
+ *       两种用法，同一个入口 Dev_SPI_Transfer()：
+ *         单段  直接调，一次调用走完 选→发→放；
+ *         多段  先 Select()，再连调 N 次 Transfer()，最后 Deselect()。
+ *               锁与片选同一生命周期，整帧独占总线；命令与参数不能跨帧的
+ *               器件必须用这种，否则别的设备能在帧中间插进来，字节会被本
+ *               设备误收。
  *
  *       一次事务同步完成：抢互斥量排队 → 按设备切速率 → 拉片选 →
  *       启动传输并等完成 → 抬片选 → 放锁。其中"启动"在 bsp_spi（只登记
@@ -110,8 +111,9 @@ dev_spi_status_t Dev_SPI_Init(const dev_spi_t *bus);
  * @retval DEV_SPI_ERR_TIMEOUT: 等锁超时；此时片选没有被拉低
  * @retval DEV_SPI_ERR_HAL: 速率切换失败；此时片选没有被拉低
  * @note 电平按 cs_active_level 换算。抢锁成功才拉片选，不存在"CS 已低、
- *       总线还在别人手里"的窗口。与 Deselect() 成对，帧内只能调
- *       TransferLocked()。失败后不要调 Deselect。会阻塞，不得在中断中调用。
+ *       总线还在别人手里"的窗口。与 Deselect() 成对，帧内只调
+ *       Transfer()（它检测到帧已开就不再抢锁）。失败后不要调 Deselect。
+ *       会阻塞，不得在中断中调用。
  *       本函数同时完成速率切换：句柄的 sck_hz 非 0 时按"不超过该值"算出
  *       分频并写入外设，片选拉低之前生效；sck_hz 为 0 则回落到 CubeMX
  *       配的预分频。
@@ -131,46 +133,25 @@ dev_spi_status_t Dev_SPI_Select(const dev_spi_dev_t *dev,
 void Dev_SPI_Deselect(const dev_spi_dev_t *dev);
 
 /**
- * @brief 在已选中的设备上搬一段字节（不抢锁、不碰片选）
- * @param dev        设备句柄，不能为 NULL，且必须是 Select() 选中的那台
- * @param tx         发送缓冲区，NULL 表示本次不发
- * @param rx         接收缓冲区，NULL 表示本次不收
- * @param len        传输字节数，不能为 0
- * @param timeout_ms 本次传输的超时预算，0 表示用默认 50 ms
- * @retval DEV_SPI_OK: 传输成功
- * @retval DEV_SPI_ERR_PARAM: 句柄或长度非法，或两个缓冲区都为 NULL
- * @retval DEV_SPI_ERR_STATE: 未初始化、调度器未运行，或当前帧不是
- *         本任务、本设备开的
- * @retval DEV_SPI_ERR_TIMEOUT: 传输超时，本层已 Abort 中止并丢弃本次结果
- * @retval DEV_SPI_ERR_MODE: 外设当前方向不支持本次传输
- * @retval DEV_SPI_ERR_BUS: 总线错误
- * @retval DEV_SPI_ERR_HAL: HAL 启动失败或 DMA 错误
- * @note 只给帧内分段用：调用前必须 Dev_SPI_Select() 同一个设备，与
- *       Deselect() 成对。内部校验帧主与帧设备，把"忘了开帧""开了别的
- *       设备的帧""跨任务误用"变成可查的错误码。
- *       方向由 tx / rx 推出：只发 / 只收 / 全双工 / ERR_PARAM。不得在中断调用。
- */
-dev_spi_status_t Dev_SPI_TransferLocked(const dev_spi_dev_t *dev,
-                                        const uint8_t *tx, uint8_t *rx,
-                                        uint16_t len, uint32_t timeout_ms);
-
-/**
- * @brief 在指定设备上提交一次传输，自动拉放片选
+ * @brief 提交一次传输：会话内直接搬，会话外自带开关
  * @param dev        设备句柄，不能为 NULL
  * @param tx         发送缓冲区，NULL 表示本次不发
  * @param rx         接收缓冲区，NULL 表示本次不收
  * @param len        传输字节数，不能为 0
- * @param timeout_ms 超时预算（毫秒），0 表示用默认 50 ms
+ * @param timeout_ms 等锁与本次搬运各自的预算（毫秒），0 表示用默认 50 ms
  * @retval DEV_SPI_OK: 传输成功
- * @retval DEV_SPI_ERR_PARAM: 句柄或长度非法，或两个缓冲区都为 NULL
- * @retval DEV_SPI_ERR_STATE: 驱动未初始化、调度器未运行，或本任务已在帧中
- * @retval DEV_SPI_ERR_TIMEOUT: 排队或传输超时
+ * @retval DEV_SPI_ERR_PARAM: 句柄非法，或两个缓冲区都为 NULL
+ * @retval DEV_SPI_ERR_STATE: 驱动未初始化、调度器未运行，或会话里换了设备
+ * @retval DEV_SPI_ERR_TIMEOUT: 排队超时，或本次传输超时（已中止）
  * @retval DEV_SPI_ERR_MODE: 外设当前方向不支持本次传输
- * @retval DEV_SPI_ERR_BUS: 总线错误
- * @retval DEV_SPI_ERR_HAL: 速率切换或 HAL 错误
- * @note 一次完整帧事务：Select → TransferLocked → Deselect，成功失败都
- *       把片选与总线还回去。方向推断规则与 TransferLocked() 一致。
- *       一帧要分多段发时别用本函数，改用三个底层函数自己拼。
+ * @retval DEV_SPI_ERR_BUS: 总线错误（MODF / OVR / CRC）
+ * @retval DEV_SPI_ERR_HAL: 速率切换失败，或启动 / DMA / 阻塞传输出错
+ *
+ * @note 唯一传输入口，两种走法：已用 Dev_SPI_Select() 开了帧就直接搬，不再
+ *       抢锁、换速、动片选；否则自带 Select → 搬 → Deselect，成功失败都把
+ *       片选与总线还回去。一帧要分多段发时先 Select，再连调本函数。
+ *       会话里换成别的设备返回 ERR_STATE，不会悄悄改总线速率。
+ *       方向由 tx / rx 推出：只发 / 只收 / 全双工 / ERR_PARAM。不得在中断调用。
  */
 dev_spi_status_t Dev_SPI_Transfer(const dev_spi_dev_t *dev,
                                   const uint8_t *tx, uint8_t *rx,

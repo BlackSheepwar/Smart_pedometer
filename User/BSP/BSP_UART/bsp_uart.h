@@ -9,7 +9,8 @@
  *       是自本次武装以来的窗口位置，本层用 (pos - last) & (2N - 1) 累计成
  *       绝对字节数，上层读这个数决定搬多少。发送把上层给的连续内存直接
  *       交给 DMA，完成点取 USART TC（最后一位离开发送器）。
- *       回调只回传本实例句柄，本层不保存任何上层指针。
+ *       回调只回传上层登记的上下文，本层不认识它的内容，也不要求上层
+ *       拿本层句柄反查自己是谁。
  */
 
 #ifndef __BSP_UART_H__
@@ -37,31 +38,35 @@ typedef struct bsp_uart bsp_uart_t;
 
 /**
  * @brief 接收事件通知：这一路有新字节或接收出错
- * @param uart 触发事件的实例
+ * @param ctx 上层在端口绑定里登记的上下文，本层原样回传
  * @retval 无
  *
  * @note 中断上下文调用；只允许置标志或发 ISR 安全通知，不搬运数据。
+ *       传上下文而不是本层句柄：回调拿到的就是自己的实例，不需要再按
+ *       本层句柄反查一张实例表。
  */
-typedef void (*bsp_uart_rx_fn)(const bsp_uart_t *uart);
+typedef void (*bsp_uart_rx_fn)(void *ctx);
 
 /**
  * @brief 发送完成通知
- * @param uart 触发事件的实例
- * @param ok   1 = 最后一位已移出；0 = 错误中止，可能只发出一部分
+ * @param ctx 上层在端口绑定里登记的上下文，本层原样回传
+ * @param ok  1 = 最后一位已移出；0 = 错误中止，可能只发出一部分
  * @retval 无
  *
  * @note 中断上下文调用；只允许有界索引更新与 ISR 安全通知。
  */
-typedef void (*bsp_uart_tx_done_fn)(const bsp_uart_t *uart, uint8_t ok);
+typedef void (*bsp_uart_tx_done_fn)(void *ctx, uint8_t ok);
 
 /**
- * @brief 端口绑定：接收缓冲与两个通知都由上层提供
+ * @brief 端口绑定：接收缓冲、上下文与两个通知都由上层提供
  *
  * @note 接收缓冲长度必须是 2*node，DMA 用 circular 模式，由 CubeMX 配置。
+ *       ctx 是不透明指针，本层只保管不解释；回调里要什么由上层决定。
  */
 typedef struct {
     uint8_t *buf;                    /** 接收缓冲，长度 2*node */
     uint16_t node;                   /** 半缓冲字节数：16 至 16384 的 2 次幂 */
+    void *ctx;                       /** 上层上下文：回调时原样回传 */
     bsp_uart_rx_fn on_rx;            /** 接收事件 */
     bsp_uart_tx_done_fn on_tx_done;  /** 发送完成 */
 } bsp_uart_port_t;

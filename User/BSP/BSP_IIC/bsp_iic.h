@@ -98,13 +98,24 @@ typedef struct {
 typedef struct bsp_iic bsp_iic_t;
 
 /**
+ * @brief 完成通知的接收方：谁在等、属于谁
+ * @note 两个指针本层都不解释，只在完成回调里原样回传。task 由上层决定怎么
+ *       用（通常是唤醒它），本层不认识任何 OS 类型。
+ */
+typedef struct {
+    void *task;  /* 上层要唤醒的任务句柄 */
+    void *ctx;   /* 上层上下文，通常是设备句柄 */
+} bsp_iic_wait_t;
+
+/**
  * @brief 搬运完成回调
- * @param ctx    登记时传入的上下文，原样回传
+ * @param wait   登记时传入的接收方描述，原样回传
  * @param status 本次搬运结果，取 bsp_iic_status_t
  * @note 在中断上下文调用（中断 / DMA 两种方式）；回调返回后调用者才可以
  *       把总线交给下一笔。阻塞方式不调用本回调，结果由启动函数的返回值给出。
  */
-typedef void (*bsp_iic_done_t)(void *ctx, bsp_iic_status_t status);
+typedef void (*bsp_iic_done_t)(const bsp_iic_wait_t *wait,
+                               bsp_iic_status_t status);
 
 /*==============================================================================
  * 外部变量
@@ -148,7 +159,7 @@ bsp_iic_status_t BSP_IIC_SetSpeed(const bsp_iic_t *bus, uint32_t hz);
  * @param timeout_ms 仅阻塞方式使用的超时（ms）；中断 / DMA 方式忽略，
  *                   由调用者自己计时并在超时后调 BSP_IIC_Abort()
  * @param done       完成回调（中断 / DMA 方式用），可以为 NULL
- * @param ctx        回调上下文，原样回传
+ * @param wait       接收方描述（任务 + 上下文），原样回传给 done
  * @retval BSP_IIC_OK: 阻塞方式已搬完；异步方式已交给外设（完成点只在 done）
  * @retval BSP_IIC_ERR_PARAM: 地址、方向、模式、长度或缓冲区非法
  * @retval BSP_IIC_ERR_STATE: 未初始化，或上一笔还没收尾
@@ -166,7 +177,8 @@ bsp_iic_status_t BSP_IIC_SetSpeed(const bsp_iic_t *bus, uint32_t hz);
 bsp_iic_status_t BSP_IIC_StartTransfer(const bsp_iic_t *bus,
                                        const bsp_iic_msg_t *msg,
                                        uint32_t timeout_ms,
-                                       bsp_iic_done_t done, void *ctx);
+                                       bsp_iic_done_t done,
+                                       const bsp_iic_wait_t *wait);
 
 /**
  * @brief 查询总线是否还有搬运未收尾

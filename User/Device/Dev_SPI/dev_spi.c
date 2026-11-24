@@ -59,6 +59,7 @@ extern osMutexId_t SPI1_LOCKHandle;
 typedef struct {
     TaskHandle_t volatile frame_owner; /* 当前持有帧事务的任务，空闲为 NULL */
     const dev_spi_dev_t  *frame_dev;   /* 当前帧对应的设备，空闲为 NULL */
+    bsp_spi_wait_t        wait;        /* 交给芯片层的接收方：任务 + 设备 */
     volatile dev_spi_status_t result;  /* 最近一次传输结果，由中断写入 */
     volatile uint8_t      done;        /* 1: 中断已把 result 写好 */
     volatile uint8_t      abandoned;   /* 1: 本次等待已放弃（超时） */
@@ -152,18 +153,21 @@ static dev_spi_status_t Dev_SPI_Map(bsp_spi_status_t status)
 
 /**
  * @brief BSP 的完成回调：落盘结果并唤醒开着帧的任务
- * @param ctx    Dev_SPI_TransferLocked 登记的本总线运行块
+ * @param ctx    本次传输的设备句柄
  * @param status BSP 层的结果码
  * @retval 无
  * @note 在中断上下文执行，只做两件 O(1) 的事：写结果、唤醒等待者，
- *       唤醒必须用 FromISR 版本。frame_owner 为 NULL 说明这一帧已经
- *       Deselect，没人等这次结果；abandoned 为 1 说明等待方已超时放弃，
- *       此时只落盘不唤醒，避免把令牌留给下一次传输。
+ *       唤醒必须用 FromISR 版本。结果与放弃标志在总线运行块上：一次持锁
+ *       只有一台设备在传，所以从设备句柄一步就能定位到那条总线。
+ *       frame_owner 为 NULL 说明这一帧已经 Deselect，没人等这次结果；
+ *       abandoned 为 1 说明等待方已超时放弃，此时只落盘不唤醒，避免把
+ *       令牌留给下一次传输。
  */
-static void Dev_SPI_OnDone(void *ctx, bsp_spi_status_t status)
+static void Dev_SPI_OnDone(const bsp_spi_wait_t *wait, bsp_spi_status_t status)
 {
-    dev_spi_rt_t *rt    = (dev_spi_rt_t *)ctx;
-    TaskHandle_t  owner = rt->frame_owner;
+    const dev_spi_dev_t *dev = (const dev_spi_dev_t *)wait->ctx;
+    dev_spi_rt_t *rt    = dev->bus->rt;
+    TaskHandle_t  owner = (TaskHandle_t)wait->task;
     BaseType_t    woken = pdFALSE;
 
     rt->result = Dev_SPI_Map(status);
@@ -173,6 +177,60 @@ static void Dev_SPI_OnDone(void *ctx, bsp_spi_status_t status)
         vTaskNotifyGiveFromISR(owner, &woken);
         portYIELD_FROM_ISR(woken);
     }
+}
+
+/**
+ * @brief 在当前已持有的帧上搬一段字节：启动、等完成、超时中止
+ * @param dev       设备句柄，帧必须已由本任务、为这台设备开好
+ * @param tx        发送缓冲区，NULL 表示本次不发
+ * @param rx        接收缓冲区，NULL 表示本次不收
+ * @param len       传输字节数
+ * @param budget_ms 本次搬运的时间预算（ms），已按默认值折算
+ * @retval DEV_SPI_OK: 传输成功
+ * @retval DEV_SPI_ERR_TIMEOUT: 传输超时（已中止本次传输）
+ * @retval 其他: 芯片层返回码翻译后的失败原因
+ *
+ * @note 不抢锁、不换速、不碰片选：那些是帧开始时的职责。清残留令牌必须
+ *       在启动之前——上一笔超时放弃后，迟到的那次唤醒会把令牌留在任务的
+ *       通知值里，不清就会把本次等待误判成"已完成"。
+ */
+static dev_spi_status_t Dev_SPI_Push(const dev_spi_dev_t *dev,
+                                     const uint8_t *tx, uint8_t *rx,
+                                     uint16_t len, uint32_t budget_ms)
+{
+    const dev_spi_t *bus = dev->bus;
+    dev_spi_rt_t    *rt  = bus->rt;
+    bsp_spi_status_t bsp;
+
+    rt->done      = 0U;
+    rt->abandoned = 0U;
+    rt->result    = DEV_SPI_ERR_STATE;
+    (void)ulTaskNotifyTake(pdTRUE, 0U);
+
+    /* 接收方打包成一份描述交给芯片层：任务用于唤醒，上下文用于定位实例 */
+    rt->wait.task = xTaskGetCurrentTaskHandle();
+    rt->wait.ctx  = (void *)dev;
+
+    bsp = BSP_SPI_StartTransfer(bus->bsp, tx, rx, len, budget_ms,
+                                Dev_SPI_OnDone, &rt->wait);
+    if (bsp != BSP_SPI_OK) {
+        return Dev_SPI_Map(bsp);
+    }
+
+    /* 没有 DMA 时 BSP 已在启动里搬完；DMA 也可能在查询之前就收尾了。
+       这两种情况都不必再等，直接取结果。 */
+    if (BSP_SPI_IsBusy(bus->bsp) == 0U) {
+        return (rt->done != 0U) ? rt->result : DEV_SPI_OK;
+    }
+
+    if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(budget_ms)) == 0U) {
+        /* 醒了但令牌是超时给的：撤回等待登记再中止，迟到回调不会再来打扰 */
+        rt->abandoned = 1U;
+        (void)BSP_SPI_Abort(bus->bsp);
+        return DEV_SPI_ERR_TIMEOUT;
+    }
+
+    return rt->result;
 }
 
 /*==============================================================================
@@ -239,6 +297,7 @@ dev_spi_status_t Dev_SPI_Select(const dev_spi_dev_t *dev,
     const dev_spi_t *bus;
     dev_spi_rt_t    *rt;
     dev_spi_status_t status;
+    TaskHandle_t     self;
 
     if ((dev == NULL) || (dev->bus == NULL)) {
         return DEV_SPI_ERR_PARAM;
@@ -253,7 +312,8 @@ dev_spi_status_t Dev_SPI_Select(const dev_spi_dev_t *dev,
         return DEV_SPI_ERR_STATE;
     }
     /* 同一任务重复开帧是调用错误；别的任务正持帧则照常排队等锁 */
-    if (rt->frame_owner == xTaskGetCurrentTaskHandle()) {
+    self = xTaskGetCurrentTaskHandle();
+    if (rt->frame_owner == self) {
         return DEV_SPI_ERR_STATE;
     }
 
@@ -274,7 +334,7 @@ dev_spi_status_t Dev_SPI_Select(const dev_spi_dev_t *dev,
     }
 
     /* 锁到手之后才登记所有权、拉片选，两步之间不会有别的任务插进来 */
-    rt->frame_owner = xTaskGetCurrentTaskHandle();
+    rt->frame_owner = self;
     rt->frame_dev   = dev;
     if (dev->cs != NULL) {
         BSP_GPIO_Write(dev->cs, dev->cs_active_level);
@@ -320,36 +380,37 @@ void Dev_SPI_Deselect(const dev_spi_dev_t *dev)
 }
 
 /**
- * @brief 在已选中的设备上搬一段字节（不抢锁、不碰片选）
- * @param dev        设备句柄，不能为 NULL，且必须是 Select() 选中的那台
+ * @brief 提交一次传输：会话内直接搬，会话外自带开关
+ * @param dev        设备句柄，不能为 NULL
  * @param tx         发送缓冲区，NULL 表示本次不发
  * @param rx         接收缓冲区，NULL 表示本次不收
  * @param len        传输字节数，不能为 0
- * @param timeout_ms 本次传输的超时预算，0 表示用默认 50 ms
+ * @param timeout_ms 等锁与本次搬运各自的预算（毫秒），0 表示用默认 50 ms
  * @retval DEV_SPI_OK: 传输成功
- * @retval DEV_SPI_ERR_PARAM: 句柄或长度非法，或两个缓冲区都为 NULL
- * @retval DEV_SPI_ERR_STATE: 未初始化、调度器未运行，或当前帧不是
- *         本任务、本设备开的
- * @retval DEV_SPI_ERR_TIMEOUT: 传输超时（已 Abort 中止本次传输）
+ * @retval DEV_SPI_ERR_PARAM: 句柄非法，或两个缓冲区都为 NULL
+ * @retval DEV_SPI_ERR_STATE: 驱动未初始化、调度器未运行，或会话里换了设备
+ * @retval DEV_SPI_ERR_TIMEOUT: 排队超时，或本次传输超时（已中止）
  * @retval DEV_SPI_ERR_MODE: 外设当前方向不支持本次传输
  * @retval DEV_SPI_ERR_BUS: 总线错误（MODF / OVR / CRC）
- * @retval DEV_SPI_ERR_HAL: 启动失败，或 DMA / 阻塞传输出错
- * @note 只给帧内分段用：调用前必须 Dev_SPI_Select() 同一个设备，与
- *       Deselect() 成对。内部校验帧主与帧设备，把"忘了开帧""开了别的
- *       设备的帧""跨任务误用"变成可查的错误码。
- *       等待与超时策略在本层：BSP 只负责"启动 + 完成回调"，本层登记
- *       回调、睡等任务通知、超时后调 BSP_SPI_Abort()。所以 BSP 不依赖
- *       任何 OS，换 RTOS 或改裸机时这一层不用动。
+ * @retval DEV_SPI_ERR_HAL: 速率切换失败，或启动 / DMA / 阻塞传输出错
+ *
+ * @note 唯一传输入口，两种走法：调用者已用 Dev_SPI_Select() 开了帧，就直接
+ *       搬，不再抢锁、换速、动片选；否则自带 Select → 搬 → Deselect，成功
+ *       失败都把片选与总线还回去。一帧要分多段发时先 Select，再连调本函数。
+ *       会话里换成别的设备属于误用：那次帧的速率与片选是按前一台设的，
+ *       这里直接拒绝，不悄悄改总线。
+ *       等待与超时策略在本层：BSP 只负责"启动 + 完成回调"，本层登记回调、
+ *       睡等任务通知、超时后调 BSP_SPI_Abort()。BSP 因此不依赖任何 OS。
  *       方向由 tx / rx 推出：只发 / 只收 / 全双工 / ERR_PARAM。不得在中断调用。
  */
-dev_spi_status_t Dev_SPI_TransferLocked(const dev_spi_dev_t *dev,
-                                        const uint8_t *tx, uint8_t *rx,
-                                        uint16_t len, uint32_t timeout_ms)
+dev_spi_status_t Dev_SPI_Transfer(const dev_spi_dev_t *dev,
+                                  const uint8_t *tx, uint8_t *rx,
+                                  uint16_t len, uint32_t timeout_ms)
 {
     const dev_spi_t *bus;
     dev_spi_rt_t    *rt;
-    bsp_spi_status_t bsp;
-    TickType_t       ticks;
+    dev_spi_status_t status;
+    uint32_t budget_ms;
 
     if ((dev == NULL) || (dev->bus == NULL)) {
         return DEV_SPI_ERR_PARAM;
@@ -357,79 +418,27 @@ dev_spi_status_t Dev_SPI_TransferLocked(const dev_spi_dev_t *dev,
     bus = dev->bus;
     rt  = bus->rt;
 
-    /* 帧外误用：没开帧、帧是别的任务开的，或帧开在别的设备上。
-       调度器没跑时 current 为 NULL，会和空闲帧主撞上，所以 NULL 一并挡掉 */
-    if ((xTaskGetCurrentTaskHandle() == NULL) ||
-        (rt->frame_owner != xTaskGetCurrentTaskHandle()) ||
-        (rt->frame_dev != dev)) {
+    if ((rt->initialized == 0U) ||
+        (xTaskGetSchedulerState() != taskSCHEDULER_RUNNING)) {
         return DEV_SPI_ERR_STATE;
     }
 
-    if (timeout_ms == 0U) {
-        timeout_ms = DEV_SPI_DEFAULT_TIMEOUT_MS;
+    budget_ms = (timeout_ms == 0U) ? DEV_SPI_DEFAULT_TIMEOUT_MS : timeout_ms;
+
+    /* 会话内：锁、速率与片选已由 Select 备好，直接搬 */
+    if (rt->frame_owner == xTaskGetCurrentTaskHandle()) {
+        return (rt->frame_dev == dev) ? Dev_SPI_Push(dev, tx, rx, len, budget_ms)
+                                      : DEV_SPI_ERR_STATE;
     }
 
-    /* 清掉上一次可能残留的完成信号：超时放弃之后，迟到的那次唤醒会把
-       令牌留在任务的通知值里，不清就会把本次等待误判成"已完成" */
-    rt->done      = 0U;
-    rt->abandoned = 0U;
-    rt->result    = DEV_SPI_ERR_STATE;
-    (void)ulTaskNotifyTake(pdTRUE, 0U);
-
-    bsp = BSP_SPI_StartTransfer(bus->bsp, tx, rx, len, timeout_ms,
-                                Dev_SPI_OnDone, rt);
-    if (bsp != BSP_SPI_OK) {
-        return Dev_SPI_Map(bsp);
-    }
-
-    /* 没有 DMA 时 BSP 已在启动里搬完；DMA 也可能在查询之前就收尾了。
-       这两种情况都不必再等，直接取结果。 */
-    if (BSP_SPI_IsBusy(bus->bsp) == 0U) {
-        return (rt->done != 0U) ? rt->result : DEV_SPI_OK;
-    }
-
-    ticks = pdMS_TO_TICKS(timeout_ms);
-    if (ulTaskNotifyTake(pdTRUE, ticks) == 0U) {
-        /* 醒了但令牌是超时给的：撤回等待登记再中止，迟到回调不会再来打扰 */
-        rt->abandoned = 1U;
-        (void)BSP_SPI_Abort(bus->bsp);
-        return DEV_SPI_ERR_TIMEOUT;
-    }
-    return rt->result;
-}
-
-/**
- * @brief 在指定设备上提交一次传输，自动拉放片选
- * @param dev        设备句柄，不能为 NULL
- * @param tx         发送缓冲区，NULL 表示本次不发
- * @param rx         接收缓冲区，NULL 表示本次不收
- * @param len        传输字节数，不能为 0
- * @param timeout_ms 超时预算（毫秒），0 表示用默认 50 ms
- * @retval DEV_SPI_OK: 传输成功
- * @retval DEV_SPI_ERR_PARAM: 句柄或长度非法，或两个缓冲区都为 NULL
- * @retval DEV_SPI_ERR_STATE: 驱动未初始化、调度器未运行，或本任务已在帧中
- * @retval DEV_SPI_ERR_TIMEOUT: 排队或传输超时
- * @retval DEV_SPI_ERR_MODE: 外设当前方向不支持本次传输
- * @retval DEV_SPI_ERR_BUS: 总线错误
- * @retval DEV_SPI_ERR_HAL: 速率切换或 HAL 错误
- * @note 一次完整帧事务：Select → TransferLocked → Deselect，成功失败都
- *       把片选与总线还回去。方向推断规则与 TransferLocked() 一致。
- *       一帧要分多段发时别用本函数，改用三个底层函数自己拼。
- */
-dev_spi_status_t Dev_SPI_Transfer(const dev_spi_dev_t *dev,
-                                  const uint8_t *tx, uint8_t *rx,
-                                  uint16_t len, uint32_t timeout_ms)
-{
-    dev_spi_status_t status;
-
-    /* ---------- 1. 抢总线并拉片选，两步合成一个原子动作 ---------- */
+    /* ---------- 会话外：抢总线 + 拉片选，搬完无论成败都还回去 ---------- */
     status = Dev_SPI_Select(dev, timeout_ms);
     if (status != DEV_SPI_OK) {
         return status;
     }
 
-    /* ---------- 2. 搬字节，成功失败都要把片选与总线还回去 ---------- */
-    status = Dev_SPI_TransferLocked(dev, tx, rx, len, timeout_ms);
+    status = Dev_SPI_Push(dev, tx, rx, len, budget_ms);
     Dev_SPI_Deselect(dev);
+
     return status;
 }

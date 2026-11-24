@@ -5,8 +5,9 @@
  * @date 2026-11-23
  *
  * @note 设计模型：
- *       1. 接收：中断只把实例句柄投进事件队列；服务任务按"绝对接收量 -
- *          已搬走量"求增量，把字节从 DMA 缓冲搬进接收 FIFO。
+ *       1. 接收：芯片层回调带的是本实例句柄，本层原样把它投进事件队列；
+ *          服务任务按"绝对接收量 - 已搬走量"求增量，把字节从 DMA 缓冲搬
+ *          进接收 FIFO。
  *       2. 发送：写者持互斥量把整帧写进发送 FIFO，若当前没有在途段就
  *          顺手启动第一段；之后每段发完由 TC 中断归还并续链下一段，
  *          整条链不需要任务参与。
@@ -14,7 +15,8 @@
  *          （中断只打断任务）；中断先归还已发段、再判断有无后续数据，
  *          写者只在"无在途段"时才启动，两者不会撞车。
  *       4. 零拷贝：FIFO 队首连续段直接交给 DMA，TC 后才 consume。
- *       5. 新增一路 UART 只需登记实例与缓冲；回调和任务都不用改。
+ *       5. 新增一路 UART 只需登记实例与缓冲；回调和任务都不用改，也不需要
+ *          在任何一张表里再补一行。
  */
 
 /*==============================================================================
@@ -39,21 +41,13 @@ extern osMessageQueueId_t UART_EVT_QHandle;
 extern osMutexId_t UART1_LOCKHandle;
 
 /*==============================================================================
- * 宏定义与常量
- *============================================================================*/
-/** @brief 单个接收 DMA 节点字节数，缓冲总长为其 2 倍 */
-#define DEV_UART_NODE       128U
-/** @brief 双节点接收 DMA 缓冲总字节数 */
-#define DEV_UART_RING       (DEV_UART_NODE * 2U)
-/** @brief 收发 FIFO 容量，第三方库上限 32767 */
-#define DEV_UART_FIFO       512U
-/** @brief 单次搬运最多拷贝的字节数，限制任务单轮占用 */
-#define DEV_UART_COPY       32U
-
-/*==============================================================================
  * 类型定义
  *============================================================================*/
-/** @brief UART 虚拟外设运行块 */
+/**
+ * @brief UART 虚拟外设运行块
+ * @note 回调带的是 const 句柄，句柄里 bsp、缓冲、rt 都在，中断里一次取用即可，
+ *       运行块不保存回指指针。
+ */
 typedef struct {
     ringbuffer_t rx_fifo;       /* 接收 FIFO：服务任务生产、应用消费 */
     ringbuffer_t tx_fifo;       /* 发送 FIFO：写者生产、TC 中断消费 */
@@ -65,24 +59,36 @@ typedef struct {
     volatile uint8_t  tx_busy;  /* 1 = 有一段 DMA 发送在途 */
 } dev_uart_rt_t;
 
-/** @brief UART 虚拟外设句柄布局 */
+/** @brief UART 虚拟外设句柄布局：容量属于实例，每路可以各不相同 */
 struct dev_uart {
     const bsp_uart_t *bsp;      /* 芯片层总线句柄 */
-    uint8_t          *dma;      /* 双节点接收 DMA 缓冲 */
+    uint8_t          *dma;      /* 双节点接收 DMA 缓冲，长度 2*node */
     uint8_t          *rx_pool;  /* 接收 FIFO 存储池 */
     uint8_t          *tx_pool;  /* 发送 FIFO 存储池 */
+    uint16_t          node;     /* 单个 DMA 节点字节数：16 至 16384 的 2 次幂 */
+    uint16_t          rx_size;  /* 接收 FIFO 容量 */
+    uint16_t          tx_size;  /* 发送 FIFO 容量，也是单帧上限 */
     dev_uart_rt_t    *rt;       /* 本实例运行块 */
 };
 
 /*==============================================================================
  * 内部变量
  *============================================================================*/
+/**
+ * @brief 实例容量：只用来定静态缓冲的大小
+ * @note 运行期一律读句柄里的 node / rx_size / tx_size，代码不假设任何一路的
+ *       容量；新增一路串口就复制这一组宏与下面的缓冲定义。
+ */
+#define DEV_UART1_NODE      128U
+#define DEV_UART1_RX_BYTES  512U
+#define DEV_UART1_TX_BYTES  512U
+
 /** @brief UART1 的接收 DMA 缓冲 */
-static uint8_t s_uart1_dma[DEV_UART_RING] __attribute__((aligned(4)));
+static uint8_t s_uart1_dma[DEV_UART1_NODE * 2U] __attribute__((aligned(4)));
 /** @brief UART1 的接收 FIFO 存储池 */
-static uint8_t s_uart1_rx_pool[DEV_UART_FIFO] __attribute__((aligned(4)));
+static uint8_t s_uart1_rx_pool[DEV_UART1_RX_BYTES] __attribute__((aligned(4)));
 /** @brief UART1 的发送 FIFO 存储池 */
-static uint8_t s_uart1_tx_pool[DEV_UART_FIFO];
+static uint8_t s_uart1_tx_pool[DEV_UART1_TX_BYTES];
 /** @brief UART1 的运行块 */
 static dev_uart_rt_t s_uart1_rt;
 
@@ -92,16 +98,11 @@ const dev_uart_t dev_uart1 = {
     .dma     = s_uart1_dma,
     .rx_pool = s_uart1_rx_pool,
     .tx_pool = s_uart1_tx_pool,
+    .node    = DEV_UART1_NODE,
+    .rx_size = DEV_UART1_RX_BYTES,
+    .tx_size = DEV_UART1_TX_BYTES,
     .rt      = &s_uart1_rt
 };
-
-/** @brief 实例表：中断回调靠它把芯片层句柄换回本层句柄 */
-static const dev_uart_t *const s_dev_handles[] = {
-    &dev_uart1,
-};
-
-/** @brief 实例表长度：空表时也成立，避免 sizeof 表达式被判恒假 */
-static const size_t s_dev_count = sizeof(s_dev_handles) / sizeof(s_dev_handles[0]);
 
 /*==============================================================================
  * 内部函数
@@ -130,46 +131,23 @@ static dev_uart_status_t Dev_UART_MapBsp(bsp_uart_status_t st)
 }
 
 /**
- * @brief 按芯片层句柄反查设备实例
- * @param bsp 芯片层句柄
- * @retval 非空: 已登记的实例
- * @retval NULL: 未登记
- */
-static const dev_uart_t *Dev_UART_Find(const bsp_uart_t *bsp)
-{
-    size_t i;
-
-    for (i = 0U; i < s_dev_count; i++)
-    {
-        if (s_dev_handles[i]->bsp == bsp)
-        {
-            return s_dev_handles[i];
-        }
-    }
-
-    return NULL;
-}
-
-/**
- * @brief 接收回调：反查实例后只投递指针
- * @param bsp 触发事件的芯片层句柄
+ * @brief 接收回调：把本实例句柄投进事件队列
+ * @param ctx 端口绑定里登记的上下文，就是本实例句柄
  * @retval 无
  *
- * @note 中断上下文调用；搬运与重装留给服务任务。
+ * @note 中断上下文调用；搬运与重装留给服务任务。句柄里 bsp、缓冲、rt 都在，
+ *       取一次就够，不需要按任何下层句柄反查。
  */
-static void Dev_UART_OnRx(const bsp_uart_t *bsp)
+static void Dev_UART_OnRx(void *ctx)
 {
-    const dev_uart_t *dev = Dev_UART_Find(bsp);
+    const dev_uart_t *dev = (const dev_uart_t *)ctx;
 
-    if (dev != NULL)
-    {
-        (void)osMessageQueuePut(UART_EVT_QHandle, &dev, 0U, 0U);
-    }
+    (void)osMessageQueuePut(UART_EVT_QHandle, &dev, 0U, 0U);
 }
 
 /**
  * @brief 发送完成回调：归还已发段，有后续数据就原地续链
- * @param bsp 触发事件的芯片层句柄
+ * @param ctx 端口绑定里登记的上下文，就是本实例句柄
  * @param ok  1 = 线路 TC 完成；0 = 错误中止
  * @retval 无
  *
@@ -178,19 +156,13 @@ static void Dev_UART_OnRx(const bsp_uart_t *bsp)
  *       期间 tx_busy 保持 1，写者不会插进来；启动失败才清 0，留给
  *       下一次写入重新拉起。
  */
-static void Dev_UART_OnTxDone(const bsp_uart_t *bsp, uint8_t ok)
+static void Dev_UART_OnTxDone(void *ctx, uint8_t ok)
 {
-    const dev_uart_t *dev = Dev_UART_Find(bsp);
-    dev_uart_rt_t *rt;
+    const dev_uart_t *dev = (const dev_uart_t *)ctx;
+    dev_uart_rt_t *rt = dev->rt;
     uint8_t *ptr = NULL;
     uint16_t len;
 
-    if (dev == NULL)
-    {
-        return;
-    }
-
-    rt = dev->rt;
     if (ok == 0U)
     {
         rt->tx_errors++;
@@ -223,62 +195,58 @@ static void Dev_UART_OnTxDone(const bsp_uart_t *bsp, uint8_t ok)
 static void Dev_UART_RxPump(const dev_uart_t *dev)
 {
     dev_uart_rt_t *rt = dev->rt;
-    uint32_t pub = BSP_UART_RxTotal(dev->bsp);
-    uint32_t len;
+    uint32_t ring = (uint32_t)dev->node * 2U;
+    uint32_t pub  = BSP_UART_RxTotal(dev->bsp);
+    uint32_t len  = pub - rt->rx_cons;
+    uint32_t cons = rt->rx_cons;
     uint32_t space;
     uint32_t chunk;
     uint32_t off;
     uint16_t first;
     size_t copied;
 
-    if ((uint32_t)(pub - rt->rx_cons) > DEV_UART_RING)
+    if (len == 0U)
     {
-        rt->rx_lost += (uint32_t)(pub - rt->rx_cons) - DEV_UART_RING;
-        rt->rx_cons = pub - DEV_UART_RING;
+        return;
     }
 
-    len = pub - rt->rx_cons;
-    while (len > 0U)
+    /* 超过一个窗口：窗口外的旧字节已被 DMA 覆盖，只保留最新数据 */
+    if (len > ring)
     {
-        space = (uint32_t)ringbuffer_space_len(&rt->rx_fifo);
-        if (space == 0U)
-        {
-            rt->rx_lost += len;
-            rt->rx_cons += len;
-            break;
-        }
+        rt->rx_lost += len - ring;
+        cons = pub - ring;
+        len  = ring;
+    }
 
-        chunk = (len < space) ? len : space;
-        if (chunk > DEV_UART_COPY)
-        {
-            chunk = DEV_UART_COPY;
-        }
+    space = (uint32_t)ringbuffer_space_len(&rt->rx_fifo);
+    chunk = (len < space) ? len : space;
 
-        off = (rt->rx_cons - rt->rx_base) & (DEV_UART_RING - 1U);
-        first = (uint16_t)(DEV_UART_RING - off);
-        if ((uint32_t)first > chunk)
-        {
-            first = (uint16_t)chunk;
-        }
+    /* FIFO 装不下的部分直接丢弃；搬走的和丢掉的都算处理过，一次推进到位 */
+    rt->rx_lost += len - chunk;
+    rt->rx_cons  = pub;
 
-        copied = ringbuffer_put(&rt->rx_fifo, &dev->dma[off], first);
-        if (chunk > (uint32_t)first)
-        {
-            copied += ringbuffer_put(&rt->rx_fifo, dev->dma,
-                                     (uint16_t)(chunk - (uint32_t)first));
-        }
+    if (chunk == 0U)
+    {
+        return;
+    }
 
-        if (copied == 0U)
-        {
-            break;
-        }
+    off   = (cons - rt->rx_base) & (ring - 1U);
+    first = (uint16_t)(ring - off);
+    if ((uint32_t)first > chunk)
+    {
+        first = (uint16_t)chunk;
+    }
 
-        if ((uint32_t)copied < chunk)
-        {
-            rt->rx_lost += chunk - (uint32_t)copied;
-        }
-        rt->rx_cons += chunk;
-        len -= chunk;
+    copied = ringbuffer_put(&rt->rx_fifo, &dev->dma[off], first);
+    if (chunk > (uint32_t)first)
+    {
+        copied += ringbuffer_put(&rt->rx_fifo, dev->dma,
+                                 (uint16_t)(chunk - (uint32_t)first));
+    }
+
+    if ((uint32_t)copied < chunk)
+    {
+        rt->rx_lost += chunk - (uint32_t)copied;
     }
 }
 
@@ -297,15 +265,17 @@ static void Dev_UART_RxPump(const dev_uart_t *dev)
  */
 dev_uart_status_t Dev_UART_Init(const dev_uart_t *dev)
 {
+    dev_uart_rt_t *rt = dev->rt;
     bsp_uart_port_t port;
     bsp_uart_status_t bst;
     uint32_t total;
 
-    ringbuffer_init(&dev->rt->rx_fifo, dev->rx_pool, DEV_UART_FIFO);
-    ringbuffer_init(&dev->rt->tx_fifo, dev->tx_pool, DEV_UART_FIFO);
+    ringbuffer_init(&rt->rx_fifo, dev->rx_pool, dev->rx_size);
+    ringbuffer_init(&rt->tx_fifo, dev->tx_pool, dev->tx_size);
 
     port.buf        = dev->dma;
-    port.node       = DEV_UART_NODE;
+    port.node       = dev->node;
+    port.ctx        = (void *)dev;
     port.on_rx      = Dev_UART_OnRx;
     port.on_tx_done = Dev_UART_OnTxDone;
 
@@ -316,8 +286,8 @@ dev_uart_status_t Dev_UART_Init(const dev_uart_t *dev)
     }
 
     total = BSP_UART_RxTotal(dev->bsp);
-    dev->rt->rx_base = total;
-    dev->rt->rx_cons = total;
+    rt->rx_base = total;
+    rt->rx_cons = total;
 
     return DEV_UART_OK;
 }
@@ -425,7 +395,7 @@ dev_uart_status_t Dev_UART_Write(const dev_uart_t *dev, const uint8_t *data,
     uint8_t *ptr = NULL;
     uint16_t chunk;
 
-    if ((len == 0U) || (len > DEV_UART_FIFO))
+    if ((len == 0U) || (len > dev->tx_size))
     {
         return DEV_UART_ERR_PARAM;
     }

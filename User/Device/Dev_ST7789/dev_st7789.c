@@ -13,7 +13,7 @@
  *       一次写屏的时序：
  *         CS 低 → DC 低 → 发命令 → DC 高 → 发参数/像素 → CS 高
  *       片选与总线在整帧期间一起被本任务独占：Dev_SPI_Select() 抢锁
- *       成功才拉 CS，帧内只走 Dev_SPI_TransferLocked()，不再重入互斥量，
+ *       成功才拉 CS，帧内只走 Dev_SPI_Transfer()，它检测到帧已开就不再重入互斥量，
  *       Dev_SPI_Deselect() 抬 CS 之后才放锁。所以"CS 全程保持低"与
  *       "总线不被打断"是同一件事，不需要额外的临界区；分块大小只影响
  *       单次 DMA 的长度，不影响帧的完整性。
@@ -168,7 +168,8 @@ const dev_st7789_t dev_st7789_0 = {
  * @retval -2: 其中一次传输失败（总线错误或传输超时）
  * @note 按 DEV_ST7789_CHUNK 分块，因为虚拟外设的 len 是 uint16_t。
  *       片选与总线由调用者在帧首用 Dev_SPI_Select() 取得，本函数只走
- *       已持锁入口，不会重新抢锁，所以整帧期间总线不会被别的设备拿走。
+ *       会话内那条分支，不会重新抢锁，所以整帧期间总线不会被别的设备
+ *       拿走。
  */
 static int Dev_ST7789_Raw(const dev_st7789_t *lcd, const uint8_t *data,
                           uint32_t len)
@@ -177,7 +178,7 @@ static int Dev_ST7789_Raw(const dev_st7789_t *lcd, const uint8_t *data,
         uint16_t chunk = (len > DEV_ST7789_CHUNK) ?
                          (uint16_t)DEV_ST7789_CHUNK : (uint16_t)len;
 
-        if (Dev_SPI_TransferLocked(lcd->dev, data, NULL, chunk, 0u)
+        if (Dev_SPI_Transfer(lcd->dev, data, NULL, chunk, 0u)
             != DEV_SPI_OK) {
             return -2;
         }

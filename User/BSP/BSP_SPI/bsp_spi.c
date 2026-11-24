@@ -58,11 +58,11 @@ typedef enum {
  * @note 句柄本身 const，可变部分全在这里：中断写忙标志、任务登记回调、
  *       当前分频。presc_init 是 CubeMX 给的基准，presc_code 是当前生效值，
  *       两者必须分开存——设备改过速率之后当前值已经不是基准值了。
- *       done / ctx 用 volatile：任务写、中断读，中间没有同步动作。
+ *       done / wait 用 volatile：任务写、中断读，中间没有同步动作。
  */
 typedef struct {
     bsp_spi_done_t volatile done;      /* 本次传输的完成回调，空闲为 NULL */
-    void *volatile     ctx;            /* 回调上下文，与 done 同生同灭 */
+    const bsp_spi_wait_t *volatile wait; /* 接收方描述，与 done 同生同灭 */
     volatile uint8_t  busy;            /* 1: 异步传输尚未收尾 */
     volatile uint8_t  initialized;     /* 1: 已完成初始化 */
     uint8_t           tx_mode;         /* 探测出的发送方式，见 BSP_SPI_CAP_* */
@@ -99,7 +99,7 @@ typedef struct {
 /** @brief SPI1 的运行块，仅本文件可见 */
 static bsp_spi_rt_t bsp_spi1_rt = {
     .done        = NULL,
-    .ctx         = NULL,
+    .wait        = NULL,
     .busy        = 0U,
     .initialized = 0U,
     .tx_mode     = 0U,
@@ -368,7 +368,7 @@ bsp_spi_status_t BSP_SPI_Abort(const bsp_spi_t *bus)
     }
 
     bus->rt->done = NULL;
-    bus->rt->ctx  = NULL;
+    bus->rt->wait = NULL;
     bus->rt->busy = 0U;
 
     hspi = (SPI_HandleTypeDef *)bus->hal;
@@ -448,7 +448,7 @@ static bsp_spi_status_t BSP_SPI_Prepare(const bsp_spi_t *bus,
  * @param msg        待搬运的命令（方向、缓冲、长度）
  * @param timeout_ms 超时预算，只对阻塞方式生效
  * @param done       异步完成回调，可为 NULL
- * @param ctx        回调上下文，原样传回 done
+ * @param wait       接收方描述，原样传给 done
  * @retval BSP_SPI_OK: 异步档已启动（尚未完成）；阻塞档已完成且成功
  * @retval 其他状态码: 启动失败或阻塞档的最终结果
  * @note 只做"登记 + 启动"两件事：异步档先登记再启动，完成中断可能紧跟着
@@ -458,20 +458,21 @@ static bsp_spi_status_t BSP_SPI_Prepare(const bsp_spi_t *bus,
 static bsp_spi_status_t BSP_SPI_StartOnce(const bsp_spi_t *bus, uint8_t mode,
                                           const bsp_spi_msg_t *msg,
                                           uint32_t timeout_ms,
-                                          bsp_spi_done_t done, void *ctx)
+                                          bsp_spi_done_t done,
+                                          const bsp_spi_wait_t *wait)
 {
     bsp_spi_rt_t     *rt = bus->rt;
     HAL_StatusTypeDef hal_status;
 
     if (mode == (uint8_t)BSP_SPI_CAP_BLOCKING) {
         rt->done = NULL;
-        rt->ctx  = NULL;
+        rt->wait = NULL;
         rt->busy = 0U;
         return BSP_SPI_RunBlocking(bus, msg, timeout_ms);
     }
 
     rt->done = done;
-    rt->ctx  = ctx;
+    rt->wait = wait;
     rt->busy = 1U;
 
     if (mode == (uint8_t)BSP_SPI_CAP_DMA) {
@@ -495,7 +496,7 @@ static bsp_spi_status_t BSP_SPI_StartOnce(const bsp_spi_t *bus, uint8_t mode,
  * @param len        传输字节数，不能为 0
  * @param timeout_ms 超时预算（毫秒），只对阻塞方式生效，0 视为 50 ms
  * @param done       异步完成回调，可为 NULL
- * @param ctx        回调上下文，原样传回 done
+ * @param wait       接收方描述，原样传给 done
  * @retval BSP_SPI_OK: 异步方式已启动（尚未完成）；阻塞方式已完成且成功
  * @retval BSP_SPI_ERR_PARAM: 句柄、长度或方向非法
  * @retval BSP_SPI_ERR_STATE: 驱动未初始化，或上一笔异步传输还没收尾
@@ -515,7 +516,8 @@ static bsp_spi_status_t BSP_SPI_StartOnce(const bsp_spi_t *bus, uint8_t mode,
 bsp_spi_status_t BSP_SPI_StartTransfer(const bsp_spi_t *bus,
                                        const uint8_t *tx, uint8_t *rx,
                                        uint16_t len, uint32_t timeout_ms,
-                                       bsp_spi_done_t done, void *ctx)
+                                       bsp_spi_done_t done,
+                                       const bsp_spi_wait_t *wait)
 {
     bsp_spi_rt_t     *rt;
     bsp_spi_msg_t     msg;
@@ -544,7 +546,7 @@ bsp_spi_status_t BSP_SPI_StartTransfer(const bsp_spi_t *bus,
 
     /* 启动失败向下退一档：DMA → 中断 → 阻塞 */
     while (mode >= (uint8_t)BSP_SPI_CAP_BLOCKING) {
-        status = BSP_SPI_StartOnce(bus, mode, &msg, timeout_ms, done, ctx);
+        status = BSP_SPI_StartOnce(bus, mode, &msg, timeout_ms, done, wait);
         if (status != BSP_SPI_ERR_HAL) {
             return status;
         }
@@ -570,15 +572,15 @@ static void BSP_SPI_CompleteFromISR(const bsp_spi_t *bus,
                                     bsp_spi_status_t result)
 {
     bsp_spi_rt_t   *rt   = bus->rt;
-    bsp_spi_done_t  done = rt->done;
-    void           *ctx  = rt->ctx;
+    bsp_spi_done_t        done = rt->done;
+    const bsp_spi_wait_t *wait = rt->wait;
 
     rt->busy = 0U;
     rt->done = NULL;
-    rt->ctx  = NULL;
+    rt->wait = NULL;
 
     if (done != NULL) {
-        done(ctx, result);
+        done(wait, result);
     }
 }
 
@@ -641,7 +643,7 @@ bsp_spi_status_t BSP_SPI_Init(void)
 
         /* 清零上一轮可能残留的运行块，再标记本路可用 */
         rt->done = NULL;
-        rt->ctx  = NULL;
+        rt->wait = NULL;
         rt->busy = 0U;
         rt->initialized = 1U;
     }

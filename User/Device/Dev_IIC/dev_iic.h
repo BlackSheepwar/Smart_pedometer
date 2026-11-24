@@ -14,6 +14,12 @@
  *       芯片侧的 DMA 启动、完成中断、外设复位都在 bsp_iic。换芯片只改
  *       bsp_iic 的实现，本层的接口不变。
  *
+ *       两种用法：
+ *         - 单笔：Dev_IIC_Write() / Read() / WriteReg() / ReadReg()，
+ *           各自完成"抢锁 → 换速 → 传输 → 放锁"；
+ *         - 会话：Select() 一次 → 任意多笔读写 → Deselect() 一次。
+ *           连续跟同一颗器件交换多组信息时用它，锁与换速只做一遍。
+ *
  *       设备实例在接入器件时登记：一颗从机器件一个实例，写在 .c 的移植
  *       段里。没有器件时不产生动作，接口仍然可用，接入后行为不变。
  */
@@ -80,6 +86,32 @@ extern const dev_iic_t dev_iic1;
 dev_iic_status_t Dev_IIC_Init(const dev_iic_t *bus);
 
 /**
+ * @brief 取得总线所有权并切换到本设备的总线时钟（会话开始）
+ * @param dev        设备句柄，不能为 NULL
+ * @param timeout_ms 排队等锁的预算（ms），0 表示用默认 50 ms
+ * @retval DEV_IIC_OK: 已持有总线，总线时钟已切到本设备
+ * @retval DEV_IIC_ERR_PARAM: 句柄或总线为空
+ * @retval DEV_IIC_ERR_STATE: 未初始化、调度器未运行，或本任务已在会话中
+ * @retval DEV_IIC_ERR_TIMEOUT: 等锁超时
+ * @retval DEV_IIC_ERR_NACK/ERR_BUS/ERR_HAL: 换速失败
+ *
+ * @note 与 Deselect() 成对，任务上下文调用。会话期间调用别的设备的读写
+ *       会被拒绝（那次会话的速率是按前一台设的）；同一任务重复 Select
+ *       同样被拒绝，不会重入。
+ */
+dev_iic_status_t Dev_IIC_Select(const dev_iic_dev_t *dev, uint32_t timeout_ms);
+
+/**
+ * @brief 归还总线（会话结束）
+ * @param dev 设备句柄，不能为 NULL
+ * @retval 无
+ *
+ * @note 只对"本任务、本设备"开的会话生效，其余情况直接返回——不会放掉
+ *       别人的锁，也不会抬错设备。必须与 Select() 成对，任何出口都要调。
+ */
+void Dev_IIC_Deselect(const dev_iic_dev_t *dev);
+
+/**
  * @brief 向从机直接写数据（RAW 模式，无寄存器子地址）
  * @param dev        设备句柄，不能为 NULL
  * @param data       发送缓冲区，不能为 NULL
@@ -92,7 +124,8 @@ dev_iic_status_t Dev_IIC_Init(const dev_iic_t *bus);
  * @retval DEV_IIC_ERR_NACK: 从机 NACK
  * @retval DEV_IIC_ERR_BUS: 总线错误
  * @retval DEV_IIC_ERR_HAL: HAL 报错
- * @note 任务上下文调用；同一任务的嵌套调用会被拒绝。
+ * @note 任务上下文调用。已在 Select() 开的会话里调用时只搬这一笔，
+ *       不再抢锁与换速。
  */
 dev_iic_status_t Dev_IIC_Write(const dev_iic_dev_t *dev,
                                const uint8_t *data, uint16_t len,
@@ -111,7 +144,8 @@ dev_iic_status_t Dev_IIC_Write(const dev_iic_dev_t *dev,
  * @retval DEV_IIC_ERR_NACK: 从机 NACK
  * @retval DEV_IIC_ERR_BUS: 总线错误
  * @retval DEV_IIC_ERR_HAL: HAL 报错
- * @note 任务上下文调用；同一任务的嵌套调用会被拒绝。
+ * @note 任务上下文调用。已在 Select() 开的会话里调用时只搬这一笔，
+ *       不再抢锁与换速。
  */
 dev_iic_status_t Dev_IIC_Read(const dev_iic_dev_t *dev,
                               uint8_t *data, uint16_t len,
@@ -132,6 +166,7 @@ dev_iic_status_t Dev_IIC_Read(const dev_iic_dev_t *dev,
  * @retval DEV_IIC_ERR_BUS: 总线错误
  * @retval DEV_IIC_ERR_HAL: HAL 报错
  * @note 子地址的写 + repeated START + 数据由一次 DMA 完成，中途不放弃总线。
+ *       已在 Select() 开的会话里调用时只搬这一笔，不再抢锁与换速。
  */
 dev_iic_status_t Dev_IIC_WriteReg(const dev_iic_dev_t *dev, uint16_t reg,
                                   const uint8_t *data, uint16_t len,
@@ -152,6 +187,7 @@ dev_iic_status_t Dev_IIC_WriteReg(const dev_iic_dev_t *dev, uint16_t reg,
  * @retval DEV_IIC_ERR_BUS: 总线错误
  * @retval DEV_IIC_ERR_HAL: HAL 报错
  * @note 子地址的写 + repeated START + 接收由一次 DMA 完成。
+ *       已在 Select() 开的会话里调用时只搬这一笔，不再抢锁与换速。
  */
 dev_iic_status_t Dev_IIC_ReadReg(const dev_iic_dev_t *dev, uint16_t reg,
                                  uint8_t *data, uint16_t len,

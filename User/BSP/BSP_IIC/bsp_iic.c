@@ -51,7 +51,7 @@
  */
 typedef struct {
     bsp_iic_done_t volatile done;      /* 本笔完成回调，空闲为 NULL */
-    void *volatile          ctx;       /* 回调上下文，与 done 同生共死 */
+    const bsp_iic_wait_t *volatile wait; /* 接收方描述，与 done 同生共死 */
     volatile uint8_t        busy;      /* 1: 有搬运未收尾 */
     volatile uint8_t        initialized; /* 1: 已完成初始化 */
     uint8_t                 tx_mode;   /* 发送方向探测出的搬运方式 */
@@ -287,17 +287,18 @@ static HAL_StatusTypeDef BSP_IIC_StartDma(const bsp_iic_t *bus,
  * @param mode       搬运方式，取 BSP_IIC_CAP_BLOCKING / _IT / _DMA
  * @param timeout_ms 仅阻塞方式使用的超时
  * @param done       异步方式的完成回调，阻塞方式忽略
- * @param ctx        回调上下文
+ * @param wait       接收方描述，原样传给 done
  * @retval BSP_IIC_OK: 异步方式已启动，或阻塞方式已搬完
  * @retval 其他: 启动失败，已复位外设，调用者可以退档重试
- * @note 只有异步两档需要登记 done/ctx/busy；阻塞档在函数里就搬完了，
+ * @note 只有异步两档需要登记 done/wait/busy；阻塞档在函数里就搬完了，
  *       登记了反而会让调用者误以为还要等通知。异步档启动失败时先复位
  *       再返回，所以不会留下"忙"的假状态。
  */
 static bsp_iic_status_t BSP_IIC_StartOnce(const bsp_iic_t *bus,
                                           const bsp_iic_msg_t *msg,
                                           uint8_t mode, uint32_t timeout_ms,
-                                          bsp_iic_done_t done, void *ctx)
+                                          bsp_iic_done_t done,
+                                          const bsp_iic_wait_t *wait)
 {
     bsp_iic_rt_t *rt = bus->rt;
     I2C_HandleTypeDef *hi2c = (I2C_HandleTypeDef *)bus->hal;
@@ -313,7 +314,7 @@ static bsp_iic_status_t BSP_IIC_StartOnce(const bsp_iic_t *bus,
     }
 
     rt->done = done;
-    rt->ctx  = ctx;
+    rt->wait = wait;
     rt->busy = 1U;
 
     if (mode == (uint8_t)BSP_IIC_CAP_IT) {
@@ -354,15 +355,15 @@ static void BSP_IIC_CompleteFromISR(const bsp_iic_t *bus,
                                     bsp_iic_status_t status)
 {
     bsp_iic_rt_t  *rt = bus->rt;
-    bsp_iic_done_t done = rt->done;
-    void          *ctx = rt->ctx;
+    bsp_iic_done_t        done = rt->done;
+    const bsp_iic_wait_t *wait = rt->wait;
 
     rt->done = NULL;
-    rt->ctx  = NULL;
+    rt->wait = NULL;
     rt->busy = 0U;
 
     if (done != NULL) {
-        done(ctx, status);
+        done(wait, status);
     }
 }
 
@@ -399,7 +400,7 @@ bsp_iic_status_t BSP_IIC_Init(void)
 
         rt = bus->rt;
         rt->done       = NULL;
-        rt->ctx        = NULL;
+        rt->wait       = NULL;
         rt->busy       = 0U;
         rt->clk_now    = hi2c->Init.ClockSpeed;
         rt->clk_init   = hi2c->Init.ClockSpeed;
@@ -464,7 +465,7 @@ bsp_iic_status_t BSP_IIC_SetSpeed(const bsp_iic_t *bus, uint32_t hz)
  * @param msg        传输命令，不能为 NULL；data 在 done 之前必须保持有效
  * @param timeout_ms 仅阻塞方式使用的超时（ms）；异步方式忽略
  * @param done       完成回调（中断 / DMA 方式用），可以为 NULL
- * @param ctx        回调上下文，原样回传
+ * @param wait       接收方描述，原样传给 done，原样回传
  * @retval BSP_IIC_OK: 阻塞方式已搬完；异步方式已交给外设（完成点只在 done）
  * @retval BSP_IIC_ERR_PARAM: 地址、方向、模式、长度或缓冲区非法
  * @retval BSP_IIC_ERR_STATE: 未初始化，或上一笔还没收尾
@@ -478,7 +479,8 @@ bsp_iic_status_t BSP_IIC_SetSpeed(const bsp_iic_t *bus, uint32_t hz)
 bsp_iic_status_t BSP_IIC_StartTransfer(const bsp_iic_t *bus,
                                        const bsp_iic_msg_t *msg,
                                        uint32_t timeout_ms,
-                                       bsp_iic_done_t done, void *ctx)
+                                       bsp_iic_done_t done,
+                                       const bsp_iic_wait_t *wait)
 {
     bsp_iic_rt_t *rt;
     uint8_t mode;
@@ -523,7 +525,7 @@ bsp_iic_status_t BSP_IIC_StartTransfer(const bsp_iic_t *bus,
     }
 
     for (;;) {
-        status = BSP_IIC_StartOnce(bus, msg, mode, timeout_ms, done, ctx);
+        status = BSP_IIC_StartOnce(bus, msg, mode, timeout_ms, done, wait);
         if (status == BSP_IIC_OK) {
             return BSP_IIC_OK;
         }
@@ -573,7 +575,7 @@ bsp_iic_status_t BSP_IIC_Abort(const bsp_iic_t *bus)
     }
 
     rt->done = NULL;
-    rt->ctx  = NULL;
+    rt->wait = NULL;
     rt->busy = 0U;
 
     hi2c = (I2C_HandleTypeDef *)bus->hal;
