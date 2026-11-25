@@ -5,11 +5,15 @@
  * @date 2026-11-10
  *
  * @note 目录分工（这是本模块存在的理由）：
- *         User/APP/UI_Export/      LVGL Pro 的导出物，纯生成，勿手改；
- *                                  里面全是 lv_obj_t / lv_subject_t / lv_font_t
- *                                  这些类型，没有一行属于本工程。
- *         User/APP/APP_UI_Port/    ★本文件★ 手写适配层，全工程唯一
- *                                  include lvgl_ui_project.h 的地方。
+ *         User/APP/APP_UI_Package/            ★最终产物★ 一个文件夹装完整界面；
+ *                                         根下是 LVGL Pro 的导出物，纯生成，
+ *                                         勿手改，里面全是 lv_obj_t /
+ *                                         lv_subject_t / lv_font_t。
+ *         User/APP/APP_UI_Package/APP_UI_Port/
+ *                                         ★本文件★ 手写适配层，全工程唯一
+ *                                         include lvgl_ui_project.h 的地方。
+ *                                         导出的界面代码与本层一起打包，
+ *                                         复制一个目录就能换整套 UI。
  *
  *       为什么要有这条边界：
  *       若让 APP_Screen 直接 include 生成代码的头，那些 lv_ 类型就会顺着
@@ -42,12 +46,13 @@
  *       一调用就会覆盖。APP_Screen 里没有 setter 被调用过的数据项会被跳过
  *       （见那边的"未设置"哨兵），所以这里不需要额外判断。
  *
- *       重新导出后必须重做的手改（只剩两处）：
+ *       重新导出后要核对的两处：
  *         1. lv_conf.h 的 LV_USE_OBJ_NAME 必须为 1（已写在 lv_conf.h，不会丢）
- *         2. lvgl_ui_project_gen.c 的两段 Translations 要删掉（示例翻译表 +
- *            lv_translation_add_static 调用），否则必须打开 LV_USE_TRANSLATION
+ *         2. 工程里的 translations.xml 已移除（改名为 .unused-template），
+ *            重新导出不应再出现 Translations 段；若又出现，说明工程里还有
+ *            翻译文件，先删工程侧再导出，不要手删生成代码
  *       字模是重新导出的产物：gen.c 会给"项目里定义过的每一套字体"生成
- *       extern 与赋值，所以 UI_Export/fonts/ 下的 .c 必须与导出一致地全量
+ *       extern 与赋值，所以 APP_UI_Package/fonts/ 下的 .c 必须与导出一致地全量
  *       放进 CMake（见 User/APP/CMakeLists.txt 的说明）。
  *
  *       尺寸一致性：UI 导出尺寸、Dev_ST7789 的 width/x_offset、
@@ -93,6 +98,13 @@
  *       本层不做换算，直接写 0~100 的百分比。
  */
 #define APP_UI_BATT_SEGMENTS    5u
+
+/**
+ * @brief 速度上限，0.1 km/h
+ * @note 主读数 68px 的宽度预算约 3 位整数 + 1 位小数（"120.0"）；
+ *       超过这个值的输入按上限显示，避免文本越出面板。
+ */
+#define APP_UI_SPEED_MAX_D10    1200u
 
 /*==============================================================================
  * 函数声明
@@ -151,12 +163,14 @@ void App_UI_Set_Date(uint16_t year, uint8_t month, uint8_t day);
 
 /**
  * @brief 写速度
- * @param speed_d10 速度 × 10（即 0.1 km/h 为单位），如 248 = 24.8 km/h
+ * @param speed_d10 速度 × 10（即 0.1 km/h 为单位），如 248 = 24.8 km/h；
+ *                  超过 APP_UI_SPEED_MAX_D10 时按上限显示
  * @retval 无
  * @note 一次写两个 subject：
  *         subject_speed     整数 km/h，只喂 12 格刻度条（量程 0~120）；
  *         subject_speed_txt "24.8"，喂 68px 主读数。
  *       之所以要两份：界面里不做除法取余，小数由本层格式化。
+ *       两份都按同一个夹取后的值写，不会出现"刻度 120、读数 6553.5"。
  */
 void App_UI_Set_Speed(uint16_t speed_d10);
 
@@ -182,3 +196,4 @@ void App_UI_Set_Position(int32_t lat_e6, int32_t lon_e6);
 void App_UI_Set_Satellites(uint8_t count);
 
 #endif /* __APP_UI_PORT_H__ */
+

@@ -7,12 +7,13 @@
 #   一个模块一件事，目录名 = 模块名，文件名 = 模块名小写：
 #     APP_Key_Cmd/app_key_cmd.c      按键命令表与处理函数（"哪个键做什么"）
 #     APP_Screen/app_screen.c        界面生命周期、模式切换与数据同步
-#     APP_UI_Port/app_ui_port.c      导出代码的本地适配层（唯一手写边界）
+#     APP_UI_Package/APP_UI_Port/app_ui_port.c
+#                                     导出代码的本地适配层（唯一手写边界）
 #
 #   例外只有一个，且是有意的：
-#     UI_Export/                     LVGL Pro 的导出物，纯生成，勿手改
-#   它没有 APP_ 前缀，因为它不是一个模块——里面没有一行手写代码，
-#   目录内容由编辑器整体覆盖，所以不参与本工程的命名与 -Werror 治理。
+#     APP_UI_Package/                   LVGL Pro 的导出物 + APP_UI_Port
+#   外层没有 APP_ 前缀，因为它不是一个模块：导出文件由编辑器整体覆盖，
+#   只有 APP_UI_Port 子目录是手写的，所以不参与本工程的命名与 -Werror 治理。
 #
 #   依赖方向单向：app_key_cmd → svc_key_cmd / app_screen，
 #   app_screen → app_ui_port。
@@ -53,31 +54,31 @@
 #     几十 KB 的 .rodata 留在 FLASH 里——1 MB 装得下，也不影响 RAM。
 # -----------------------------------------------------------------------------
 set(UI_EXPORT_SOURCES
-    UI_Export/lvgl_ui_project.c
-    UI_Export/lvgl_ui_project_gen.c
-    UI_Export/screens/screen_hud_gen.c
+    APP_UI_Package/lvgl_ui_project.c
+    APP_UI_Package/lvgl_ui_project_gen.c
+    APP_UI_Package/screens/screen_hud_gen.c
     # 数字字模：12/14/16 通用，20 日期·刻度·颗数，28/36/44 旧档，30 经纬度，
     # 68 速度主读数（2.4 寸 167 PPI 下的最小可读字号）
-    UI_Export/fonts/font_12_data.c
-    UI_Export/fonts/font_14_data.c
-    UI_Export/fonts/font_16_data.c
-    UI_Export/fonts/font_num_20_data.c
-    UI_Export/fonts/font_num_28_data.c
-    UI_Export/fonts/font_num_30_data.c
-    UI_Export/fonts/font_num_36_data.c
-    UI_Export/fonts/font_num_44_data.c
-    UI_Export/fonts/font_num_68_data.c
+    APP_UI_Package/fonts/font_12_data.c
+    APP_UI_Package/fonts/font_14_data.c
+    APP_UI_Package/fonts/font_16_data.c
+    APP_UI_Package/fonts/font_num_20_data.c
+    APP_UI_Package/fonts/font_num_28_data.c
+    APP_UI_Package/fonts/font_num_30_data.c
+    APP_UI_Package/fonts/font_num_36_data.c
+    APP_UI_Package/fonts/font_num_44_data.c
+    APP_UI_Package/fonts/font_num_68_data.c
     # 汉字字模：16/18/22 各有独立字库，只含界面用到的那几十个字
-    UI_Export/fonts/font_cjk_16_data.c
-    UI_Export/fonts/font_cjk_18_data.c
-    UI_Export/fonts/font_cjk_22_data.c
+    APP_UI_Package/fonts/font_cjk_16_data.c
+    APP_UI_Package/fonts/font_cjk_18_data.c
+    APP_UI_Package/fonts/font_cjk_22_data.c
 )
 
 add_library(ui_export STATIC ${UI_EXPORT_SOURCES})
 # PUBLIC 是给 app_ui_port 用的：它要 include lvgl_ui_project.h。
 # app_ui_port 链本库用的是 PRIVATE，所以这层符号不会继续往上冒。
 target_include_directories(ui_export
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/UI_Export
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/APP_UI_Package
 )
 # PUBLIC 而不是 PRIVATE：本库的公开头（lvgl_ui_project_gen.h）自己就
 # include 了 lvgl/lvgl.h，用它的代码必须同时拿到 lvgl 的 include 目录。
@@ -108,10 +109,10 @@ target_compile_definitions(ui_export PRIVATE UI_SUBJECT_STRING_LENGTH=24)
 #   正是为了这一点：同一个 target 内没法给部分源文件加不同的编译选项。
 # -----------------------------------------------------------------------------
 add_library(app_ui_port STATIC
-    APP_UI_Port/app_ui_port.c
+    APP_UI_Package/APP_UI_Port/app_ui_port.c
 )
 target_include_directories(app_ui_port
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/APP_UI_Port
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/APP_UI_Package/APP_UI_Port
 )
 target_link_libraries(app_ui_port
     PRIVATE ui_export
@@ -146,9 +147,9 @@ target_compile_options(app_key_cmd PRIVATE ${USER_WARN_FLAGS})
 # -----------------------------------------------------------------------------
 # app_screen：界面生命周期、模式切换与数据同步
 #   头文件不出现 lv_obj_t，也不出现任何 lv_ 类型：界面符号被
-#   APP_UI_Port/app_ui_port.h 挡在下面，所以 lvgl 连 PRIVATE 都不必写在这里
+#   APP_UI_Package/APP_UI_Port/app_ui_port.h 挡在下面，所以 lvgl 连 PRIVATE 都不必写在这里
 #   ——app_screen.c 一行 lv_ 都没有。这是"界面实现可整体替换"
-#   的结构保证：换一个 UI 只改 UI_Export 与 APP_UI_Port，本文件不动。
+#   的结构保证：换一个 UI 只改 APP_UI_Package 里的导出物与 APP_UI_Port，本文件不动。
 # -----------------------------------------------------------------------------
 add_library(app_screen STATIC
     APP_Screen/app_screen.c

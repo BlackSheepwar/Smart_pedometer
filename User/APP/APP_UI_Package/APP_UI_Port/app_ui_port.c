@@ -5,11 +5,12 @@
  * @date 2026-11-10
  *
  * @note 本文件是本工程唯一直接引用生成代码符号的地方（screen_hud、
- *       subject_*、lvgl_ui_project_init）。生成代码在 ../UI_Export/，
- *       两者是并列目录：UI_Export 只被编辑器整体覆盖，本文件从不被覆盖。
+ *       subject_*、lvgl_ui_project_init）。生成代码在 APP_UI_Package 根下，
+ *       本文件在 APP_UI_Package/APP_UI_Port/ 子目录：导出物只被编辑器整体覆盖，
+ *       本文件从不被覆盖，两者装在一个目录里整体交付。
  *       其余文件一律只见 app_ui_port.h，所以重新导出 UI 时受影响的
- *       就只剩这里，而这里本身不需要改——只需重做头文件顶部列出的那两处
- *       （lv_conf 开关、删翻译段）。
+ *       就只剩这里，而这里本身不需要改——只需核对 lv_conf 的
+ *       LV_USE_OBJ_NAME，翻译文件已从工程侧移除。
  *
  *       所有函数都必须在 LVGL 线程（Task_LVGL）里调用，理由见头文件。
  *
@@ -169,8 +170,8 @@ void App_UI_Set_Date(uint16_t year, uint8_t month, uint8_t day)
  * @retval 无
  * @note 两个 subject 一次写完，中间不会插进一次渲染，所以不会出现
  *       "大数字已经是 24.8、刻度条还是旧值"的一帧。
- *       刻度条的量程是 0~120（导出时写死的），超出的速度会被夹住，
- *       但主读数照实显示——120 以上刻度条满格本来也是正确表现。
+ *       先夹到 APP_UI_SPEED_MAX_D10（120.0 km/h）：刻度条量程是 0~120，
+ *       主读数 68px 也只放得下 3 位整数，两者用同一个夹取后的值。
  */
 void App_UI_Set_Speed(uint16_t speed_d10)
 {
@@ -178,6 +179,10 @@ void App_UI_Set_Speed(uint16_t speed_d10)
 
     if (!s_ready) {
         return;
+    }
+
+    if (speed_d10 > APP_UI_SPEED_MAX_D10) {
+        speed_d10 = APP_UI_SPEED_MAX_D10;
     }
 
     lv_subject_set_int(subject_speed, (int32_t)(speed_d10 / 10u));
